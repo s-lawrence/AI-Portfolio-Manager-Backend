@@ -1,0 +1,147 @@
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { ZodError } from "zod";
+
+import { env } from "../config/env";
+import { type ErrorEnvelope } from "./response";
+
+export class ApiError extends Error {
+  readonly statusCode: number;
+  readonly code: string;
+  readonly details?: unknown;
+
+  constructor(
+    statusCode: number,
+    code: string,
+    message: string,
+    details?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.statusCode = statusCode;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function badRequest(message: string, details?: unknown): ApiError {
+  return new ApiError(400, "BAD_REQUEST", message, details);
+}
+
+export function notFound(message: string): ApiError {
+  return new ApiError(404, "NOT_FOUND", message);
+}
+
+export function conflict(message: string): ApiError {
+  return new ApiError(409, "CONFLICT", message);
+}
+
+export function internalError(message: string): ApiError {
+  return new ApiError(500, "INTERNAL_ERROR", message);
+}
+
+export function mapKnownError(error: unknown): Error {
+  if (error instanceof ApiError || error instanceof ZodError) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    const message = error.message;
+
+    if (/not found/i.test(message)) {
+      return notFound(message);
+    }
+
+    if (/already exists|duplicate|unique/i.test(message)) {
+      return conflict(message);
+    }
+
+    if (/required|must be|invalid|cannot|does not match/i.test(message)) {
+      return badRequest(message);
+    }
+
+    return error;
+  }
+
+  return internalError("An unexpected error occurred.");
+}
+
+export async function runService<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw mapKnownError(error);
+  }
+}
+
+function logError(request: FastifyRequest, logger: FastifyBaseLogger, error: unknown): void {
+  if (logger && logger !== request.log) {
+    logger.error(error);
+    return;
+  }
+
+  request.log.error(error);
+}
+
+export function registerApiErrorHandler(app: FastifyInstance): void {
+  app.setErrorHandler(
+    (error: unknown, request: FastifyRequest, reply: FastifyReply) => {
+      const mapped = mapKnownError(error);
+
+      if (mapped instanceof ZodError) {
+        const payload: ErrorEnvelope = {
+          success: false,
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "Invalid request payload.",
+            details: mapped.flatten(),
+          },
+        };
+
+        reply.status(400).send(payload);
+        return;
+      }
+
+      if (mapped instanceof ApiError) {
+        const payload: ErrorEnvelope = {
+          success: false,
+          error: {
+            code: mapped.code,
+            message: mapped.message,
+            details: mapped.details,
+          },
+        };
+
+        if (mapped.statusCode >= 500) {
+          logError(request, app.log, mapped);
+        }
+
+        reply.status(mapped.statusCode).send(payload);
+        return;
+      }
+
+      const message =
+        env.NODE_ENV === "production"
+          ? "Internal server error."
+          : mapped instanceof Error
+            ? mapped.message
+            : "Internal server error.";
+
+      const payload: ErrorEnvelope = {
+        success: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message,
+          details:
+            env.NODE_ENV === "production"
+              ? undefined
+              : mapped instanceof Error
+                ? { stack: mapped.stack }
+                : undefined,
+        },
+      };
+
+      logError(request, app.log, mapped);
+      reply.status(500).send(payload);
+    },
+  );
+}

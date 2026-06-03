@@ -1,0 +1,450 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum HoldingStatus {
+  OWNED
+  WATCHLIST
+}
+
+enum Recommendation {
+  BUY
+  HOLD
+  SELL
+  WATCH
+}
+
+enum Sentiment {
+  BULLISH
+  NEUTRAL
+  BEARISH
+  MIXED
+}
+
+enum TrendDirection {
+  STRONG_UPTREND
+  UPTREND
+  SIDEWAYS
+  DOWNTREND
+  STRONG_DOWNTREND
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertSeverity {
+  INFO
+  WATCH
+  IMPORTANT
+  CRITICAL
+}
+
+enum PredictionHorizon {
+  ONE_DAY
+  ONE_WEEK
+  ONE_MONTH
+}
+
+enum PredictionDirection {
+  UP
+  DOWN
+  FLAT
+}
+
+model User {
+  id         String          @id @default(cuid())
+  email      String          @unique
+  name       String?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  preference UserPreference?
+  portfolios Portfolio[]
+  alerts     Alert[]
+}
+
+model UserPreference {
+  id                     String    @id @default(cuid())
+  userId                 String    @unique
+  riskTolerance          RiskLevel @default(MEDIUM)
+  preferredHoldingPeriod String?
+  maxPositionPercent     Float?
+  maxSectorPercent       Float?
+  prefersDividends       Boolean   @default(false)
+  prefersGrowth          Boolean   @default(true)
+  prefersValue           Boolean   @default(false)
+  notes                  String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Portfolio {
+  id           String             @id @default(cuid())
+  userId       String
+  name         String
+  description  String?
+  baseCurrency String             @default("USD")
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  holdings     Holding[]
+  summaries    PortfolioSummary[]
+
+  @@index([userId])
+}
+
+model Holding {
+  id               String       @id @default(cuid())
+  portfolioId      String
+  stockId          String
+  status           HoldingStatus @default(WATCHLIST)
+  shares           Float?
+  averageCost      Float?
+  targetAllocation Float?
+  thesis           String?
+  exitCriteria     String?
+  userNotes        String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  portfolio        Portfolio      @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  stock            Stock          @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  aiReports        AIReport[]
+  predictions      Prediction[]
+
+  @@unique([portfolioId, stockId])
+  @@index([portfolioId])
+  @@index([stockId])
+}
+
+model Stock {
+  id                 String               @id @default(cuid())
+  ticker             String               @unique
+  companyName        String?
+  exchange           String?
+  sector             String?
+  industry           String?
+  country            String?
+  currency           String?
+  assetType          String?              @default("EQUITY")
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  holdings           Holding[]
+  priceSnapshots     PriceSnapshot[]
+  technicalSnapshots TechnicalSnapshot[]
+  fundamentalSnapshots FundamentalSnapshot[]
+  newsArticles       NewsArticle[]
+  earningsEvents     EarningsEvent[]
+  aiReports          AIReport[]
+  predictions        Prediction[]
+  alerts             Alert[]
+
+  @@index([ticker])
+  @@index([sector])
+}
+
+model PriceSnapshot {
+  id            String   @id @default(cuid())
+  stockId       String
+  price         Float
+  open          Float?
+  high          Float?
+  low           Float?
+  close         Float?
+  previousClose Float?
+  volume        BigInt?
+  marketCap     BigInt?
+  changePercent Float?
+  capturedAt    DateTime
+  createdAt     DateTime @default(now())
+  stock         Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, capturedAt])
+  @@index([stockId])
+  @@index([capturedAt])
+}
+
+model TechnicalSnapshot {
+  id                      String         @id @default(cuid())
+  stockId                 String
+  sma5                    Float?
+  sma20                   Float?
+  sma50                   Float?
+  sma200                  Float?
+  rsi14                   Float?
+  macd                    Float?
+  macdSignal              Float?
+  macdHistogram           Float?
+  volume30DayAverage      Float?
+  volumeRelativeToAverage Float?
+  fiftyTwoWeekHigh        Float?
+  fiftyTwoWeekLow         Float?
+  distanceFrom52WeekHigh  Float?
+  distanceFrom52WeekLow   Float?
+  trendDirection          TrendDirection?
+  capturedAt              DateTime
+  createdAt               DateTime       @default(now())
+  stock                   Stock          @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, capturedAt])
+  @@index([stockId])
+  @@index([capturedAt])
+}
+
+model FundamentalSnapshot {
+  id               String   @id @default(cuid())
+  stockId          String
+  marketCap        BigInt?
+  peRatio          Float?
+  forwardPeRatio   Float?
+  pegRatio         Float?
+  priceToSales     Float?
+  priceToBook      Float?
+  evToEbitda       Float?
+  eps              Float?
+  revenueGrowth    Float?
+  grossMargin      Float?
+  operatingMargin  Float?
+  netMargin        Float?
+  debtToEquity     Float?
+  currentRatio     Float?
+  freeCashFlow     BigInt?
+  dividendYield    Float?
+  analystConsensus String?
+  source           String?
+  capturedAt       DateTime
+  createdAt        DateTime @default(now())
+  stock            Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, capturedAt])
+  @@index([stockId])
+  @@index([capturedAt])
+}
+
+model NewsArticle {
+  id                    String    @id @default(cuid())
+  stockId               String
+  headline              String
+  source                String?
+  author                String?
+  url                   String    @unique
+  publishedAt           DateTime
+  summary               String?
+  rawExcerpt            String?
+  sentiment             Sentiment?
+  sentimentScore        Float?
+  materialityScore      Float?
+  relevanceExplanation  String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  stock                 Stock     @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId])
+  @@index([publishedAt])
+}
+
+model EarningsEvent {
+  id               String   @id @default(cuid())
+  stockId          String
+  fiscalQuarter    String?
+  fiscalYear       Int?
+  earningsDate     DateTime?
+  earningsTime     String?
+  isDateConfirmed  Boolean  @default(false)
+  estimatedEps     Float?
+  reportedEps      Float?
+  epsSurprise      Float?
+  estimatedRevenue BigInt?
+  reportedRevenue  BigInt?
+  revenueSurprise  Float?
+  guidanceSummary  String?
+  earningsCallUrl  String?
+  transcriptUrl    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  stock            Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId])
+}
+
+model MacroEvent {
+  id               String   @id @default(cuid())
+  title            String
+  category         String?
+  region           String?
+  description      String?
+  source           String?
+  url              String?
+  publishedAt      DateTime?
+  severityScore    Float?
+  affectedSectors  String[]
+  affectedTickers  String[]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([publishedAt])
+}
+
+model AIReport {
+  id                              String         @id @default(cuid())
+  stockId                         String
+  holdingId                       String?
+  reportDate                      DateTime
+  recommendation                  Recommendation
+  sentiment                       Sentiment
+  confidenceScore                 Float
+  riskScore                       Float
+  riskLevel                       RiskLevel
+  currentPrice                    Float?
+  dailyChangePercent              Float?
+  shortTermOutlook                String?
+  mediumTermOutlook               String?
+  longTermOutlook                 String?
+  keyTakeaway                     String
+  bullishFactors                  String[]
+  bearishFactors                  String[]
+  technicalSummary                String?
+  fundamentalSummary              String?
+  newsSummary                     String?
+  earningsSummary                 String?
+  macroGeopoliticalSummary        String?
+  whatChanged                     String?
+  whatWouldChangeRecommendation   String?
+  sourceReferences                Json?
+  modelName                       String?
+  promptVersion                   String?
+  rawModelOutput                  Json?
+  createdAt                       DateTime       @default(now())
+  updatedAt                       DateTime       @updatedAt
+  stock                           Stock          @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  holding                         Holding?       @relation(fields: [holdingId], references: [id], onDelete: SetNull)
+  predictions                     Prediction[]
+
+  @@index([stockId])
+  @@index([holdingId])
+  @@index([reportDate])
+  @@index([recommendation])
+  @@index([sentiment])
+}
+
+model PortfolioSummary {
+  id                        String    @id @default(cuid())
+  portfolioId               String
+  summaryDate               DateTime
+  overallSentiment          Sentiment
+  overallRiskScore          Float
+  overallRiskLevel          RiskLevel
+  bullishHoldingsCount      Int       @default(0)
+  bearishHoldingsCount      Int       @default(0)
+  neutralHoldingsCount      Int       @default(0)
+  topPositiveDevelopments   String[]
+  topNegativeDevelopments   String[]
+  highestRiskTicker         String?
+  highestConvictionTicker   String?
+  upcomingEarnings          Json?
+  concentrationRisks        String[]
+  suggestedWatchItems       String[]
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  portfolio                 Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@unique([portfolioId, summaryDate])
+  @@index([portfolioId])
+}
+
+model Prediction {
+  id                    String              @id @default(cuid())
+  stockId               String
+  holdingId             String?
+  aiReportId            String?
+  predictionDate        DateTime
+  horizon               PredictionHorizon
+  recommendation        Recommendation
+  direction             PredictionDirection
+  confidenceScore       Float
+  startingPrice         Float
+  targetLow             Float?
+  targetHigh            Float?
+  bullishRationale      String?
+  bearishRationale      String?
+  dataUsed              Json?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  stock                 Stock               @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  holding               Holding?            @relation(fields: [holdingId], references: [id], onDelete: SetNull)
+  aiReport              AIReport?           @relation(fields: [aiReportId], references: [id], onDelete: SetNull)
+  outcome               PredictionOutcome?
+
+  @@index([stockId])
+  @@index([holdingId])
+  @@index([aiReportId])
+  @@index([horizon])
+  @@index([predictionDate])
+}
+
+model PredictionOutcome {
+  id                      String      @id @default(cuid())
+  predictionId            String      @unique
+  outcomeDate             DateTime
+  endingPrice             Float
+  absoluteReturn          Float
+  percentageReturn        Float
+  wasDirectionallyCorrect Boolean
+  errorScore              Float?
+  calibrationScore        Float?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  prediction              Prediction  @relation(fields: [predictionId], references: [id], onDelete: Cascade)
+}
+
+model Alert {
+  id         String         @id @default(cuid())
+  userId     String
+  stockId    String?
+  title      String
+  message    String
+  severity   AlertSeverity
+  category   String?
+  isRead     Boolean        @default(false)
+  sourceType String?
+  sourceId   String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stock      Stock?         @relation(fields: [stockId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([stockId])
+  @@index([severity])
+  @@index([isRead])
+  @@index([createdAt])
+}
+
+model DataIngestionLog {
+  id             String   @id @default(cuid())
+  jobName        String
+  provider       String?
+  ticker         String?
+  status         String
+  startedAt      DateTime
+  finishedAt     DateTime?
+  errorMessage   String?
+  recordsCreated Int      @default(0)
+  recordsUpdated Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([jobName])
+  @@index([ticker])
+  @@index([status])
+  @@index([startedAt])
+}
