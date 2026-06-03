@@ -13,6 +13,7 @@ import {
   deletePortfolio,
   getPortfolioOverview,
   listUserPortfolios,
+  runPortfolioAnalysis,
   updatePortfolioDetails,
   generateMockPortfolioSummary,
 } from "../../services";
@@ -80,5 +81,12 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
     );
 
     reply.status(201).send(created(summary));
+  });
+
+  app.post("/:portfolioId/run-analysis", async (request, reply) => {
+    const params = portfolioIdParamsSchema.parse(request.params);
+
+    const result = await runService(() => runPortfolioAnalysis(params.portfolioId));
+    reply.send(ok(result));
   });
 }

@@ -11,3 +11,4 @@ export * from "./portfolio-summaries.service";
 export * from "./predictions.service";
 export * from "./alerts.service";
 export * from "./data-ingestion.service";
+export * from "./portfolio-analysis.service";

@@ -200,6 +200,37 @@ export interface TickerReportGenerationResult {
   predictions: Prediction[];
 }
 
+export interface PortfolioAnalysisTickerFailure {
+  ticker: string;
+  reason: string;
+}
+
+export interface PortfolioAnalysisReportSummary {
+  id: string;
+  ticker: string;
+  recommendation: Recommendation;
+  sentiment: Sentiment;
+  confidenceScore: number;
+  riskScore: number;
+}
+
+export interface PortfolioAnalysisResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  holdingsAnalyzed: number;
+  reportsCreated: number;
+  predictionsCreated: number;
+  failedTickers: PortfolioAnalysisTickerFailure[];
+  reports: PortfolioAnalysisReportSummary[];
+  portfolioSummary: {
+    id: string;
+    overallSentiment: Sentiment;
+    overallRiskScore: number;
+    overallRiskLevel: RiskLevel;
+  } | null;
+}
+
 export interface PredictionScoringSummary {
   asOfDate: Date;
   totalDue: number;

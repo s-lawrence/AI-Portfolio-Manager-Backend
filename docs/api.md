@@ -43,6 +43,23 @@ npm start
 - `/api/predictions`
 - `/api/alerts`
 
+## Development Helpers
+
+- `GET /api/dev/demo-context`
+
+Purpose:
+- Returns seeded demo user, demo portfolio, and holdings for local frontend development.
+
+Availability:
+- Development and test environments only.
+- Not available in production (`NODE_ENV=production`).
+
+Example:
+
+```bash
+curl http://localhost:4000/api/dev/demo-context
+```
+
 ## Example cURL Commands
 
 Create portfolio:
@@ -98,4 +115,10 @@ Generate portfolio summary:
 
 ```bash
 curl -X POST http://localhost:4000/api/portfolio-summaries/<PORTFOLIO_CUID>/generate
+```
+
+Run portfolio analysis orchestration:
+
+```bash
+curl -X POST http://localhost:4000/api/portfolios/<PORTFOLIO_CUID>/run-analysis
 ```
