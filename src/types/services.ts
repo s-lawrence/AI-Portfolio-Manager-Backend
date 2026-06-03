@@ -231,6 +231,21 @@ export interface PortfolioAnalysisResult {
   } | null;
 }
 
+export interface SeedDemoMarketDataOptions {
+  runAnalysis?: boolean;
+}
+
+export interface SeedDemoMarketDataResult {
+  demoPortfolioId: string;
+  tickersSeeded: string[];
+  priceSnapshotsCreated: number;
+  technicalSnapshotsCreated: number;
+  fundamentalSnapshotsCreated: number;
+  newsArticlesCreated: number;
+  earningsEventsCreated: number;
+  analysis?: PortfolioAnalysisResult;
+}
+
 export interface PredictionScoringSummary {
   asOfDate: Date;
   totalDue: number;

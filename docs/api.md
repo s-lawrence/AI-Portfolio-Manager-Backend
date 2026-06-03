@@ -46,9 +46,13 @@ npm start
 ## Development Helpers
 
 - `GET /api/dev/demo-context`
+- `POST /api/dev/seed-demo-market-data`
+- `POST /api/dev/seed-demo-market-data?runAnalysis=true`
 
 Purpose:
 - Returns seeded demo user, demo portfolio, and holdings for local frontend development.
+- Seeds deterministic local fake market/news/fundamental/earnings data for demo holdings.
+- Optionally runs portfolio analysis immediately when `runAnalysis=true`.
 
 Availability:
 - Development and test environments only.
@@ -58,6 +62,14 @@ Example:
 
 ```bash
 curl http://localhost:4000/api/dev/demo-context
+```
+
+```bash
+curl -X POST http://localhost:4000/api/dev/seed-demo-market-data
+```
+
+```bash
+curl -X POST "http://localhost:4000/api/dev/seed-demo-market-data?runAnalysis=true"
 ```
 
 ## Example cURL Commands

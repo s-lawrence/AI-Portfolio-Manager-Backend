@@ -3,6 +3,10 @@ import { z } from "zod";
 
 import { notFound, runService } from "../errors";
 import { ok } from "../response";
+import { booleanQuerySchema } from "../schemas/common.schemas";
+import {
+  seedDemoMarketData,
+} from "../../services";
 import {
   getPortfolioWithHoldings,
   listPortfoliosByUserId,
@@ -30,6 +34,10 @@ const demoContextResponseSchema = z.object({
       status: z.string(),
     }),
   ),
+});
+
+const seedDemoMarketDataQuerySchema = z.object({
+  runAnalysis: booleanQuerySchema.optional(),
 });
 
 export async function devRoutes(app: FastifyInstance): Promise<void> {
@@ -79,5 +87,20 @@ export async function devRoutes(app: FastifyInstance): Promise<void> {
     });
 
     return reply.send(ok(data));
+  });
+
+  app.post("/seed-demo-market-data", async (request, reply) => {
+    const query = seedDemoMarketDataQuerySchema.parse(request.query ?? {});
+    const body = seedDemoMarketDataQuerySchema.parse(
+      typeof request.body === "object" && request.body != null ? request.body : {},
+    );
+
+    const result = await runService(() =>
+      seedDemoMarketData({
+        runAnalysis: query.runAnalysis ?? body.runAnalysis ?? false,
+      }),
+    );
+
+    return reply.send(ok(result));
   });
 }
