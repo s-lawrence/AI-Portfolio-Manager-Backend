@@ -4,6 +4,7 @@ import {
   createEarningsEvent,
   getEarningsEventById,
   getNextEarningsEvent,
+  listEarningsEventsByStockId,
   updateEarningsEvent as updateEarningsEventRepository,
 } from "../repositories/earnings-events.repository";
 import { getPortfolioWithHoldings } from "../repositories/portfolios.repository";
@@ -21,6 +22,39 @@ export interface UpcomingPortfolioEarning {
   stockId: string;
   ticker: string;
   event: EarningsEvent;
+}
+
+function isUsefulUpcomingEvent(event: EarningsEvent): boolean {
+  if (!event.earningsDate) {
+    return false;
+  }
+
+  return (
+    event.fiscalQuarter != null ||
+    event.fiscalYear != null ||
+    event.estimatedEps != null ||
+    event.estimatedRevenue != null ||
+    event.reportedEps != null ||
+    event.reportedRevenue != null ||
+    event.isDateConfirmed === true
+  );
+}
+
+function pickNextUsefulUpcomingEvent(events: EarningsEvent[]): EarningsEvent | null {
+  const now = Date.now();
+
+  for (const event of events) {
+    const earningsTime = event.earningsDate?.getTime();
+    if (earningsTime == null || earningsTime < now) {
+      continue;
+    }
+
+    if (isUsefulUpcomingEvent(event)) {
+      return event;
+    }
+  }
+
+  return null;
 }
 
 function assertNonBlank(value: string, label: string): string {
@@ -89,7 +123,8 @@ export async function listUpcomingPortfolioEarnings(
 
   const upcomingEvents = await Promise.all(
     Array.from(uniqueStocks.entries()).map(async ([stockId, tickerCode]) => {
-      const event = await getNextEarningsEvent(stockId);
+      const events = await listEarningsEventsByStockId(stockId);
+      const event = pickNextUsefulUpcomingEvent(events);
       if (!event) {
         return null;
       }

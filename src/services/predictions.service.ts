@@ -9,18 +9,24 @@ import {
 import { getAIReportById } from "../repositories/ai-reports.repository";
 import {
   createPrediction,
+  findOpenPredictionByStockHoldingHorizonAndDay,
   getPredictionById,
-  listOpenPredictions as listOpenPredictionsRepository,
-  listPredictionsByStockId,
+  listPredictionsByStockIdWithStock,
   listPredictionsDueForOutcome as listPredictionsDueForOutcomeRepository,
+  listPredictionsDueForOutcomeWithStock,
+  listOpenPredictionsWithStock,
+  PredictionWithStock,
+  updatePrediction,
 } from "../repositories/predictions.repository";
 import {
   createPredictionOutcome,
   getPredictionOutcomeByPredictionId,
 } from "../repositories/prediction-outcomes.repository";
 import { listPriceSnapshotsByStockId } from "../repositories/price-snapshots.repository";
+import { addUtcDays, endOfUtcDay, startOfUtcDay } from "../types/common";
 import {
   PredictionCreationFromReportResult,
+  PredictionListItem,
   PredictionOutcomeCalculationInput,
   PredictionScoringSummary,
 } from "../types/services";
@@ -38,9 +44,7 @@ function assertNonBlank(value: string, label: string): string {
 }
 
 function addDays(date: Date, days: number): Date {
-  const result = new Date(date);
-  result.setDate(result.getDate() + days);
-  return result;
+  return addUtcDays(date, days);
 }
 
 function horizonToDays(horizon: PredictionHorizon): number {
@@ -94,6 +98,24 @@ function normalizeConfidence(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
+function horizonDueDate(
+  predictionDate: Date,
+  horizon: PredictionHorizon,
+): Date {
+  return addUtcDays(predictionDate, horizonToDays(horizon));
+}
+
+function toPredictionListItem(prediction: PredictionWithStock): PredictionListItem {
+  return {
+    ...prediction,
+    dueDate: horizonDueDate(prediction.predictionDate, prediction.horizon),
+    ticker: prediction.stock.ticker,
+    companyName: prediction.stock.companyName,
+    exchange: prediction.stock.exchange,
+    currency: prediction.stock.currency,
+  };
+}
+
 export type PredictionOutcomeComputationResult =
   | {
       status: "scored";
@@ -132,18 +154,15 @@ export async function createPredictionFromReport(
     throw new Error("AI report not found.");
   }
 
-  const existingPredictions = await listPredictionsByStockId(report.stockId, 500);
-  const existing = existingPredictions.find(
-    (prediction) =>
-      prediction.aiReportId === report.id && prediction.horizon === horizon,
+  const dayStartUtc = startOfUtcDay(report.reportDate);
+  const dayEndUtc = endOfUtcDay(report.reportDate);
+  const existing = await findOpenPredictionByStockHoldingHorizonAndDay(
+    report.stockId,
+    report.holdingId,
+    horizon,
+    dayStartUtc,
+    dayEndUtc,
   );
-
-  if (existing) {
-    return {
-      prediction: existing,
-      created: false,
-    };
-  }
 
   const latestSnapshot = await listPriceSnapshotsByStockId(report.stockId, 1);
   const startingPrice = report.currentPrice ?? latestSnapshot[0]?.price ?? null;
@@ -153,7 +172,8 @@ export async function createPredictionFromReport(
   }
 
   const targetBand = targetBandMultiplier(horizon);
-  const prediction = await createPrediction({
+
+  const basePayload = {
     stockId: report.stockId,
     holdingId: report.holdingId,
     aiReportId: report.id,
@@ -180,6 +200,19 @@ export async function createPredictionFromReport(
       source: "ai-report",
       reportId: report.id,
     },
+  };
+
+  if (existing) {
+    const prediction = await updatePrediction(existing.id, basePayload);
+
+    return {
+      prediction,
+      created: false,
+    };
+  }
+
+  const prediction = await createPrediction({
+    ...basePayload,
   });
 
   return {
@@ -188,14 +221,16 @@ export async function createPredictionFromReport(
   };
 }
 
-export async function listOpenPredictions(): Promise<Prediction[]> {
-  return listOpenPredictionsRepository();
+export async function listOpenPredictions(): Promise<PredictionListItem[]> {
+  const predictions = await listOpenPredictionsWithStock();
+  return predictions.map(toPredictionListItem);
 }
 
 export async function listPredictionsDueForOutcome(
   asOfDate: Date,
-): Promise<Prediction[]> {
-  return listPredictionsDueForOutcomeRepository(asOfDate);
+): Promise<PredictionListItem[]> {
+  const predictions = await listPredictionsDueForOutcomeWithStock(asOfDate);
+  return predictions.map(toPredictionListItem);
 }
 
 /**
@@ -326,11 +361,12 @@ export async function scoreDuePredictions(
 export async function listPredictionsForTicker(
   ticker: string,
   limit?: number,
-): Promise<Prediction[]> {
+): Promise<PredictionListItem[]> {
   const stock = await getStockProfile(ticker);
   if (!stock) {
     return [];
   }
 
-  return listPredictionsByStockId(stock.id, limit);
+  const predictions = await listPredictionsByStockIdWithStock(stock.id, limit);
+  return predictions.map(toPredictionListItem);
 }

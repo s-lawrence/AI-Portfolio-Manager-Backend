@@ -80,28 +80,37 @@ export interface ProviderFundamentalSnapshot {
 
 export interface ProviderEarningsEvent {
   ticker: string;
-  fiscalDate?: Date;
-  reportDate?: Date;
-  reportTime?: string;
+  fiscalQuarter?: string;
+  fiscalYear?: number;
+  earningsDate?: Date;
+  earningsTime?: string;
+  isDateConfirmed?: boolean;
   estimatedEps?: number;
-  actualEps?: number;
+  reportedEps?: number;
+  epsSurprise?: number;
   estimatedRevenue?: number;
-  actualRevenue?: number;
-  surprisePercent?: number;
-  isUpcoming?: boolean;
+  reportedRevenue?: number;
+  revenueSurprise?: number;
+  guidanceSummary?: string;
+  earningsCallUrl?: string;
+  transcriptUrl?: string;
+  source?: string;
 }
 
 export interface ProviderNewsArticle {
-  id?: string;
-  ticker?: string;
-  headline?: string;
+  ticker: string;
+  headline: string;
   summary?: string;
   source?: string;
-  url?: string;
-  publishedAt?: Date;
+  author?: string;
+  url: string;
+  publishedAt: Date;
+  rawExcerpt?: string;
   sentiment?: "positive" | "negative" | "neutral" | "mixed" | string;
   sentimentScore?: number;
-  relevanceScore?: number;
+  materialityScore?: number;
+  relevanceExplanation?: string;
+  isDemo?: false;
 }
 
 export interface ProviderMacroObservation {

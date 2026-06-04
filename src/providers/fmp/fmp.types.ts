@@ -115,3 +115,31 @@ export interface FmpCashFlowStatementItem {
   operatingCashFlow?: number;
   capitalExpenditure?: number;
 }
+
+export interface FmpEarningsReportItem {
+  symbol?: string;
+  date?: string;
+  epsActual?: number | null;
+  epsEstimated?: number | null;
+  revenueActual?: number | null;
+  revenueEstimated?: number | null;
+  lastUpdated?: string | null;
+}
+
+export interface FmpStockNewsItem {
+  symbol?: string;
+  ticker?: string;
+  title?: string;
+  headline?: string;
+  text?: string;
+  content?: string;
+  source?: string;
+  site?: string;
+  author?: string;
+  url?: string;
+  publishedDate?: string;
+  publishedAt?: string;
+  date?: string;
+  sentiment?: string;
+  sentimentScore?: number;
+}

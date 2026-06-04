@@ -29,6 +29,124 @@ function average(values: number[]): number | null {
   return total / values.length;
 }
 
+function normalizeText(value?: string | null): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim().toLowerCase();
+}
+
+const BULLISH_KEYWORDS = [
+  "beats",
+  "beat estimates",
+  "raises guidance",
+  "record revenue",
+  "strong demand",
+  "upgrade",
+  "outperform",
+  "surge",
+  "growth accelerates",
+];
+
+const BEARISH_KEYWORDS = [
+  "misses",
+  "missed estimates",
+  "cuts guidance",
+  "guidance cut",
+  "lawsuit",
+  "downgrade",
+  "investigation",
+  "decline",
+  "weak demand",
+  "warning",
+];
+
+export function classifyNewsSentiment(
+  headline: string,
+  summary?: string | null,
+): Sentiment {
+  const text = `${normalizeText(headline)} ${normalizeText(summary)}`;
+
+  const bullishMatches = BULLISH_KEYWORDS.filter((keyword) => text.includes(keyword)).length;
+  const bearishMatches = BEARISH_KEYWORDS.filter((keyword) => text.includes(keyword)).length;
+
+  if (bullishMatches > 0 && bearishMatches > 0) {
+    return Sentiment.MIXED;
+  }
+
+  if (bullishMatches > 0) {
+    return Sentiment.BULLISH;
+  }
+
+  if (bearishMatches > 0) {
+    return Sentiment.BEARISH;
+  }
+
+  return Sentiment.NEUTRAL;
+}
+
+export function estimateMateriality(
+  headline: string,
+  summary?: string | null,
+): number {
+  const text = `${normalizeText(headline)} ${normalizeText(summary)}`;
+
+  let score = 0.45;
+
+  const highImpactSignals = [
+    "earnings",
+    "guidance",
+    "acquisition",
+    "merger",
+    "lawsuit",
+    "investigation",
+    "sec",
+    "bankruptcy",
+    "record revenue",
+  ];
+
+  const mediumImpactSignals = [
+    "product launch",
+    "partnership",
+    "analyst",
+    "upgrade",
+    "downgrade",
+    "cost cuts",
+    "layoffs",
+  ];
+
+  if (highImpactSignals.some((signal) => text.includes(signal))) {
+    score += 0.3;
+  }
+
+  if (mediumImpactSignals.some((signal) => text.includes(signal))) {
+    score += 0.15;
+  }
+
+  if (text.includes("rumor") || text.includes("speculation")) {
+    score -= 0.1;
+  }
+
+  return Math.max(0, Math.min(1, Number(score.toFixed(3))));
+}
+
+export function isDemoNewsArticle(article: {
+  source?: string | null;
+  headline?: string | null;
+  url?: string | null;
+}): boolean {
+  const source = normalizeText(article.source);
+  const headline = normalizeText(article.headline);
+  const url = normalizeText(article.url);
+
+  return (
+    source.includes("demo") ||
+    headline.startsWith("[demo]") ||
+    url.includes("demo.local")
+  );
+}
+
 export async function recordNewsArticle(
   ticker: string,
   input: NewsAnalysisInput,

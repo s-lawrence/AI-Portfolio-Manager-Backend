@@ -1,7 +1,10 @@
-import { Prisma, Stock } from "@prisma/client";
+import { EarningsEvent, Prisma, Stock } from "@prisma/client";
 
 import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
-import { getNextEarningsEvent } from "../repositories/earnings-events.repository";
+import {
+  getNextEarningsEvent,
+  listEarningsEventsByStockId,
+} from "../repositories/earnings-events.repository";
 import { getLatestFundamentalSnapshot } from "../repositories/fundamental-snapshots.repository";
 import { listRecentNewsByTicker } from "../repositories/news-articles.repository";
 import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
@@ -14,6 +17,39 @@ import {
 import { getLatestTechnicalSnapshot } from "../repositories/technical-snapshots.repository";
 import { normalizeTickerOrThrow } from "../types/common";
 import { TickerDashboardSummary } from "../types/services";
+
+function isUsefulNextEarningsEvent(event: EarningsEvent | null): boolean {
+  if (!event || !event.earningsDate) {
+    return false;
+  }
+
+  return (
+    event.fiscalQuarter != null ||
+    event.fiscalYear != null ||
+    event.estimatedEps != null ||
+    event.estimatedRevenue != null ||
+    event.reportedEps != null ||
+    event.reportedRevenue != null ||
+    event.isDateConfirmed
+  );
+}
+
+function pickNextUsefulEarningsEvent(events: EarningsEvent[]): EarningsEvent | null {
+  const now = Date.now();
+
+  for (const event of events) {
+    const earningsTime = event.earningsDate?.getTime();
+    if (earningsTime == null || earningsTime < now) {
+      continue;
+    }
+
+    if (isUsefulNextEarningsEvent(event)) {
+      return event;
+    }
+  }
+
+  return null;
+}
 
 export type StockMetadataInput = Partial<
   Pick<
@@ -81,7 +117,8 @@ export async function getStockResearchBundle(
     latestTechnicalSnapshot,
     latestFundamentalSnapshot,
     recentNews,
-    nextEarningsEvent,
+    nextEarningsEventRaw,
+    earningsEvents,
     latestAIReport,
   ] = await Promise.all([
     getLatestPriceSnapshot(stock.id),
@@ -89,8 +126,13 @@ export async function getStockResearchBundle(
     getLatestFundamentalSnapshot(stock.id),
     listRecentNewsByTicker(stock.ticker, 20),
     getNextEarningsEvent(stock.id),
+    listEarningsEventsByStockId(stock.id),
     getLatestAIReportByStockId(stock.id),
   ]);
+
+  const nextEarningsEvent = isUsefulNextEarningsEvent(nextEarningsEventRaw)
+    ? nextEarningsEventRaw
+    : pickNextUsefulEarningsEvent(earningsEvents);
 
   return {
     stock,

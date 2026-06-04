@@ -158,6 +158,19 @@ function pickNumber(
   return undefined;
 }
 
+export function normalizePercentLike(value: number | undefined): number | null {
+  if (value === undefined || !Number.isFinite(value)) {
+    return null;
+  }
+
+  // FMP responses can be either decimal fractions (0.054) or percentage-form values (5.4).
+  if (Math.abs(value) >= 1) {
+    return value / 100;
+  }
+
+  return value;
+}
+
 function pickString(
   candidates: Array<{
     record: Record<string, unknown> | null;
@@ -293,18 +306,22 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       eps: pickNumber([
         { record: incomeStatement, fields: ["eps"] },
       ]),
-      revenueGrowth: pickNumber([
-        { record: financialGrowth, fields: ["revenueGrowth"] },
-      ]),
-      grossMargin: pickNumber([
-        { record: ratios, fields: ["grossProfitMargin"] },
-      ]),
-      operatingMargin: pickNumber([
-        { record: ratios, fields: ["operatingProfitMargin"] },
-      ]),
-      netMargin: pickNumber([
-        { record: ratios, fields: ["netProfitMargin"] },
-      ]),
+      revenueGrowth:
+        normalizePercentLike(
+          pickNumber([{ record: financialGrowth, fields: ["revenueGrowth"] }]),
+        ) ?? undefined,
+      grossMargin:
+        normalizePercentLike(
+          pickNumber([{ record: ratios, fields: ["grossProfitMargin"] }]),
+        ) ?? undefined,
+      operatingMargin:
+        normalizePercentLike(
+          pickNumber([{ record: ratios, fields: ["operatingProfitMargin"] }]),
+        ) ?? undefined,
+      netMargin:
+        normalizePercentLike(
+          pickNumber([{ record: ratios, fields: ["netProfitMargin"] }]),
+        ) ?? undefined,
       debtToEquity: pickNumber([
         { record: ratios, fields: ["debtEquityRatio"] },
         { record: keyMetrics, fields: ["debtToEquity"] },
@@ -316,10 +333,13 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       freeCashFlow: pickNumber([
         { record: cashFlowStatement, fields: ["freeCashFlow"] },
       ]),
-      dividendYield: pickNumber([
-        { record: ratios, fields: ["dividendYield"] },
-        { record: keyMetrics, fields: ["dividendYield"] },
-      ]),
+      dividendYield:
+        normalizePercentLike(
+          pickNumber([
+            { record: ratios, fields: ["dividendYield"] },
+            { record: keyMetrics, fields: ["dividendYield"] },
+          ]),
+        ) ?? undefined,
       analystConsensus: pickString([
         { record: profile, fields: ["analystRating", "consensus", "recommendation"] },
       ]),

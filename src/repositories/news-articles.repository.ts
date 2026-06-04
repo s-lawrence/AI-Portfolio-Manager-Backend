@@ -37,6 +37,15 @@ export async function getNewsArticleById(id: string): Promise<NewsArticle | null
   return prisma.newsArticle.findUnique({ where: { id } });
 }
 
+export async function getNewsArticleByUrl(url: string): Promise<NewsArticle | null> {
+  const normalizedUrl = url.trim();
+  if (!normalizedUrl) {
+    return null;
+  }
+
+  return prisma.newsArticle.findUnique({ where: { url: normalizedUrl } });
+}
+
 export async function listNewsByStockId(
   stockId: string,
   limit?: number,

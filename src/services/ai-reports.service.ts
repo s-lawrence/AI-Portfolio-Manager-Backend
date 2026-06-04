@@ -11,21 +11,31 @@ import {
 
 import {
   createAIReport,
+  findAIReportByStockHoldingAndReportDateDay,
   getLatestAIReportByStockId,
   listAIReportsByStockId,
+  updateAIReport,
 } from "../repositories/ai-reports.repository";
 import { getHoldingWithStock } from "../repositories/holdings.repository";
 import {
   createPrediction,
-  listPredictionsByStockId,
+  findOpenPredictionByStockHoldingHorizonAndDay,
+  updatePrediction,
 } from "../repositories/predictions.repository";
 import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
-import { normalizeListLimit, normalizeTickerOrThrow } from "../types/common";
 import {
+  endOfUtcDay,
+  normalizeListLimit,
+  normalizeTickerOrThrow,
+  startOfUtcDay,
+} from "../types/common";
+import { listRecentNewsByTicker } from "../repositories/news-articles.repository";
+import {
+  AIReportWithStockMetadata,
   DailyTickerReportInput,
   TickerReportGenerationResult,
 } from "../types/services";
-import { getNewsSentimentSummary } from "./news.service";
+import { getNewsSentimentSummary, isDemoNewsArticle } from "./news.service";
 import {
   ensureStockExists,
   getStockProfile,
@@ -43,6 +53,87 @@ function assertNonBlank(value: string, label: string): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatEstimatedRevenue(value: bigint | number | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+
+  const numeric = typeof value === "bigint" ? Number(value) : value;
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  if (numeric >= 1_000_000_000) {
+    return `${(numeric / 1_000_000_000).toFixed(2)}B`;
+  }
+
+  if (numeric >= 1_000_000) {
+    return `${(numeric / 1_000_000).toFixed(2)}M`;
+  }
+
+  return String(Math.round(numeric));
+}
+
+function buildEarningsSummary(nextEarningsEvent: {
+  earningsDate: Date | null;
+  estimatedEps: number | null;
+  estimatedRevenue: bigint | null;
+} | null): string {
+  if (!nextEarningsEvent?.earningsDate) {
+    return "Earnings data unavailable.";
+  }
+
+  const now = Date.now();
+  const earningsDate = nextEarningsEvent.earningsDate;
+  const daysUntilEarnings = Math.ceil(
+    (earningsDate.getTime() - now) / (1000 * 60 * 60 * 24),
+  );
+
+  const details: string[] = [`Next earnings on ${earningsDate.toISOString()}`];
+
+  if (nextEarningsEvent.estimatedEps != null) {
+    details.push(`est. EPS ${nextEarningsEvent.estimatedEps.toFixed(2)}`);
+  }
+
+  const estimatedRevenue = formatEstimatedRevenue(nextEarningsEvent.estimatedRevenue);
+  if (estimatedRevenue) {
+    details.push(`est. revenue ${estimatedRevenue}`);
+  }
+
+  if (daysUntilEarnings <= 7) {
+    details.push("Watch for elevated volatility into the event.");
+  } else {
+    details.push("Keep earnings timing on the watchlist for setup changes.");
+  }
+
+  return `${details.join(". ")}.`;
+}
+
+function quoteHeadline(headline: string): string {
+  return `"${headline.trim()}"`;
+}
+
+function buildNewsSummaryText(args: {
+  realHeadlines: string[];
+  demoHeadlines: string[];
+  totalArticles: number;
+}): string {
+  const realTop = args.realHeadlines.slice(0, 3);
+  const demoTop = args.demoHeadlines.slice(0, 3);
+
+  if (realTop.length > 0) {
+    const quoted = realTop.map(quoteHeadline).join("; ");
+    return `${args.totalArticles} recent articles analyzed. Top headlines: ${quoted}.`;
+  }
+
+  if (demoTop.length > 0) {
+    const quoted = demoTop.map(quoteHeadline).join("; ");
+    return `Only demo/local news is available right now. Demo headlines: ${quoted}.`;
+  }
+
+  return "No recent news available.";
 }
 
 function riskLevelFromScore(riskScore: number): RiskLevel {
@@ -94,6 +185,28 @@ function directionFromScore(score: number): PredictionDirection {
   }
 
   return PredictionDirection.FLAT;
+}
+
+function attachStockMetadataToReport(
+  report: AIReport,
+  stock: {
+    ticker: string;
+    companyName: string | null;
+    exchange: string | null;
+    currency: string | null;
+    sector: string | null;
+    industry: string | null;
+  },
+): AIReportWithStockMetadata {
+  return {
+    ...report,
+    ticker: stock.ticker,
+    companyName: stock.companyName,
+    exchange: stock.exchange,
+    currency: stock.currency,
+    sector: stock.sector,
+    industry: stock.industry,
+  };
 }
 
 function horizonMultiplier(horizon: PredictionHorizon): number {
@@ -150,25 +263,24 @@ async function createPredictionsForReport(
     throw new Error("Starting price must be greater than zero to create predictions.");
   }
 
-  const existingPredictions = await listPredictionsByStockId(report.stockId, 500);
-
   const horizons = [
     PredictionHorizon.ONE_DAY,
     PredictionHorizon.ONE_WEEK,
     PredictionHorizon.ONE_MONTH,
   ];
 
+  const dayStartUtc = startOfUtcDay(report.reportDate);
+  const dayEndUtc = endOfUtcDay(report.reportDate);
+
   const createdPredictions: Prediction[] = [];
   for (const horizon of horizons) {
-    const existing = existingPredictions.find(
-      (prediction) =>
-        prediction.aiReportId === report.id && prediction.horizon === horizon,
+    const existing = await findOpenPredictionByStockHoldingHorizonAndDay(
+      report.stockId,
+      report.holdingId,
+      horizon,
+      dayStartUtc,
+      dayEndUtc,
     );
-
-    if (existing) {
-      createdPredictions.push(existing);
-      continue;
-    }
 
     const targets = predictionTargets(
       startingPrice,
@@ -177,7 +289,7 @@ async function createPredictionsForReport(
       report.dailyChangePercent,
     );
 
-    const createdPrediction = await createPrediction({
+    const predictionPayload = {
       stockId: report.stockId,
       holdingId: report.holdingId,
       aiReportId: report.id,
@@ -201,12 +313,42 @@ async function createPredictionsForReport(
         source: "mock-deterministic-ai-report",
         reportId: report.id,
       },
+    };
+
+    if (existing) {
+      const updatedPrediction = await updatePrediction(existing.id, predictionPayload);
+      createdPredictions.push(updatedPrediction);
+      continue;
+    }
+
+    const createdPrediction = await createPrediction({
+      ...predictionPayload,
     });
 
     createdPredictions.push(createdPrediction);
   }
 
   return createdPredictions;
+}
+
+async function createOrUpdateDailyReport(
+  input: Parameters<typeof createAIReport>[0],
+): Promise<AIReport> {
+  const dayStartUtc = startOfUtcDay(input.reportDate as Date);
+  const dayEndUtc = endOfUtcDay(input.reportDate as Date);
+
+  const existing = await findAIReportByStockHoldingAndReportDateDay(
+    input.stockId,
+    input.holdingId ?? null,
+    dayStartUtc,
+    dayEndUtc,
+  );
+
+  if (!existing) {
+    return createAIReport(input);
+  }
+
+  return updateAIReport(existing.id, input);
 }
 
 export async function generateMockTickerReport(
@@ -237,6 +379,35 @@ export async function generateMockTickerReport(
   }
 
   const newsSummary = await getNewsSentimentSummary(normalizedTicker, 30);
+  const recentNews = await listRecentNewsByTicker(normalizedTicker, 30);
+  const realNews = recentNews.filter((article) => !isDemoNewsArticle(article));
+  const demoNews = recentNews.filter((article) => isDemoNewsArticle(article));
+
+  const realNewsSummary = {
+    bullishCount: 0,
+    bearishCount: 0,
+    neutralCount: 0,
+    mixedCount: 0,
+  };
+
+  if (realNews.length > 0) {
+    for (const article of realNews) {
+      if (article.sentiment === Sentiment.BULLISH) {
+        realNewsSummary.bullishCount += 1;
+      } else if (article.sentiment === Sentiment.BEARISH) {
+        realNewsSummary.bearishCount += 1;
+      } else if (article.sentiment === Sentiment.MIXED) {
+        realNewsSummary.mixedCount += 1;
+      } else {
+        realNewsSummary.neutralCount += 1;
+      }
+    }
+  }
+
+  const bullishNewsCount =
+    realNews.length > 0 ? realNewsSummary.bullishCount : newsSummary.bullishCount;
+  const bearishNewsCount =
+    realNews.length > 0 ? realNewsSummary.bearishCount : newsSummary.bearishCount;
 
   let score = 0;
   const bullishFactors: string[] = [];
@@ -416,10 +587,10 @@ export async function generateMockTickerReport(
   if (newsSummary.totalArticles > 0) {
     evidenceCount += 1;
 
-    if (newsSummary.bullishCount > newsSummary.bearishCount) {
+    if (bullishNewsCount > bearishNewsCount) {
       score += 1;
       bullishFactors.push("Recent news sentiment skews bullish.");
-    } else if (newsSummary.bearishCount > newsSummary.bullishCount) {
+    } else if (bearishNewsCount > bullishNewsCount) {
       score -= 1;
       bearishFactors.push("Recent news sentiment skews bearish.");
     }
@@ -482,9 +653,9 @@ export async function generateMockTickerReport(
     riskScore -= 8;
   }
 
-  if (newsSummary.bearishCount > newsSummary.bullishCount) {
+  if (bearishNewsCount > bullishNewsCount) {
     riskScore += 8;
-  } else if (newsSummary.bullishCount > newsSummary.bearishCount) {
+  } else if (bullishNewsCount > bearishNewsCount) {
     riskScore -= 4;
   }
 
@@ -541,10 +712,12 @@ export async function generateMockTickerReport(
       averageMaterialityScore: newsSummary.averageMaterialityScore,
     };
 
-  const report = await createAIReport({
+  const reportDate = new Date();
+
+  const report = await createOrUpdateDailyReport({
     stockId: stock.id,
     holdingId: holding?.id ?? null,
-    reportDate: new Date(),
+    reportDate,
     recommendation,
     sentiment,
     confidenceScore,
@@ -563,12 +736,12 @@ export async function generateMockTickerReport(
       : "Technical trend unavailable.",
     fundamentalSummary,
     newsSummary:
-      newsSummary.totalArticles > 0
-        ? `${newsSummary.totalArticles} recent articles analyzed.`
-        : "No recent news available.",
-    earningsSummary: bundle.nextEarningsEvent?.earningsDate
-      ? `Next earnings on ${bundle.nextEarningsEvent.earningsDate.toISOString()}.`
-      : "No upcoming earnings event found.",
+      buildNewsSummaryText({
+        totalArticles: newsSummary.totalArticles,
+        realHeadlines: realNews.map((article) => article.headline),
+        demoHeadlines: demoNews.map((article) => article.headline),
+      }),
+    earningsSummary: buildEarningsSummary(bundle.nextEarningsEvent),
     macroGeopoliticalSummary: "No external macro provider connected in this phase.",
     whatChanged: "Generated from deterministic local-data heuristic scoring.",
     whatWouldChangeRecommendation:
@@ -601,7 +774,7 @@ export async function generateMockTickerReport(
 
 export async function getLatestTickerReport(
   ticker: string,
-): Promise<AIReport | null> {
+): Promise<AIReportWithStockMetadata | null> {
   const normalizedTicker = normalizeTickerOrThrow(ticker);
   const stock = await getStockProfile(normalizedTicker);
 
@@ -609,13 +782,18 @@ export async function getLatestTickerReport(
     return null;
   }
 
-  return getLatestAIReportByStockId(stock.id);
+  const report = await getLatestAIReportByStockId(stock.id);
+  if (!report) {
+    return null;
+  }
+
+  return attachStockMetadataToReport(report, stock);
 }
 
 export async function listTickerReports(
   ticker: string,
   limit?: number,
-): Promise<AIReport[]> {
+): Promise<AIReportWithStockMetadata[]> {
   const normalizedTicker = normalizeTickerOrThrow(ticker);
   const stock = await getStockProfile(normalizedTicker);
 
@@ -623,7 +801,8 @@ export async function listTickerReports(
     return [];
   }
 
-  return listAIReportsByStockId(stock.id, normalizeListLimit(limit));
+  const reports = await listAIReportsByStockId(stock.id, normalizeListLimit(limit));
+  return reports.map((report) => attachStockMetadataToReport(report, stock));
 }
 
 export async function createTickerReportFromInput(
@@ -643,7 +822,7 @@ export async function createTickerReportFromInput(
 
   const keyTakeaway = assertNonBlank(input.keyTakeaway, "keyTakeaway");
 
-  const report = await createAIReport({
+  const report = await createOrUpdateDailyReport({
     stockId: stock.id,
     holdingId: input.holdingId ?? null,
     reportDate: input.reportDate ?? new Date(),

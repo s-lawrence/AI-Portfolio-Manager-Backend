@@ -7,8 +7,13 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  createTickerReportFromInput,
   generateMockTickerReport,
 } from "../../src/services/ai-reports.service";
+import { recordEarningsEvent } from "../../src/services/earnings.service";
+import { listAIReportsByStockId } from "../../src/repositories/ai-reports.repository";
+import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
+import { getStockProfile } from "../../src/services/stocks.service";
 import { recordFundamentalSnapshot } from "../../src/services/fundamentals.service";
 import { recordPriceSnapshot } from "../../src/services/market-data.service";
 import { recordNewsArticles } from "../../src/services/news.service";
@@ -245,5 +250,136 @@ describe("ai-reports.service", () => {
     expect(withoutFundamentals.report.fundamentalSummary.toLowerCase()).toContain(
       "missing",
     );
+  });
+
+  it("updates existing same-day report and reuses same-day prediction rows", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const first = await generateMockTickerReport(ticker);
+
+    await recordPriceSnapshot(ticker, {
+      price: 135,
+      previousClose: 120,
+      changePercent: 12.5,
+      capturedAt: new Date("2026-05-01T10:00:00.000Z"),
+    });
+
+    const second = await generateMockTickerReport(ticker);
+
+    expect(second.report.id).toBe(first.report.id);
+    expect(second.report.currentPrice).toBe(135);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const reports = await listAIReportsByStockId(stock!.id, 20);
+    expect(reports).toHaveLength(1);
+
+    const predictions = await listPredictionsByStockId(stock!.id, 20);
+    expect(predictions).toHaveLength(3);
+    expect(new Set(predictions.map((prediction) => prediction.horizon)).size).toBe(3);
+
+    for (const prediction of predictions) {
+      expect(prediction.aiReportId).toBe(second.report.id);
+    }
+  });
+
+  it("creates separate report rows when report dates are on different UTC days", async () => {
+    const ticker = nextTicker();
+
+    await recordPriceSnapshot(ticker, {
+      price: 101,
+      previousClose: 100,
+      changePercent: 1,
+      capturedAt: new Date("2026-06-01T08:00:00.000Z"),
+    });
+
+    const first = await generateMockTickerReport(ticker);
+
+    await createTickerReportFromInput({
+      ticker,
+      reportDate: new Date("2026-06-02T09:00:00.000Z"),
+      recommendation: first.report.recommendation,
+      sentiment: first.report.sentiment,
+      confidenceScore: first.report.confidenceScore,
+      riskScore: first.report.riskScore,
+      riskLevel: first.report.riskLevel,
+      keyTakeaway: "Manual next-day report",
+      createPredictions: false,
+    });
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const reports = await listAIReportsByStockId(stock!.id, 20);
+    expect(reports).toHaveLength(2);
+  });
+
+  it("includes upcoming earnings details in earningsSummary when earnings data exists", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    await recordEarningsEvent(ticker, {
+      fiscalQuarter: "Q2",
+      fiscalYear: 2026,
+      earningsDate: new Date("2026-08-03T12:30:00.000Z"),
+      earningsTime: "bmo",
+      isDateConfirmed: true,
+      estimatedEps: 1.42,
+      estimatedRevenue: BigInt(88_500_000_000),
+    });
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.earningsSummary.toLowerCase()).toContain("next earnings");
+    expect(result.report.earningsSummary.toLowerCase()).toContain("est. eps");
+  });
+
+  it("uses real news headlines in report summary when available", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    await recordNewsArticles(ticker, [
+      {
+        headline: "[DEMO] Synthetic headline",
+        url: `https://demo.local/${ticker.toLowerCase()}/demo-news`,
+        source: "Demo News (Local Fake Data)",
+        publishedAt: new Date("2026-05-01T00:05:00.000Z"),
+        sentiment: Sentiment.NEUTRAL,
+      },
+    ]);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.newsSummary).toContain("Top headlines:");
+    expect(result.report.newsSummary).not.toContain("Only demo/local news");
+    expect(result.report.newsSummary).toContain("[TEST] Bullish catalyst");
+  });
+
+  it("calls out demo-only coverage when real news is unavailable", async () => {
+    const ticker = nextTicker();
+
+    await recordPriceSnapshot(ticker, {
+      price: 100,
+      previousClose: 99,
+      changePercent: 1,
+      capturedAt: new Date("2026-05-10T00:00:00.000Z"),
+    });
+
+    await recordNewsArticles(ticker, [
+      {
+        headline: "[DEMO] Placeholder market update",
+        url: `https://demo.local/${ticker.toLowerCase()}/demo-1`,
+        source: "Demo News (Local Fake Data)",
+        publishedAt: new Date("2026-05-10T00:01:00.000Z"),
+        sentiment: Sentiment.NEUTRAL,
+      },
+    ]);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.newsSummary).toContain("Only demo/local news is available");
+    expect(result.report.newsSummary).toContain("[DEMO] Placeholder market update");
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { listAIReportsByStockId } from "../../src/repositories/ai-reports.repository";
+import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
 import { runPortfolioAnalysis } from "../../src/services/portfolio-analysis.service";
 import {
   createTestHolding,
@@ -101,5 +103,36 @@ describe("portfolio-analysis.service", () => {
     expect(Number.isNaN(startedAtMs)).toBe(false);
     expect(Number.isNaN(finishedAtMs)).toBe(false);
     expect(finishedAtMs).toBeGreaterThanOrEqual(startedAtMs);
+  });
+
+  it("does not multiply report/prediction rows on same-day reruns", async () => {
+    const portfolio = await createTestPortfolio();
+
+    const stock = await createTestStock("TSTPAG1");
+    const holding = await createTestHolding(portfolio.id, stock.id);
+
+    await createTestPriceSnapshot(stock.id, {
+      price: 100,
+      previousClose: 99,
+    });
+
+    const firstRun = await runPortfolioAnalysis(portfolio.id);
+    expect(firstRun.reportsCreated).toBe(1);
+    expect(firstRun.predictionsCreated).toBe(3);
+
+    await createTestPriceSnapshot(stock.id, {
+      price: 104,
+      previousClose: 100,
+    });
+
+    const secondRun = await runPortfolioAnalysis(portfolio.id);
+    expect(secondRun.reportsCreated).toBe(1);
+    expect(secondRun.predictionsCreated).toBe(3);
+
+    const reports = await listAIReportsByStockId(stock.id, 20);
+    expect(reports.filter((report) => report.holdingId === holding.id)).toHaveLength(1);
+
+    const predictions = await listPredictionsByStockId(stock.id, 50);
+    expect(predictions.filter((prediction) => prediction.holdingId === holding.id)).toHaveLength(3);
   });
 });

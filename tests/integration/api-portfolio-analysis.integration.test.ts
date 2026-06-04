@@ -64,6 +64,33 @@ describe("API portfolio run-analysis route", () => {
     expect(body.data.reports.length).toBeGreaterThanOrEqual(1);
     expect(body.data.portfolioSummary).toBeTruthy();
 
+    const firstPredictionsResponse = await app.inject({
+      method: "GET",
+      url: `/api/predictions/stock/${ticker}?limit=20`,
+    });
+
+    expect(firstPredictionsResponse.statusCode).toBe(200);
+    const firstPredictionsBody = firstPredictionsResponse.json();
+    const firstCount = firstPredictionsBody.data.items.length;
+    expect(firstCount).toBeGreaterThanOrEqual(3);
+
+    const secondAnalysisResponse = await app.inject({
+      method: "POST",
+      url: `/api/portfolios/${portfolioId}/run-analysis`,
+    });
+
+    expect(secondAnalysisResponse.statusCode).toBe(200);
+
+    const secondPredictionsResponse = await app.inject({
+      method: "GET",
+      url: `/api/predictions/stock/${ticker}?limit=20`,
+    });
+
+    expect(secondPredictionsResponse.statusCode).toBe(200);
+    const secondPredictionsBody = secondPredictionsResponse.json();
+    const secondCount = secondPredictionsBody.data.items.length;
+    expect(secondCount).toBe(firstCount);
+
     await app.close();
   });
 

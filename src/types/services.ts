@@ -8,6 +8,7 @@ import type {
   NewsArticle,
   Portfolio,
   Prediction,
+  PredictionDirection,
   PredictionHorizon,
   PriceSnapshot,
   Recommendation,
@@ -227,6 +228,15 @@ export interface TickerReportGenerationResult {
   predictions: Prediction[];
 }
 
+export interface AIReportWithStockMetadata extends AIReport {
+  ticker: string;
+  companyName: string | null;
+  exchange: string | null;
+  currency: string | null;
+  sector: string | null;
+  industry: string | null;
+}
+
 export interface PortfolioAnalysisTickerFailure {
   ticker: string;
   reason: string;
@@ -325,6 +335,52 @@ export interface IngestPortfolioFundamentalsResult {
   failedTickers: IngestPortfolioTickerFailure[];
 }
 
+export interface TickerEarningsIngestionResult {
+  ticker: string;
+  eventsCreated: number;
+  eventsUpdated: number;
+  nextEarningsDate?: string;
+  warnings: string[];
+}
+
+export interface PortfolioEarningsIngestionResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  tickersProcessed: number;
+  tickersFailed: number;
+  results: TickerEarningsIngestionResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+}
+
+export interface IngestTickerNewsOptions {
+  limit?: number;
+  from?: Date;
+  to?: Date;
+}
+
+export interface IngestTickerNewsResult {
+  ticker: string;
+  articlesCreated: number;
+  articlesUpdated: number;
+  articlesSkipped: number;
+  warnings: string[];
+}
+
+export interface IngestPortfolioNewsOptions {
+  limitPerTicker?: number;
+}
+
+export interface IngestPortfolioNewsResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  tickersProcessed: number;
+  tickersFailed: number;
+  results: IngestTickerNewsResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+}
+
 export interface IngestPortfolioFullBasicOptions {
   historicalLimit?: number;
   runAnalysis?: boolean;
@@ -337,6 +393,24 @@ export interface IngestPortfolioFullBasicResult {
   marketData: IngestPortfolioMarketDataResult;
   fundamentals: IngestPortfolioFundamentalsResult;
   analysis?: PortfolioAnalysisResult;
+}
+
+export interface PortfolioFmpFullRefreshOptions {
+  historicalLimit?: number;
+  newsLimitPerTicker?: number;
+  runAnalysis?: boolean;
+}
+
+export interface PortfolioFmpFullRefreshResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  marketData: IngestPortfolioMarketDataResult;
+  fundamentals: IngestPortfolioFundamentalsResult;
+  earnings: PortfolioEarningsIngestionResult;
+  news: IngestPortfolioNewsResult;
+  analysis?: PortfolioAnalysisResult;
+  warnings: string[];
 }
 
 export interface PredictionScoringSummary {
@@ -355,4 +429,29 @@ export interface PredictionCreationFromReportResult {
 export interface IngestionWrapOptions {
   provider?: string;
   ticker?: string;
+}
+
+export interface PredictionListItem {
+  id: string;
+  stockId: string;
+  holdingId: string | null;
+  aiReportId: string | null;
+  predictionDate: Date;
+  dueDate: Date;
+  horizon: PredictionHorizon;
+  recommendation: Recommendation;
+  direction: PredictionDirection;
+  confidenceScore: number;
+  startingPrice: number;
+  targetLow: number | null;
+  targetHigh: number | null;
+  bullishRationale: string | null;
+  bearishRationale: string | null;
+  dataUsed: Prisma.JsonValue | null;
+  createdAt: Date;
+  updatedAt: Date;
+  ticker: string;
+  companyName: string | null;
+  exchange: string | null;
+  currency: string | null;
 }

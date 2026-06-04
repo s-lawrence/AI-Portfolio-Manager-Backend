@@ -72,6 +72,16 @@ describe("API dev seed-demo-market-data route", () => {
     expect(bundleBody.data.latestTechnicalSnapshot).toBeTruthy();
     expect(bundleBody.data.latestFundamentalSnapshot).toBeTruthy();
     expect(bundleBody.data.nextEarningsEvent).toBeTruthy();
+    expect(typeof bundleBody.data.nextEarningsEvent.earningsDate).toBe("string");
+    expect(bundleBody.data.nextEarningsEvent.fiscalQuarter == null || typeof bundleBody.data.nextEarningsEvent.fiscalQuarter === "string").toBe(true);
+    expect(bundleBody.data.nextEarningsEvent.fiscalYear == null || typeof bundleBody.data.nextEarningsEvent.fiscalYear === "number").toBe(true);
+    expect(bundleBody.data.nextEarningsEvent.estimatedEps == null || typeof bundleBody.data.nextEarningsEvent.estimatedEps === "number").toBe(true);
+    expect(
+      bundleBody.data.nextEarningsEvent.estimatedRevenue == null ||
+        typeof bundleBody.data.nextEarningsEvent.estimatedRevenue === "string" ||
+        typeof bundleBody.data.nextEarningsEvent.estimatedRevenue === "number",
+    ).toBe(true);
+    expect(typeof bundleBody.data.nextEarningsEvent.isDateConfirmed).toBe("boolean");
 
     await app.close();
   });

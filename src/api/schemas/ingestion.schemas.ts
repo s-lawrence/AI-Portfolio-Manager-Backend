@@ -23,7 +23,25 @@ export const ingestTickerFundamentalsBodySchema = z.object({});
 
 export const ingestPortfolioFundamentalsBodySchema = z.object({});
 
+export const ingestTickerEarningsBodySchema = z.object({});
+
+export const ingestPortfolioEarningsBodySchema = z.object({});
+
+export const ingestTickerNewsBodySchema = z.object({
+  limit: optionalLimitSchema,
+});
+
+export const ingestPortfolioNewsBodySchema = z.object({
+  limitPerTicker: optionalLimitSchema,
+});
+
 export const ingestPortfolioFullBasicBodySchema = z.object({
   historicalLimit: optionalLimitSchema,
+  runAnalysis: booleanQuerySchema.optional(),
+});
+
+export const ingestPortfolioFullRefreshBodySchema = z.object({
+  historicalLimit: optionalLimitSchema,
+  newsLimitPerTicker: optionalLimitSchema,
   runAnalysis: booleanQuerySchema.optional(),
 });

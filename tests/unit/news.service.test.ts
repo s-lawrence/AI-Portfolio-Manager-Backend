@@ -2,8 +2,11 @@ import { Sentiment } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyNewsSentiment,
+  estimateMateriality,
   getNewsSentimentSummary,
   getRecentNewsForTicker,
+  isDemoNewsArticle,
   recordNewsArticle,
   recordNewsArticles,
 } from "../../src/services/news.service";
@@ -129,5 +132,70 @@ describe("news.service", () => {
     expect(summary.neutralCount).toBe(0);
     expect(summary.averageSentimentScore).toBeCloseTo(1 / 3, 6);
     expect(summary.averageMaterialityScore).toBeCloseTo(19 / 30, 6);
+  });
+
+  it("classifies sentiment deterministically from headline and summary", () => {
+    expect(classifyNewsSentiment("Company beats estimates", "Raises guidance")).toBe(
+      Sentiment.BULLISH,
+    );
+    expect(classifyNewsSentiment("Company misses estimates", "Guidance cut")).toBe(
+      Sentiment.BEARISH,
+    );
+    expect(classifyNewsSentiment("Upgrade and lawsuit both reported", "mixed signal")).toBe(
+      Sentiment.MIXED,
+    );
+    expect(classifyNewsSentiment("Routine update", "No major impact")).toBe(
+      Sentiment.NEUTRAL,
+    );
+  });
+
+  it("estimates materiality with conservative keyword-based scoring", () => {
+    const high = estimateMateriality(
+      "Earnings beat and acquisition announced",
+      "Company raises guidance after strong quarter.",
+    );
+    const low = estimateMateriality(
+      "Routine blog post",
+      "Minor update with no financial impact.",
+    );
+
+    expect(high).toBeGreaterThan(low);
+    expect(high).toBeGreaterThan(0.6);
+    expect(low).toBeGreaterThanOrEqual(0);
+    expect(low).toBeLessThanOrEqual(1);
+  });
+
+  it("detects demo-marked news article variants", () => {
+    expect(
+      isDemoNewsArticle({
+        source: "Demo News (Local Fake Data)",
+        headline: "Something happened",
+        url: "https://example.com/story",
+      }),
+    ).toBe(true);
+
+    expect(
+      isDemoNewsArticle({
+        source: "Wire",
+        headline: "[DEMO] Story",
+        url: "https://example.com/story",
+      }),
+    ).toBe(true);
+
+    expect(
+      isDemoNewsArticle({
+        source: "Wire",
+        headline: "Story",
+        url: "https://demo.local/story",
+      }),
+    ).toBe(true);
+
+    expect(
+      isDemoNewsArticle({
+        source: "Reuters",
+        headline: "Story",
+        url: "https://example.com/story",
+      }),
+    ).toBe(false);
   });
 });

@@ -6,7 +6,10 @@ import {
   ProviderRequestError,
 } from "../../src/providers/errors";
 import { FmpJsonClient, FmpJsonQuery } from "../../src/providers/fmp/fmp-client";
-import { FmpFundamentalsProvider } from "../../src/providers/fmp/fmp-fundamentals.provider";
+import {
+  FmpFundamentalsProvider,
+  normalizePercentLike,
+} from "../../src/providers/fmp/fmp-fundamentals.provider";
 
 function createMockClient(
   resolver: (path: string, query?: FmpJsonQuery) => unknown,
@@ -226,5 +229,52 @@ describe("fmp fundamentals provider", () => {
     await expect(provider.getFundamentals("aapl")).rejects.toBeInstanceOf(
       ProviderRateLimitError,
     );
+  });
+
+  it("normalizes percent-like values from either decimal or percentage forms", async () => {
+    const provider = new FmpFundamentalsProvider(
+      createMockClient((path) => {
+        if (path === "/financial-growth") {
+          return [{ symbol: "AAPL", revenueGrowth: 5.4 }];
+        }
+
+        if (path === "/ratios") {
+          return [
+            {
+              symbol: "AAPL",
+              grossProfitMargin: 46.2,
+              operatingProfitMargin: 0.287,
+              netProfitMargin: 25.2,
+              dividendYield: 0.005,
+              priceEarningsRatio: 31.4,
+              priceToSalesRatio: 8.4,
+              priceToBookRatio: 46.3,
+            },
+          ];
+        }
+
+        return [];
+      }),
+    );
+
+    const result = await provider.getFundamentals("AAPL");
+
+    expect(result).not.toBeNull();
+    expect(result?.revenueGrowth).toBeCloseTo(0.054, 6);
+    expect(result?.grossMargin).toBeCloseTo(0.462, 6);
+    expect(result?.operatingMargin).toBeCloseTo(0.287, 6);
+    expect(result?.netMargin).toBeCloseTo(0.252, 6);
+    expect(result?.dividendYield).toBeCloseTo(0.005, 6);
+
+    expect(result?.peRatio).toBe(31.4);
+    expect(result?.priceToSales).toBe(8.4);
+    expect(result?.priceToBook).toBe(46.3);
+  });
+
+  it("normalizePercentLike helper handles decimal and percentage-form values", () => {
+    expect(normalizePercentLike(5.4)).toBeCloseTo(0.054, 12);
+    expect(normalizePercentLike(0.054)).toBeCloseTo(0.054, 12);
+    expect(normalizePercentLike(-12.5)).toBeCloseTo(-0.125, 12);
+    expect(normalizePercentLike(undefined)).toBeNull();
   });
 });

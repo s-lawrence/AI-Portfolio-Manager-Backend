@@ -10,8 +10,11 @@ import { describe, expect, it } from "vitest";
 import {
   calculatePredictionOutcome,
   createPredictionFromReport,
+  listOpenPredictions,
   listPredictionsDueForOutcome,
 } from "../../src/services/predictions.service";
+import { createPredictionOutcome } from "../../src/repositories/prediction-outcomes.repository";
+import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
 import {
   createTestAIReport,
   createTestPrediction,
@@ -198,5 +201,106 @@ describe("predictions.service", () => {
     );
 
     expect(result.status).toBe("skipped_no_price");
+  });
+
+  it("reuses same-day open prediction across different reports for same stock/holding/horizon", async () => {
+    const stock = await createTestStock("TSTPRD8");
+    const reportDay = new Date("2026-06-05T09:00:00.000Z");
+
+    const firstReport = await createTestAIReport(stock.id, {
+      reportDate: reportDay,
+      recommendation: Recommendation.BUY,
+      confidenceScore: 0.7,
+      currentPrice: 100,
+    });
+
+    const secondReport = await createTestAIReport(stock.id, {
+      reportDate: new Date("2026-06-05T18:30:00.000Z"),
+      recommendation: Recommendation.SELL,
+      confidenceScore: 0.55,
+      currentPrice: 102,
+    });
+
+    const first = await createPredictionFromReport(
+      firstReport.id,
+      PredictionHorizon.ONE_WEEK,
+    );
+
+    const second = await createPredictionFromReport(
+      secondReport.id,
+      PredictionHorizon.ONE_WEEK,
+    );
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.prediction.id).toBe(first.prediction.id);
+    expect(second.prediction.aiReportId).toBe(secondReport.id);
+    expect(second.prediction.recommendation).toBe(Recommendation.SELL);
+
+    const predictions = await listPredictionsByStockId(stock.id, 20);
+    expect(predictions.filter((item) => item.horizon === PredictionHorizon.ONE_WEEK)).toHaveLength(1);
+  });
+
+  it("does not overwrite completed predictions when creating same-day predictions", async () => {
+    const stock = await createTestStock("TSTPRD9");
+    const reportDay = new Date("2026-06-06T10:00:00.000Z");
+
+    const firstReport = await createTestAIReport(stock.id, {
+      reportDate: reportDay,
+      recommendation: Recommendation.BUY,
+      currentPrice: 100,
+    });
+
+    const first = await createPredictionFromReport(
+      firstReport.id,
+      PredictionHorizon.ONE_DAY,
+    );
+
+    await createPredictionOutcome({
+      predictionId: first.prediction.id,
+      outcomeDate: new Date("2026-06-07T12:00:00.000Z"),
+      endingPrice: 110,
+      absoluteReturn: 10,
+      percentageReturn: 10,
+      wasDirectionallyCorrect: true,
+      errorScore: 0,
+      calibrationScore: 1,
+    });
+
+    const secondReport = await createTestAIReport(stock.id, {
+      reportDate: new Date("2026-06-06T20:00:00.000Z"),
+      recommendation: Recommendation.SELL,
+      currentPrice: 95,
+    });
+
+    const second = await createPredictionFromReport(
+      secondReport.id,
+      PredictionHorizon.ONE_DAY,
+    );
+
+    expect(second.created).toBe(true);
+    expect(second.prediction.id).not.toBe(first.prediction.id);
+
+    const predictions = await listPredictionsByStockId(stock.id, 20);
+    expect(predictions.filter((item) => item.horizon === PredictionHorizon.ONE_DAY)).toHaveLength(2);
+  });
+
+  it("returns ticker/company metadata and dueDate on open prediction list items", async () => {
+    const stock = await createTestStock("TSTPRD0");
+    const report = await createTestAIReport(stock.id, {
+      reportDate: new Date("2026-06-08T00:00:00.000Z"),
+      recommendation: Recommendation.HOLD,
+      currentPrice: 100,
+    });
+
+    await createPredictionFromReport(report.id, PredictionHorizon.ONE_DAY);
+
+    const openPredictions = await listOpenPredictions();
+    const item = openPredictions.find((prediction) => prediction.stockId === stock.id);
+
+    expect(item).toBeTruthy();
+    expect(item?.ticker).toBe("TSTPRD0");
+    expect(typeof item?.companyName).toBe("string");
+    expect(item?.dueDate).toBeInstanceOf(Date);
   });
 });
