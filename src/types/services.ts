@@ -4,6 +4,7 @@ import type {
   EarningsEvent,
   FundamentalSnapshot,
   Holding,
+  HoldingStatus,
   NewsArticle,
   Portfolio,
   Prediction,
@@ -31,9 +32,35 @@ export interface SectorCount {
   count: number;
 }
 
+export interface PortfolioOverviewHoldingSummary extends Holding {
+  stock: Stock;
+  holdingId: string;
+  stockId: string;
+  ticker: string;
+  companyName?: string | null;
+  status: HoldingStatus;
+  shares: number | null;
+  averageCost: number | null;
+  sector?: string | null;
+  industry?: string | null;
+  exchange?: string | null;
+  currency?: string | null;
+  latestPrice?: number | null;
+  latestPriceCapturedAt?: Date | string | null;
+  dailyChangePercent?: number | null;
+  previousClose?: number | null;
+  volume?: number | string | null;
+  marketCap?: number | string | null;
+  latestRecommendation?: Recommendation | null;
+  latestSentiment?: Sentiment | null;
+  latestConfidenceScore?: number | null;
+  latestRiskScore?: number | null;
+  latestReportDate?: Date | string | null;
+}
+
 export interface PortfolioOverview {
   portfolio: Portfolio;
-  holdings: Array<Holding & { stock: Stock }>;
+  holdings: PortfolioOverviewHoldingSummary[];
   holdingCount: number;
   ownedHoldingCount: number;
   watchlistHoldingCount: number;
@@ -243,6 +270,72 @@ export interface SeedDemoMarketDataResult {
   fundamentalSnapshotsCreated: number;
   newsArticlesCreated: number;
   earningsEventsCreated: number;
+  analysis?: PortfolioAnalysisResult;
+}
+
+export interface IngestTickerMarketDataOptions {
+  historicalLimit?: number;
+}
+
+export interface IngestTickerMarketDataResult {
+  ticker: string;
+  profileUpdated: boolean;
+  quoteSnapshotCreated: boolean;
+  historicalSnapshotsCreated: number;
+  historicalSnapshotsSkipped: number;
+  technicalSnapshotCreated: boolean;
+  warnings: string[];
+}
+
+export interface IngestPortfolioMarketDataOptions {
+  historicalLimit?: number;
+  runAnalysis?: boolean;
+}
+
+export interface IngestPortfolioTickerFailure {
+  ticker: string;
+  reason: string;
+}
+
+export interface IngestPortfolioMarketDataResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  tickersProcessed: number;
+  tickersFailed: number;
+  results: IngestTickerMarketDataResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+  analysis?: PortfolioAnalysisResult;
+}
+
+export interface IngestTickerFundamentalsResult {
+  ticker: string;
+  snapshotCreated: boolean;
+  fieldsPopulated: string[];
+  warnings: string[];
+}
+
+export interface IngestPortfolioFundamentalsResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  tickersProcessed: number;
+  tickersFailed: number;
+  results: IngestTickerFundamentalsResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+}
+
+export interface IngestPortfolioFullBasicOptions {
+  historicalLimit?: number;
+  runAnalysis?: boolean;
+}
+
+export interface IngestPortfolioFullBasicResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  marketData: IngestPortfolioMarketDataResult;
+  fundamentals: IngestPortfolioFundamentalsResult;
   analysis?: PortfolioAnalysisResult;
 }
 

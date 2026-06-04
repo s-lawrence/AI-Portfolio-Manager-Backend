@@ -243,6 +243,7 @@ export async function generateMockTickerReport(
   const bearishFactors: string[] = [];
   const dataWarnings: string[] = [];
   let evidenceCount = 0;
+  let fundamentalSummary = "Fundamental snapshot missing.";
 
   const dailyChange =
     bundle.latestPriceSnapshot.changePercent ??
@@ -292,10 +293,18 @@ export async function generateMockTickerReport(
   if (fundamentals) {
     evidenceCount += 1;
 
+    const valuationNotes: string[] = [];
+    const profitabilityNotes: string[] = [];
+    const healthNotes: string[] = [];
+
     if (fundamentals.revenueGrowth != null) {
+      profitabilityNotes.push(
+        `Revenue growth ${(fundamentals.revenueGrowth * 100).toFixed(1)}%`,
+      );
+
       if (fundamentals.revenueGrowth > 0) {
         score += 1;
-        bullishFactors.push("Revenue growth is positive.");
+        bullishFactors.push("Positive revenue growth supports the business trajectory.");
       } else if (fundamentals.revenueGrowth < 0) {
         score -= 1;
         bearishFactors.push("Revenue growth is negative.");
@@ -303,21 +312,105 @@ export async function generateMockTickerReport(
     }
 
     if (fundamentals.peRatio != null) {
-      if (fundamentals.peRatio > 45) {
+      valuationNotes.push(`P/E ${fundamentals.peRatio.toFixed(1)}`);
+
+      if (fundamentals.peRatio > 45 && (fundamentals.revenueGrowth ?? 0) <= 0.05) {
         score -= 1;
-        bearishFactors.push("Valuation appears elevated (high P/E).");
-      } else if (fundamentals.peRatio > 0 && fundamentals.peRatio < 30) {
+        bearishFactors.push("Valuation looks stretched relative to weak growth.");
+      } else if (
+        fundamentals.peRatio > 0 &&
+        fundamentals.peRatio < 30 &&
+        (fundamentals.revenueGrowth ?? 0) > 0
+      ) {
         score += 1;
-        bullishFactors.push("Valuation appears reasonable (P/E in moderate range).");
+        bullishFactors.push("Valuation appears reasonable for the growth profile.");
       }
     }
 
-    if (fundamentals.debtToEquity != null && fundamentals.debtToEquity > 2) {
-      score -= 1;
-      bearishFactors.push("Leverage is relatively high (debt-to-equity).");
+    if (fundamentals.grossMargin != null) {
+      profitabilityNotes.push(`Gross margin ${(fundamentals.grossMargin * 100).toFixed(1)}%`);
+
+      if (fundamentals.grossMargin >= 0.4) {
+        score += 1;
+        bullishFactors.push("Gross margin profile is healthy.");
+      } else if (fundamentals.grossMargin < 0.2) {
+        score -= 1;
+        bearishFactors.push("Gross margin profile appears weak.");
+      }
     }
+
+    if (fundamentals.netMargin != null) {
+      profitabilityNotes.push(`Net margin ${(fundamentals.netMargin * 100).toFixed(1)}%`);
+
+      if (fundamentals.netMargin >= 0.1) {
+        score += 1;
+        bullishFactors.push("Net margin indicates solid profitability.");
+      } else if (fundamentals.netMargin < 0) {
+        score -= 1;
+        bearishFactors.push("Net margin is currently negative.");
+      }
+    }
+
+    if (fundamentals.debtToEquity != null) {
+      healthNotes.push(`Debt/Equity ${fundamentals.debtToEquity.toFixed(2)}`);
+
+      if (fundamentals.debtToEquity <= 1) {
+        score += 1;
+        bullishFactors.push("Debt-to-equity appears manageable.");
+      } else if (fundamentals.debtToEquity > 2) {
+        score -= 1;
+        bearishFactors.push("Leverage is relatively high (debt-to-equity).");
+      }
+    }
+
+    if (fundamentals.freeCashFlow != null) {
+      const freeCashFlowState =
+        fundamentals.freeCashFlow > 0
+          ? "positive"
+          : fundamentals.freeCashFlow < 0
+            ? "negative"
+            : "flat";
+
+      healthNotes.push(`Free cash flow ${freeCashFlowState}`);
+
+      if (fundamentals.freeCashFlow > 0) {
+        score += 1;
+        bullishFactors.push("Free cash flow remains positive.");
+      } else if (fundamentals.freeCashFlow < 0) {
+        score -= 1;
+        bearishFactors.push("Free cash flow is negative.");
+      }
+    }
+
+    if (fundamentals.currentRatio != null) {
+      healthNotes.push(`Current ratio ${fundamentals.currentRatio.toFixed(2)}`);
+    }
+
+    if (fundamentals.priceToSales != null) {
+      valuationNotes.push(`P/S ${fundamentals.priceToSales.toFixed(2)}`);
+    }
+
+    if (fundamentals.priceToBook != null) {
+      valuationNotes.push(`P/B ${fundamentals.priceToBook.toFixed(2)}`);
+    }
+
+    if (fundamentals.analystConsensus) {
+      valuationNotes.push(`Analyst consensus ${fundamentals.analystConsensus}`);
+    }
+
+    fundamentalSummary = `Valuation: ${
+      valuationNotes.length > 0 ? valuationNotes.join(", ") : "limited valuation data"
+    }. Profitability: ${
+      profitabilityNotes.length > 0
+        ? profitabilityNotes.join(", ")
+        : "limited profitability data"
+    }. Financial health: ${
+      healthNotes.length > 0 ? healthNotes.join(", ") : "limited balance-sheet and cash-flow data"
+    }.`;
   } else {
     dataWarnings.push("Missing fundamental snapshot.");
+    fundamentalSummary =
+      "Fundamental snapshot missing, reducing confidence in valuation/profitability/health assessment.";
   }
 
   if (newsSummary.totalArticles > 0) {
@@ -409,6 +502,9 @@ export async function generateMockTickerReport(
   let confidenceScore =
     0.35 + evidenceCount * 0.1 + Math.min(Math.abs(score), 8) * 0.03;
   confidenceScore -= dataWarnings.length * 0.05;
+  if (!fundamentals) {
+    confidenceScore -= 0.08;
+  }
   confidenceScore = clamp(confidenceScore, 0.1, 0.95);
 
   const riskLevel = riskLevelFromScore(riskScore);
@@ -465,9 +561,7 @@ export async function generateMockTickerReport(
     technicalSummary: trendDirection
       ? `Trend classified as ${trendDirection}.`
       : "Technical trend unavailable.",
-    fundamentalSummary: fundamentals
-      ? "Fundamental snapshot included in deterministic scoring."
-      : "Fundamental snapshot missing.",
+    fundamentalSummary,
     newsSummary:
       newsSummary.totalArticles > 0
         ? `${newsSummary.totalArticles} recent articles analyzed.`

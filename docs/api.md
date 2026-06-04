@@ -35,6 +35,7 @@ npm start
 - `/api/portfolios`
 - `/api/holdings`
 - `/api/stocks`
+- `/api/ingestion`
 - `/api/market-data`
 - `/api/news`
 - `/api/earnings`
@@ -134,3 +135,77 @@ Run portfolio analysis orchestration:
 ```bash
 curl -X POST http://localhost:4000/api/portfolios/<PORTFOLIO_CUID>/run-analysis
 ```
+
+Portfolio overview payload:
+
+- `GET /api/portfolios/<PORTFOLIO_CUID>` now returns per-holding summary fields for dashboard cards.
+- Each holding includes latest market data when available:
+  - `latestPrice`
+  - `latestPriceCapturedAt`
+  - `dailyChangePercent`
+  - `previousClose`
+  - `volume`
+  - `marketCap`
+  - `currency`
+  - `exchange`
+- Each holding includes latest report summary fields when available:
+  - `latestRecommendation`
+  - `latestSentiment`
+  - `latestConfidenceScore`
+  - `latestRiskScore`
+  - `latestReportDate`
+- `estimatedMarketValue` is computed from OWNED holdings only, using `shares * latestPrice` when both are present.
+
+Ingest real market data for one ticker from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/ticker/AAPL/market-data \
+  -H "Content-Type: application/json" \
+  -d '{
+    "historicalLimit": 250
+  }'
+```
+
+Ingest real market data for all holdings in a portfolio from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/market-data \
+  -H "Content-Type: application/json" \
+  -d '{
+    "historicalLimit": 250,
+    "runAnalysis": true
+  }'
+```
+
+Ingest fundamentals for one ticker from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/ticker/AAPL/fundamentals \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Ingest fundamentals for all holdings in a portfolio from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/fundamentals \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Run market-data + fundamentals ingestion in one call (optional analysis):
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/full-basic \
+  -H "Content-Type: application/json" \
+  -d '{
+    "historicalLimit": 250,
+    "runAnalysis": false
+  }'
+```
+
+Fundamentals ingestion responses include:
+
+- `snapshotCreated` to indicate whether a new snapshot was stored.
+- `fieldsPopulated` listing which provider fields were present.
+- `warnings` for no-data scenarios or same-day duplicate snapshot skips.

@@ -103,4 +103,89 @@ describe("API portfolio workflow routes", () => {
 
     await app.close();
   });
+
+  it("returns projected latest market/report summary fields for holdings in portfolio overview", async () => {
+    const app = buildApp();
+    const token = nextToken();
+    const ticker = `TSTOVR${token}`;
+
+    const user = await createUser({
+      email: `test+auto-api-overview-${token}@example.com`,
+      name: `[TEST] API Overview User ${token}`,
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: `[TEST] API Overview Portfolio ${token}`,
+        baseCurrency: "USD",
+      },
+    });
+
+    expect(createPortfolioResponse.statusCode).toBe(201);
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    const addHoldingResponse = await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker,
+        status: "OWNED",
+        shares: 7,
+      },
+    });
+
+    expect(addHoldingResponse.statusCode).toBe(201);
+
+    const marketDataResponse = await app.inject({
+      method: "POST",
+      url: `/api/market-data/${ticker}/snapshots`,
+      payload: {
+        price: 111,
+        previousClose: 103,
+        volume: 22_000,
+        marketCap: 12_345_678,
+      },
+    });
+
+    expect(marketDataResponse.statusCode).toBe(201);
+
+    const reportResponse = await app.inject({
+      method: "POST",
+      url: `/api/reports/${ticker}/generate`,
+    });
+
+    expect(reportResponse.statusCode).toBe(201);
+
+    const overviewResponse = await app.inject({
+      method: "GET",
+      url: `/api/portfolios/${portfolioId}`,
+    });
+
+    expect(overviewResponse.statusCode).toBe(200);
+
+    const overviewBody = overviewResponse.json();
+    expect(overviewBody.success).toBe(true);
+
+    const summary = overviewBody.data.holdings.find(
+      (item: { ticker: string }) => item.ticker === ticker,
+    );
+
+    expect(summary).toBeTruthy();
+    expect(summary.latestPrice).toBe(111);
+    expect(summary.dailyChangePercent).toBeCloseTo(((111 - 103) / 103) * 100);
+    expect(summary.previousClose).toBe(103);
+    expect(summary.volume).toBe(22_000);
+    expect(summary.marketCap).toBe(12_345_678);
+    expect(summary.latestRecommendation).toBeDefined();
+    expect(summary.latestSentiment).toBeDefined();
+    expect(summary.latestConfidenceScore).toBeTypeOf("number");
+    expect(summary.latestRiskScore).toBeTypeOf("number");
+    expect(summary.latestReportDate).toBeTruthy();
+
+    await app.close();
+  });
 });

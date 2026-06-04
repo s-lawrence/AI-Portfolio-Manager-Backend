@@ -64,6 +64,41 @@ async function seedBullishData(ticker: string): Promise<void> {
   ]);
 }
 
+async function seedBullishDataWithoutFundamentals(ticker: string): Promise<void> {
+  await recordPriceSnapshot(ticker, {
+    price: 120,
+    previousClose: 100,
+    changePercent: 20,
+    capturedAt: new Date("2026-05-01T00:00:00.000Z"),
+  });
+
+  await recordTechnicalSnapshot(ticker, {
+    trendDirection: TrendDirection.STRONG_UPTREND,
+    sma50: 108,
+    sma200: 95,
+    capturedAt: new Date("2026-05-01T00:01:00.000Z"),
+  });
+
+  await recordNewsArticles(ticker, [
+    {
+      headline: "[TEST] Bullish catalyst without fundamentals 1",
+      url: `https://example.com/${ticker}/bullish-no-fund-1`,
+      publishedAt: new Date("2026-05-01T00:03:00.000Z"),
+      sentiment: Sentiment.BULLISH,
+      sentimentScore: 0.8,
+      materialityScore: 0.7,
+    },
+    {
+      headline: "[TEST] Bullish catalyst without fundamentals 2",
+      url: `https://example.com/${ticker}/bullish-no-fund-2`,
+      publishedAt: new Date("2026-05-01T00:04:00.000Z"),
+      sentiment: Sentiment.BULLISH,
+      sentimentScore: 0.6,
+      materialityScore: 0.6,
+    },
+  ]);
+}
+
 async function seedBearishData(ticker: string): Promise<void> {
   await recordPriceSnapshot(ticker, {
     price: 80,
@@ -179,5 +214,36 @@ describe("ai-reports.service", () => {
       | null;
 
     expect(sourceReferences?.deterministicMock).toBe(true);
+  });
+
+  it("writes a structured valuation/profitability/health fundamentals summary", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.fundamentalSummary.toLowerCase()).toContain("valuation:");
+    expect(result.report.fundamentalSummary.toLowerCase()).toContain("profitability:");
+    expect(result.report.fundamentalSummary.toLowerCase()).toContain("financial health:");
+  });
+
+  it("assigns lower confidence when fundamentals are missing", async () => {
+    const tickerWithFundamentals = nextTicker();
+    const tickerWithoutFundamentals = nextTicker();
+
+    await seedBullishData(tickerWithFundamentals);
+    await seedBullishDataWithoutFundamentals(tickerWithoutFundamentals);
+
+    const withFundamentals = await generateMockTickerReport(tickerWithFundamentals);
+    const withoutFundamentals = await generateMockTickerReport(
+      tickerWithoutFundamentals,
+    );
+
+    expect(withFundamentals.report.confidenceScore).toBeGreaterThan(
+      withoutFundamentals.report.confidenceScore,
+    );
+    expect(withoutFundamentals.report.fundamentalSummary.toLowerCase()).toContain(
+      "missing",
+    );
   });
 });

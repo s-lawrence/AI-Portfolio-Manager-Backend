@@ -2,6 +2,13 @@ import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest }
 import { ZodError } from "zod";
 
 import { env } from "../config/env";
+import {
+  ProviderConfigurationError,
+  ProviderNotFoundError,
+  ProviderRateLimitError,
+  ProviderRequestError,
+  ProviderResponseError,
+} from "../providers/errors";
 import { type ErrorEnvelope } from "./response";
 
 export class ApiError extends Error {
@@ -39,9 +46,55 @@ export function internalError(message: string): ApiError {
   return new ApiError(500, "INTERNAL_ERROR", message);
 }
 
+function providerErrorDetails(error: {
+  provider: string;
+  endpoint?: string;
+  statusCode?: number;
+}): {
+  provider: string;
+  endpoint?: string;
+  statusCode?: number;
+} {
+  return {
+    provider: error.provider,
+    endpoint: error.endpoint,
+    statusCode: error.statusCode,
+  };
+}
+
 export function mapKnownError(error: unknown): Error {
   if (error instanceof ApiError || error instanceof ZodError) {
     return error;
+  }
+
+  if (error instanceof ProviderConfigurationError) {
+    return badRequest(error.message, providerErrorDetails(error));
+  }
+
+  if (error instanceof ProviderNotFoundError) {
+    return notFound(error.message);
+  }
+
+  if (error instanceof ProviderRateLimitError) {
+    return new ApiError(429, "PROVIDER_RATE_LIMIT", error.message, providerErrorDetails(error));
+  }
+
+  if (error instanceof ProviderRequestError) {
+    return new ApiError(
+      502,
+      "PROVIDER_REQUEST_ERROR",
+      error.message,
+      providerErrorDetails(error),
+    );
+  }
+
+  if (error instanceof ProviderResponseError) {
+    return new ApiError(
+      502,
+      "PROVIDER_RESPONSE_ERROR",
+      error.message,
+      providerErrorDetails(error),
+    );
   }
 
   if (error instanceof Error) {

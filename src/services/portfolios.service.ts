@@ -8,9 +8,14 @@ import {
   listPortfoliosByUserId,
   updatePortfolio,
 } from "../repositories/portfolios.repository";
+import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
 import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
 import { getUserById } from "../repositories/users.repository";
-import { PortfolioOverview, SectorCount } from "../types/services";
+import {
+  PortfolioOverview,
+  PortfolioOverviewHoldingSummary,
+  SectorCount,
+} from "../types/services";
 
 export type CreatePortfolioForUserInput = Pick<
   Prisma.PortfolioUncheckedCreateInput,
@@ -26,6 +31,29 @@ function assertNonBlank(value: string, label: string): string {
   }
 
   return trimmed;
+}
+
+function normalizeFiniteNumber(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizeBigIntForResponse(
+  value: bigint | null | undefined,
+): number | string | null {
+  if (value == null) {
+    return null;
+  }
+
+  const asNumber = Number(value);
+  if (Number.isSafeInteger(asNumber)) {
+    return asNumber;
+  }
+
+  return value.toString();
 }
 
 export async function createPortfolioForUser(
@@ -73,16 +101,52 @@ export async function getPortfolioOverview(
     portfolio.holdings.map((holding) => getLatestPriceSnapshot(holding.stockId)),
   );
 
+  const latestReports = await Promise.all(
+    portfolio.holdings.map((holding) => getLatestAIReportByStockId(holding.stockId)),
+  );
+
+  const holdings: PortfolioOverviewHoldingSummary[] = portfolio.holdings.map(
+    (holding, index) => {
+      const latestPriceSnapshot = latestPrices[index];
+      const latestAIReport = latestReports[index];
+
+      return {
+        ...holding,
+        holdingId: holding.id,
+        ticker: holding.stock.ticker,
+        companyName: holding.stock.companyName ?? null,
+        sector: holding.stock.sector ?? null,
+        industry: holding.stock.industry ?? null,
+        exchange: holding.stock.exchange ?? null,
+        currency: holding.stock.currency ?? null,
+        latestPrice: normalizeFiniteNumber(latestPriceSnapshot?.price),
+        latestPriceCapturedAt: latestPriceSnapshot?.capturedAt ?? null,
+        dailyChangePercent: normalizeFiniteNumber(latestPriceSnapshot?.changePercent),
+        previousClose: normalizeFiniteNumber(latestPriceSnapshot?.previousClose),
+        volume: normalizeBigIntForResponse(latestPriceSnapshot?.volume),
+        marketCap: normalizeBigIntForResponse(latestPriceSnapshot?.marketCap),
+        latestRecommendation: latestAIReport?.recommendation ?? null,
+        latestSentiment: latestAIReport?.sentiment ?? null,
+        latestConfidenceScore: normalizeFiniteNumber(latestAIReport?.confidenceScore),
+        latestRiskScore: normalizeFiniteNumber(latestAIReport?.riskScore),
+        latestReportDate: latestAIReport?.reportDate ?? null,
+      };
+    },
+  );
+
   let estimatedMarketValue = 0;
   let marketValueAvailable = false;
 
-  for (let index = 0; index < portfolio.holdings.length; index += 1) {
-    const holding = portfolio.holdings[index];
-    const latestPrice = latestPrices[index];
+  for (const holding of holdings) {
+    const latestPrice = normalizeFiniteNumber(holding.latestPrice);
 
-    if (holding.shares != null && latestPrice?.price != null) {
+    if (
+      holding.status === HoldingStatus.OWNED &&
+      holding.shares != null &&
+      latestPrice != null
+    ) {
       marketValueAvailable = true;
-      estimatedMarketValue += holding.shares * latestPrice.price;
+      estimatedMarketValue += holding.shares * latestPrice;
     }
   }
 
@@ -109,7 +173,7 @@ export async function getPortfolioOverview(
 
   return {
     portfolio,
-    holdings: portfolio.holdings,
+    holdings,
     holdingCount,
     ownedHoldingCount,
     watchlistHoldingCount,
