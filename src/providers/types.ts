@@ -136,6 +136,56 @@ export interface ProviderGeoEvent {
   impactScore?: number;
 }
 
+export interface ProviderTreasuryRate {
+  date: Date;
+  month1?: number;
+  month2?: number;
+  month3?: number;
+  month6?: number;
+  year1?: number;
+  year2?: number;
+  year3?: number;
+  year5?: number;
+  year7?: number;
+  year10?: number;
+  year20?: number;
+  year30?: number;
+  source?: string;
+}
+
+export interface ProviderEconomicIndicator {
+  name: string;
+  seriesId?: string;
+  country?: string;
+  category?: string;
+  value: number;
+  unit?: string;
+  date: Date;
+  source?: string;
+}
+
+export interface ProviderEconomicCalendarEvent {
+  title: string;
+  country?: string;
+  category?: string;
+  importance?: string;
+  eventDate: Date;
+  actual?: number;
+  estimate?: number;
+  previous?: number;
+  unit?: string;
+  source?: string;
+}
+
+export interface ProviderMarketRiskPremium {
+  date: Date;
+  country?: string;
+  equityRiskPremium?: number;
+  countryRiskPremium?: number;
+  totalRiskPremium?: number;
+  source?: string;
+}
+
 export function normalizeProviderTickerOrThrow(ticker: string): string {
   const normalized = ticker.trim().toUpperCase();
 
@@ -189,4 +239,20 @@ export interface GeopoliticalProvider {
     query: string,
     options?: ProviderDateRangeOptions,
   ): Promise<ProviderGeoEvent[]>;
+}
+
+export interface EconomicsProvider {
+  getTreasuryRates(
+    options?: ProviderDateRangeOptions,
+  ): Promise<ProviderTreasuryRate[]>;
+  getEconomicIndicators(
+    nameOrSeries?: string,
+    options?: ProviderDateRangeOptions,
+  ): Promise<ProviderEconomicIndicator[]>;
+  getEconomicCalendar(
+    options: Required<Pick<ProviderDateRangeOptions, "from" | "to">>,
+  ): Promise<ProviderEconomicCalendarEvent[]>;
+  getMarketRiskPremium(
+    options?: Pick<ProviderDateRangeOptions, "from" | "to">,
+  ): Promise<ProviderMarketRiskPremium[]>;
 }

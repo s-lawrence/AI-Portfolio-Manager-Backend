@@ -18,6 +18,33 @@ export async function getLatestFundamentalSnapshot(
   });
 }
 
+export async function findFundamentalSnapshotByStockIdAndCapturedAtRange(
+  stockId: string,
+  from: Date,
+  to: Date,
+): Promise<FundamentalSnapshot | null> {
+  return prisma.fundamentalSnapshot.findFirst({
+    where: {
+      stockId,
+      capturedAt: {
+        gte: from,
+        lte: to,
+      },
+    },
+    orderBy: [{ capturedAt: "desc" }, { createdAt: "desc" }],
+  });
+}
+
+export async function updateFundamentalSnapshot(
+  id: string,
+  input: Prisma.FundamentalSnapshotUncheckedUpdateInput,
+): Promise<FundamentalSnapshot> {
+  return prisma.fundamentalSnapshot.update({
+    where: { id },
+    data: input,
+  });
+}
+
 export async function listFundamentalSnapshotsByStockId(
   stockId: string,
   limit?: number,

@@ -215,6 +215,36 @@ export async function cleanupTestData(): Promise<void> {
     },
   });
 
+  await testPrisma.macroSeriesObservation.deleteMany({
+    where: {
+      OR: [
+        {
+          provider: "FMP",
+        },
+        {
+          name: {
+            contains: TEST_TEXT_MARKER,
+          },
+        },
+      ],
+    },
+  });
+
+  await testPrisma.macroEvent.deleteMany({
+    where: {
+      OR: [
+        {
+          provider: "FMP",
+        },
+        {
+          title: {
+            contains: TEST_TEXT_MARKER,
+          },
+        },
+      ],
+    },
+  });
+
   await testPrisma.alert.deleteMany({
     where: {
       OR: [

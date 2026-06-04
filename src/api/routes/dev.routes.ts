@@ -5,6 +5,8 @@ import { notFound, runService } from "../errors";
 import { ok } from "../response";
 import { booleanQuerySchema } from "../schemas/common.schemas";
 import {
+  getMarketDataAudit,
+  purgeDemoAnalyticalData,
   seedDemoMarketData,
 } from "../../services";
 import {
@@ -38,6 +40,24 @@ const demoContextResponseSchema = z.object({
 
 const seedDemoMarketDataQuerySchema = z.object({
   runAnalysis: booleanQuerySchema.optional(),
+});
+
+const marketDataAuditParamsSchema = z.object({
+  ticker: z.string().trim().min(1),
+});
+
+const purgeDemoAnalyticalDataBodySchema = z.object({
+  ticker: z.string().trim().min(1).optional(),
+  portfolioId: z.string().cuid().optional(),
+  allowLegacyDemoPurge: booleanQuerySchema.optional(),
+});
+
+const purgePortfolioParamsSchema = z.object({
+  portfolioId: z.string().cuid(),
+});
+
+const purgeTickerParamsSchema = z.object({
+  ticker: z.string().trim().min(1),
 });
 
 export async function devRoutes(app: FastifyInstance): Promise<void> {
@@ -98,6 +118,65 @@ export async function devRoutes(app: FastifyInstance): Promise<void> {
     const result = await runService(() =>
       seedDemoMarketData({
         runAnalysis: query.runAnalysis ?? body.runAnalysis ?? false,
+      }),
+    );
+
+    return reply.send(ok(result));
+  });
+
+  app.get("/market-data-audit/:ticker", async (request, reply) => {
+    const params = marketDataAuditParamsSchema.parse(request.params ?? {});
+
+    const data = await runService(() => getMarketDataAudit(params.ticker));
+    if (!data) {
+      throw notFound(`No stock found for ticker ${params.ticker.toUpperCase()}.`);
+    }
+
+    return reply.send(ok(data));
+  });
+
+  app.post("/purge-demo-analytical-data", async (request, reply) => {
+    const body = purgeDemoAnalyticalDataBodySchema.parse(
+      typeof request.body === "object" && request.body != null ? request.body : {},
+    );
+
+    const result = await runService(() =>
+      purgeDemoAnalyticalData({
+        ticker: body.ticker,
+        portfolioId: body.portfolioId,
+        allowLegacyDemoPurge: body.allowLegacyDemoPurge ?? false,
+      }),
+    );
+
+    return reply.send(ok(result));
+  });
+
+  app.post("/purge-demo-analytical-data/portfolio/:portfolioId", async (request, reply) => {
+    const params = purgePortfolioParamsSchema.parse(request.params ?? {});
+    const body = purgeDemoAnalyticalDataBodySchema.parse(
+      typeof request.body === "object" && request.body != null ? request.body : {},
+    );
+
+    const result = await runService(() =>
+      purgeDemoAnalyticalData({
+        portfolioId: params.portfolioId,
+        allowLegacyDemoPurge: body.allowLegacyDemoPurge ?? false,
+      }),
+    );
+
+    return reply.send(ok(result));
+  });
+
+  app.post("/purge-demo-analytical-data/ticker/:ticker", async (request, reply) => {
+    const params = purgeTickerParamsSchema.parse(request.params ?? {});
+    const body = purgeDemoAnalyticalDataBodySchema.parse(
+      typeof request.body === "object" && request.body != null ? request.body : {},
+    );
+
+    const result = await runService(() =>
+      purgeDemoAnalyticalData({
+        ticker: params.ticker,
+        allowLegacyDemoPurge: body.allowLegacyDemoPurge ?? false,
       }),
     );
 

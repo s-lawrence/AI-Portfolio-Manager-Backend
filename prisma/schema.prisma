@@ -156,6 +156,7 @@ model Stock {
 model PriceSnapshot {
   id            String   @id @default(cuid())
   stockId       String
+  source        String?
   price         Float
   open          Float?
   high          Float?
@@ -279,8 +280,18 @@ model EarningsEvent {
 
 model MacroEvent {
   id               String   @id @default(cuid())
+  provider         String?
+  eventType        String?
   title            String
+  country          String?
   category         String?
+  importance       String?
+  eventDate        DateTime?
+  actual           Float?
+  estimate         Float?
+  previous         Float?
+  unit             String?
+  sourceUrl        String?
   region           String?
   description      String?
   source           String?
@@ -292,7 +303,34 @@ model MacroEvent {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
+  @@unique([provider, title, eventDate, country])
+  @@index([provider])
+  @@index([country])
+  @@index([category])
+  @@index([eventDate])
+  @@index([provider, country, category, eventDate])
   @@index([publishedAt])
+}
+
+model MacroSeriesObservation {
+  id         String   @id @default(cuid())
+  provider   String
+  seriesId   String
+  name       String?
+  country    String?
+  category   String?
+  value      Float
+  unit       String?
+  observedAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@unique([provider, seriesId, observedAt])
+  @@index([provider])
+  @@index([seriesId])
+  @@index([country])
+  @@index([category])
+  @@index([observedAt])
+  @@index([provider, seriesId, observedAt])
 }
 
 model AIReport {

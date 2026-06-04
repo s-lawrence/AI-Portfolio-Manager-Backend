@@ -12,6 +12,8 @@ import {
 } from "../../src/services/ai-reports.service";
 import { recordEarningsEvent } from "../../src/services/earnings.service";
 import { listAIReportsByStockId } from "../../src/repositories/ai-reports.repository";
+import { upsertMacroEventByProviderIdentity } from "../../src/repositories/macro-events.repository";
+import { upsertMacroSeriesObservation } from "../../src/repositories/macro-series-observations.repository";
 import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
 import { getStockProfile } from "../../src/services/stocks.service";
 import { recordFundamentalSnapshot } from "../../src/services/fundamentals.service";
@@ -147,6 +149,46 @@ async function seedBearishData(ticker: string): Promise<void> {
   ]);
 }
 
+async function seedTechnicalRichData(ticker: string): Promise<void> {
+  await recordPriceSnapshot(ticker, {
+    price: 150,
+    previousClose: 148,
+    changePercent: 1.35,
+    capturedAt: new Date("2026-05-04T00:00:00.000Z"),
+  });
+
+  await recordTechnicalSnapshot(ticker, {
+    trendDirection: TrendDirection.SIDEWAYS,
+    sma20: 147,
+    sma50: 145,
+    sma200: 140,
+    rsi14: 56.4,
+    macd: 0.89,
+    macdSignal: 0.75,
+    macdHistogram: 0.14,
+    capturedAt: new Date("2026-05-04T00:01:00.000Z"),
+  });
+
+  await recordFundamentalSnapshot(ticker, {
+    capturedAt: new Date("2026-05-04T00:02:00.000Z"),
+    marketCap: BigInt(90_000_000_000),
+    revenueGrowth: 0.08,
+    peRatio: 28,
+    debtToEquity: 0.9,
+  });
+
+  await recordNewsArticles(ticker, [
+    {
+      headline: "[TEST] Technical-rich setup news",
+      url: `https://example.com/${ticker}/technical-rich-1`,
+      publishedAt: new Date("2026-05-04T00:03:00.000Z"),
+      sentiment: Sentiment.BULLISH,
+      sentimentScore: 0.55,
+      materialityScore: 0.45,
+    },
+  ]);
+}
+
 describe("ai-reports.service", () => {
   it("creates an AI report and three predictions for day/week/month horizons", async () => {
     const ticker = nextTicker();
@@ -205,6 +247,67 @@ describe("ai-reports.service", () => {
     expect(result.report.sentiment).toBe(Sentiment.BEARISH);
   });
 
+  it("uses latest technical indicators in technicalSummary and factors", async () => {
+    const ticker = nextTicker();
+    await seedTechnicalRichData(ticker);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.technicalSummary.toLowerCase()).not.toContain("unavailable");
+    expect(result.report.technicalSummary).toContain("SIDEWAYS");
+    expect(
+      result.report.bearishFactors.some((factor) =>
+        factor.toLowerCase().includes("missing technical trend snapshot"),
+      ),
+    ).toBe(false);
+  });
+
+  it("only uses missing technical warning when technical snapshot is absent", async () => {
+    const ticker = nextTicker();
+
+    await recordPriceSnapshot(ticker, {
+      price: 110,
+      previousClose: 108,
+      changePercent: 1.8,
+      capturedAt: new Date("2026-05-05T00:00:00.000Z"),
+    });
+
+    await recordFundamentalSnapshot(ticker, {
+      capturedAt: new Date("2026-05-05T00:01:00.000Z"),
+      marketCap: BigInt(70_000_000_000),
+      revenueGrowth: 0.04,
+      peRatio: 24,
+      debtToEquity: 1.0,
+    });
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.technicalSummary).toBe("Technical trend unavailable.");
+    expect(
+      result.report.bearishFactors.some((factor) =>
+        factor.toLowerCase().includes("missing technical trend snapshot"),
+      ),
+    ).toBe(true);
+  });
+
+  it("prediction rationale omits missing technical text when technical data exists", async () => {
+    const ticker = nextTicker();
+    await seedTechnicalRichData(ticker);
+
+    const result = await generateMockTickerReport(ticker);
+
+    for (const prediction of result.predictions) {
+      expect(
+        prediction.bearishRationale?.toLowerCase().includes("missing technical trend snapshot") ??
+          false,
+      ).toBe(false);
+      expect(
+        prediction.bullishRationale?.toLowerCase().includes("missing technical trend snapshot") ??
+          false,
+      ).toBe(false);
+    }
+  });
+
   it("stores deterministic/mock wording in report metadata", async () => {
     const ticker = nextTicker();
     await seedBullishData(ticker);
@@ -219,6 +322,60 @@ describe("ai-reports.service", () => {
       | null;
 
     expect(sourceReferences?.deterministicMock).toBe(true);
+  });
+
+  it("includes lightweight macro summary when macro context data exists", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    await upsertMacroSeriesObservation({
+      provider: "FMP",
+      seriesId: "FMP_TREASURY_10Y",
+      observedAt: new Date("2026-06-01T00:00:00.000Z"),
+      value: 4.5,
+      category: "Treasury Rates",
+      country: "US",
+    });
+
+    await upsertMacroSeriesObservation({
+      provider: "FMP",
+      seriesId: "FMP_TREASURY_2Y",
+      observedAt: new Date("2026-06-01T00:00:00.000Z"),
+      value: 4.1,
+      category: "Treasury Rates",
+      country: "US",
+    });
+
+    await upsertMacroSeriesObservation({
+      provider: "FMP",
+      seriesId: "FMP_MRP_TOTAL_US",
+      observedAt: new Date("2026-06-01T00:00:00.000Z"),
+      value: 5.6,
+      category: "Market Risk Premium",
+      country: "US",
+    });
+
+    await upsertMacroEventByProviderIdentity(
+      {
+        provider: "FMP",
+        title: "[TEST] CPI Release",
+        eventDate: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000),
+        country: "US",
+      },
+      {
+        eventType: "economic-release",
+        category: "Inflation",
+        importance: "HIGH",
+      },
+    );
+
+    const result = await generateMockTickerReport(ticker);
+
+    const macroSummary = result.report.macroGeopoliticalSummary ?? "";
+    expect(macroSummary).toContain("10Y");
+    expect(macroSummary).toContain("2Y");
+    expect(macroSummary).toContain("risk premium");
+    expect(macroSummary).toContain("Upcoming high-importance macro events");
   });
 
   it("writes a structured valuation/profitability/health fundamentals summary", async () => {
@@ -269,6 +426,7 @@ describe("ai-reports.service", () => {
 
     expect(second.report.id).toBe(first.report.id);
     expect(second.report.currentPrice).toBe(135);
+    expect(second.report.technicalSummary.toLowerCase()).not.toContain("unavailable");
 
     const stock = await getStockProfile(ticker);
     expect(stock).not.toBeNull();

@@ -138,6 +138,7 @@ export async function createTestPriceSnapshot(
   return testPrisma.priceSnapshot.create({
     data: {
       stockId,
+      source: overrides?.source ?? null,
       price: overrides?.price ?? 100,
       open: overrides?.open ?? 99,
       high: overrides?.high ?? 101,

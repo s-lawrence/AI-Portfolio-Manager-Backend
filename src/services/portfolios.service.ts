@@ -9,7 +9,7 @@ import {
   updatePortfolio,
 } from "../repositories/portfolios.repository";
 import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
-import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
+import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getUserById } from "../repositories/users.repository";
 import {
   PortfolioOverview,
@@ -98,7 +98,7 @@ export async function getPortfolioOverview(
   ).length;
 
   const latestPrices = await Promise.all(
-    portfolio.holdings.map((holding) => getLatestPriceSnapshot(holding.stockId)),
+    portfolio.holdings.map((holding) => getLatestMarketSnapshotForStock(holding.stockId)),
   );
 
   const latestReports = await Promise.all(

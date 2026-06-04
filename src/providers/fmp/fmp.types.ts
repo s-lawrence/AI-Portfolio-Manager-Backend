@@ -143,3 +143,59 @@ export interface FmpStockNewsItem {
   sentiment?: string;
   sentimentScore?: number;
 }
+
+export interface FmpTreasuryRatesItem {
+  date?: string;
+  month1?: number | string;
+  month2?: number | string;
+  month3?: number | string;
+  month6?: number | string;
+  year1?: number | string;
+  year2?: number | string;
+  year3?: number | string;
+  year5?: number | string;
+  year7?: number | string;
+  year10?: number | string;
+  year20?: number | string;
+  year30?: number | string;
+  source?: string;
+}
+
+export interface FmpEconomicIndicatorItem {
+  name?: string;
+  indicator?: string;
+  seriesId?: string;
+  series?: string;
+  country?: string;
+  category?: string;
+  value?: number | string;
+  unit?: string;
+  date?: string;
+  source?: string;
+}
+
+export interface FmpEconomicCalendarItem {
+  title?: string;
+  event?: string;
+  country?: string;
+  category?: string;
+  importance?: string;
+  impact?: string;
+  date?: string;
+  eventDate?: string;
+  actual?: number | string;
+  estimate?: number | string;
+  previous?: number | string;
+  unit?: string;
+  source?: string;
+  url?: string;
+}
+
+export interface FmpMarketRiskPremiumItem {
+  date?: string;
+  country?: string;
+  equityRiskPremium?: number | string;
+  countryRiskPremium?: number | string;
+  totalRiskPremium?: number | string;
+  source?: string;
+}

@@ -10,9 +10,14 @@ import {
 } from "../../src/providers/fmp";
 import { ProviderHistoricalPrice } from "../../src/providers/types";
 import { listEarningsEventsByStockId } from "../../src/repositories/earnings-events.repository";
+import { getLatestAIReportByStockId } from "../../src/repositories/ai-reports.repository";
+import { listFundamentalSnapshotsByStockId } from "../../src/repositories/fundamental-snapshots.repository";
 import { listRecentNewsByTicker } from "../../src/repositories/news-articles.repository";
 import { listPriceSnapshotsByTicker } from "../../src/repositories/price-snapshots.repository";
+import { recordPriceSnapshot } from "../../src/services/market-data.service";
 import { getLatestTechnicalSnapshot } from "../../src/repositories/technical-snapshots.repository";
+import { getLatestMarketSnapshot } from "../../src/services/market-data.service";
+import { getPortfolioOverview } from "../../src/services/portfolios.service";
 import {
   ingestPortfolioFmpFullRefresh,
   ingestPortfolioNews,
@@ -26,7 +31,7 @@ import {
 } from "../../src/services/real-data-ingestion.service";
 import * as portfolioAnalysisService from "../../src/services/portfolio-analysis.service";
 import { getLatestFundamentals } from "../../src/services/fundamentals.service";
-import { getStockProfile } from "../../src/services/stocks.service";
+import { getStockProfile, getStockResearchBundle } from "../../src/services/stocks.service";
 import {
   createTestHolding,
   createTestPortfolio,
@@ -65,8 +70,33 @@ function buildHistoricalSeries(ticker: string): ProviderHistoricalPrice[] {
   ];
 }
 
+function buildLongHistoricalSeries(
+  ticker: string,
+  points: number = 250,
+): ProviderHistoricalPrice[] {
+  const start = Date.UTC(2025, 0, 2);
+
+  return Array.from({ length: points }, (_, index) => {
+    const base = 120 + index * 0.22;
+    const oscillation = Math.sin(index / 8) * 1.7;
+    const close = base + oscillation;
+    const date = new Date(start + index * 24 * 60 * 60 * 1000);
+
+    return {
+      ticker,
+      date,
+      open: close - 0.5,
+      high: close + 1.2,
+      low: close - 1.3,
+      close,
+      volume: 20_000 + index * 15,
+    };
+  });
+}
+
 describe("real-data-ingestion.service", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -108,6 +138,7 @@ describe("real-data-ingestion.service", () => {
     expect(result.profileUpdated).toBe(true);
     expect(result.quoteSnapshotCreated).toBe(true);
     expect(result.historicalSnapshotsCreated).toBe(3);
+    expect(result.historicalSnapshotsUpdated).toBe(0);
     expect(result.historicalSnapshotsSkipped).toBe(0);
     expect(result.technicalSnapshotCreated).toBe(true);
 
@@ -118,6 +149,8 @@ describe("real-data-ingestion.service", () => {
 
     const snapshots = await listPriceSnapshotsByTicker(ticker, 20);
     expect(snapshots.length).toBeGreaterThanOrEqual(4);
+    expect(snapshots.some((snapshot) => snapshot.source === "FMP_QUOTE")).toBe(true);
+    expect(snapshots.some((snapshot) => snapshot.source === "FMP_HISTORICAL")).toBe(true);
 
     const technicalSnapshot = stock
       ? await getLatestTechnicalSnapshot(stock.id)
@@ -125,7 +158,7 @@ describe("real-data-ingestion.service", () => {
     expect(technicalSnapshot).not.toBeNull();
   });
 
-  it("skips duplicate historical snapshots on repeated ingestion", async () => {
+  it("updates existing same-day historical snapshots on repeated ingestion", async () => {
     const ticker = "TSTFMP02";
     const historicalSeries = buildHistoricalSeries(ticker);
 
@@ -149,7 +182,233 @@ describe("real-data-ingestion.service", () => {
     const secondRun = await ingestTickerMarketData(ticker, { historicalLimit: 3 });
 
     expect(secondRun.historicalSnapshotsCreated).toBe(0);
+    expect(secondRun.historicalSnapshotsUpdated).toBe(0);
     expect(secondRun.historicalSnapshotsSkipped).toBe(3);
+  });
+
+  it("selects the latest quote over stale historical closes across core services", async () => {
+    const ticker = "TSTFMPQVS";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker,
+      companyName: "Quote Priority Test Co.",
+      exchange: "NASDAQ",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker,
+      price: 310,
+      previousClose: 305,
+      close: 310,
+      volume: 2_000_000,
+      marketCap: 1_200_000_000_000,
+      changePercent: 1.64,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue([
+      {
+        ticker,
+        date: new Date("2026-05-01T00:00:00.000Z"),
+        open: 220,
+        high: 224,
+        low: 215,
+        close: 217,
+        volume: 900_000,
+      },
+      {
+        ticker,
+        date: new Date("2026-04-30T00:00:00.000Z"),
+        open: 216,
+        high: 219,
+        low: 212,
+        close: 214,
+        volume: 880_000,
+      },
+    ]);
+
+    await ingestTickerMarketData(ticker, { historicalLimit: 2 });
+
+    const latest = await getLatestMarketSnapshot(ticker);
+    expect(latest).not.toBeNull();
+    expect(latest?.price).toBe(310);
+
+    const bundle = await getStockResearchBundle(ticker);
+    expect(bundle).not.toBeNull();
+    expect(bundle?.latestPriceSnapshot?.price).toBe(310);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const portfolio = await createTestPortfolio();
+    await createTestHolding(portfolio.id, stock!.id);
+
+    const overview = await getPortfolioOverview(portfolio.id);
+    expect(overview).not.toBeNull();
+    expect(overview?.holdings[0]?.latestPrice).toBe(310);
+  });
+
+  it("upserts stale same-day historical rows and recalculates technicals from FMP data scale", async () => {
+    const ticker = "TSTFMPUPD1";
+
+    // Seed stale null-source legacy rows on the same days as incoming FMP history.
+    for (let index = 0; index < 210; index += 1) {
+      const date = new Date(Date.UTC(2025, 0, 2 + index, 0, 0, 0, 0));
+
+      await recordPriceSnapshot(ticker, {
+        source: null,
+        price: 210 + Math.sin(index / 9),
+        close: 210 + Math.sin(index / 9),
+        high: 212 + Math.sin(index / 9),
+        low: 208 + Math.sin(index / 9),
+        capturedAt: date,
+      });
+    }
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker,
+      companyName: "Historical Upsert Co.",
+      exchange: "NASDAQ",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker,
+      price: 310.26,
+      previousClose: 307,
+      close: 310.26,
+      volume: 100_000,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      Array.from({ length: 210 }, (_, index) => {
+        const date = new Date(Date.UTC(2025, 0, 2 + index, 0, 0, 0, 0));
+        const close = 295 + index * 0.08 + Math.sin(index / 7) * 1.3;
+
+        return {
+          ticker,
+          date,
+          open: close - 0.6,
+          high: close + 1.1,
+          low: close - 1.2,
+          close,
+          volume: 20_000 + index,
+        };
+      }),
+    );
+
+    const result = await ingestTickerMarketData(ticker, { historicalLimit: 210 });
+
+    expect(result.historicalSnapshotsCreated).toBe(0);
+    expect(result.historicalSnapshotsUpdated).toBe(210);
+    expect(result.historicalSnapshotsSkipped).toBe(0);
+
+    const snapshots = await listPriceSnapshotsByTicker(ticker, 600);
+    const perDay = new Map<string, number>();
+    for (const snapshot of snapshots) {
+      const key = snapshot.capturedAt.toISOString().slice(0, 10);
+      perDay.set(key, (perDay.get(key) ?? 0) + 1);
+    }
+
+    // One quote row may share a day, but historical dates must remain non-duplicated by date-day.
+    expect([...perDay.values()].every((count) => count <= 2)).toBe(true);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const technical = stock ? await getLatestTechnicalSnapshot(stock.id) : null;
+    expect(technical).not.toBeNull();
+    expect(technical?.sma50).not.toBeNull();
+    expect(technical?.sma200).not.toBeNull();
+    expect(technical?.fiftyTwoWeekHigh ?? 0).toBeGreaterThan(290);
+    expect(technical?.fiftyTwoWeekLow ?? 9999).toBeGreaterThan(250);
+
+    const research = await getStockResearchBundle(ticker);
+    expect(research).not.toBeNull();
+    expect(research?.latestTechnicalSnapshot).toBeTruthy();
+    expect(research?.latestTechnicalSnapshot?.sma50 ?? 0).toBeGreaterThan(290);
+  });
+
+  it("creates a complete technical snapshot with 250 historical prices", async () => {
+    const ticker = "TSTFMP250";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker,
+      companyName: "Long History Test Co.",
+      exchange: "NASDAQ",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker,
+      price: 180,
+      previousClose: 178,
+      close: 180,
+      volume: 50_000,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      buildLongHistoricalSeries(ticker, 250),
+    );
+
+    const result = await ingestTickerMarketData(ticker, { historicalLimit: 250 });
+
+    expect(result.technicalSnapshotCreated).toBe(true);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing sma200")),
+    ).toBe(false);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing rsi14")),
+    ).toBe(false);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing macd")),
+    ).toBe(false);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing annualized volatility")),
+    ).toBe(false);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const technicalSnapshot = stock
+      ? await getLatestTechnicalSnapshot(stock.id)
+      : null;
+
+    expect(technicalSnapshot).not.toBeNull();
+    expect(technicalSnapshot?.sma50).not.toBeNull();
+    expect(technicalSnapshot?.sma200).not.toBeNull();
+    expect(technicalSnapshot?.rsi14).not.toBeNull();
+    expect(technicalSnapshot?.macd).not.toBeNull();
+    expect(technicalSnapshot?.macdSignal).not.toBeNull();
+    expect(technicalSnapshot?.macdHistogram).not.toBeNull();
+    expect(technicalSnapshot?.trendDirection).not.toBeNull();
+  });
+
+  it("returns indicator warnings when historical data is incomplete", async () => {
+    const ticker = "TSTFMPWARN";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker,
+      companyName: "Short History Test Co.",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker,
+      price: 95,
+      previousClose: 94,
+      close: 95,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      buildLongHistoricalSeries(ticker, 25),
+    );
+
+    const result = await ingestTickerMarketData(ticker, { historicalLimit: 25 });
+
+    expect(result.technicalSnapshotCreated).toBe(true);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing sma50")),
+    ).toBe(true);
+    expect(
+      result.warnings.some((warning) => warning.toLowerCase().includes("missing sma200")),
+    ).toBe(true);
   });
 
   it("continues portfolio ingestion when one ticker fails", async () => {
@@ -234,6 +493,8 @@ describe("real-data-ingestion.service", () => {
 
     expect(result.ticker).toBe(ticker);
     expect(result.snapshotCreated).toBe(true);
+    expect(result.snapshotUpdated).toBe(false);
+    expect(result.snapshotSkipped).toBe(false);
     expect(result.fieldsPopulated).toEqual(
       expect.arrayContaining([
         "period",
@@ -256,23 +517,78 @@ describe("real-data-ingestion.service", () => {
     expect(latest?.freeCashFlow).toBe(BigInt(1_200_000_000));
   });
 
-  it("skips same-day fundamentals snapshot on repeated ingestion", async () => {
+  it("updates same-day fundamentals snapshot on repeated ingestion", async () => {
     const ticker = "TSTFMPF2";
 
-    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockResolvedValue({
-      ticker,
-      marketCap: 12_000_000_000,
-      peRatio: 22,
-      source: "FMP",
-    });
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals")
+      .mockResolvedValueOnce({
+        ticker,
+        marketCap: 12_000_000_000,
+        peRatio: 22,
+        source: "FMP",
+      })
+      .mockResolvedValueOnce({
+        ticker,
+        marketCap: 13_500_000_000,
+        peRatio: 18,
+        source: "FMP",
+      });
 
-    await ingestTickerFundamentals(ticker);
+    const firstRun = await ingestTickerFundamentals(ticker);
     const secondRun = await ingestTickerFundamentals(ticker);
 
+    expect(firstRun.snapshotCreated).toBe(true);
+    expect(firstRun.snapshotUpdated).toBe(false);
+    expect(firstRun.snapshotSkipped).toBe(false);
+
     expect(secondRun.snapshotCreated).toBe(false);
-    expect(secondRun.warnings.some((warning) => warning.includes("already exists"))).toBe(
-      true,
-    );
+    expect(secondRun.snapshotUpdated).toBe(true);
+    expect(secondRun.snapshotSkipped).toBe(false);
+    expect(secondRun.warnings.some((warning) => warning.includes("already exists"))).toBe(false);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const snapshots = await listFundamentalSnapshotsByStockId(stock!.id, 10);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.marketCap).toBe(BigInt(13_500_000_000));
+    expect(snapshots[0]?.peRatio).toBe(18);
+  });
+
+  it("creates a new fundamentals snapshot on a different UTC day", async () => {
+    vi.useFakeTimers();
+    const ticker = "TSTFMPF3";
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals")
+      .mockResolvedValueOnce({
+        ticker,
+        marketCap: 9_100_000_000,
+        peRatio: 24,
+        source: "FMP",
+      })
+      .mockResolvedValueOnce({
+        ticker,
+        marketCap: 9_200_000_000,
+        peRatio: 23,
+        source: "FMP",
+      });
+
+    vi.setSystemTime(new Date("2026-06-04T10:00:00.000Z"));
+    const firstRun = await ingestTickerFundamentals(ticker);
+
+    vi.setSystemTime(new Date("2026-06-05T10:00:00.000Z"));
+    const secondRun = await ingestTickerFundamentals(ticker);
+
+    expect(firstRun.snapshotCreated).toBe(true);
+    expect(firstRun.snapshotUpdated).toBe(false);
+    expect(secondRun.snapshotCreated).toBe(true);
+    expect(secondRun.snapshotUpdated).toBe(false);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    const snapshots = await listFundamentalSnapshotsByStockId(stock!.id, 10);
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
   });
 
   it("continues portfolio fundamentals ingestion when one ticker fails", async () => {
@@ -646,6 +962,127 @@ describe("real-data-ingestion.service", () => {
     );
   });
 
+  it("full-refresh market-data succeeds when legacy same-day duplicates exist", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRLEG");
+
+    await createTestHolding(portfolio.id, stock.id);
+
+    const duplicateDays = [
+      new Date("2026-04-01T00:00:00.000Z"),
+      new Date("2026-04-02T00:00:00.000Z"),
+      new Date("2026-04-03T00:00:00.000Z"),
+    ];
+
+    for (const day of duplicateDays) {
+      await recordPriceSnapshot(stock.ticker, {
+        source: "FMP_HISTORICAL",
+        price: 210,
+        close: 210,
+        capturedAt: day,
+      });
+
+      await recordPriceSnapshot(stock.ticker, {
+        source: null,
+        price: 180,
+        close: 180,
+        capturedAt: new Date(
+          Date.UTC(
+            day.getUTCFullYear(),
+            day.getUTCMonth(),
+            day.getUTCDate(),
+            20,
+            0,
+            0,
+            0,
+          ),
+        ),
+      });
+    }
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker: stock.ticker,
+      companyName: "Legacy Duplicate Co.",
+      exchange: "NASDAQ",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker: stock.ticker,
+      price: 320,
+      previousClose: 318,
+      close: 320,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue([
+      {
+        ticker: stock.ticker,
+        date: new Date("2026-04-01T00:00:00.000Z"),
+        open: 300,
+        high: 303,
+        low: 299,
+        close: 301,
+        volume: 20_000,
+      },
+      {
+        ticker: stock.ticker,
+        date: new Date("2026-04-02T00:00:00.000Z"),
+        open: 301,
+        high: 304,
+        low: 300,
+        close: 302,
+        volume: 20_500,
+      },
+      {
+        ticker: stock.ticker,
+        date: new Date("2026-04-03T00:00:00.000Z"),
+        open: 302,
+        high: 305,
+        low: 301,
+        close: 303,
+        volume: 21_000,
+      },
+    ]);
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockResolvedValue({
+      ticker: stock.ticker,
+      marketCap: 5_000_000_000,
+      peRatio: 19,
+      source: "FMP",
+    });
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      historicalLimit: 3,
+      newsLimitPerTicker: 5,
+      runAnalysis: false,
+    });
+
+    expect(result.marketData.tickersFailed).toBe(0);
+    expect(result.marketData.results[0]?.historicalSnapshotsUpdated).toBe(3);
+
+    const snapshots = await listPriceSnapshotsByTicker(stock.ticker, 100);
+    const nullSourceRows = snapshots.filter((snapshot) => snapshot.source === null);
+    expect(nullSourceRows).toHaveLength(0);
+
+    const canonicalPricesByDay = new Map(
+      snapshots
+        .filter(
+          (snapshot) =>
+            snapshot.source === "FMP_HISTORICAL" &&
+            snapshot.capturedAt.getUTCHours() === 0 &&
+            snapshot.capturedAt.getUTCMinutes() === 0,
+        )
+        .map((snapshot) => [snapshot.capturedAt.toISOString().slice(0, 10), snapshot.price]),
+    );
+
+    expect(canonicalPricesByDay.get("2026-04-01")).toBe(301);
+    expect(canonicalPricesByDay.get("2026-04-02")).toBe(302);
+    expect(canonicalPricesByDay.get("2026-04-03")).toBe(303);
+  });
+
   it("full-refresh returns analysis when runAnalysis=true", async () => {
     const portfolio = await createTestPortfolio();
     const stock = await createTestStock("TSTFMPFR3");
@@ -690,5 +1127,83 @@ describe("real-data-ingestion.service", () => {
 
     expect(result.analysis).toBeDefined();
     expect(analysisSpy).toHaveBeenCalled();
+  });
+
+  it("full-refresh second run refreshes same-day fundamentals and updates same-day report summary", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFR4");
+
+    await createTestHolding(portfolio.id, stock.id);
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker: stock.ticker,
+      companyName: "Refresh Fundamentals Co.",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker: stock.ticker,
+      price: 150,
+      previousClose: 148,
+      close: 150,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      buildHistoricalSeries(stock.ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals")
+      .mockResolvedValueOnce({
+        ticker: stock.ticker,
+        peRatio: 52,
+        revenueGrowth: 0.01,
+        marketCap: 4_000_000_000,
+        source: "FMP",
+      })
+      .mockResolvedValueOnce({
+        ticker: stock.ticker,
+        peRatio: 18,
+        revenueGrowth: 0.18,
+        marketCap: 4_500_000_000,
+        source: "FMP",
+      });
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    const firstRun = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      runAnalysis: true,
+    });
+
+    const secondRun = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      runAnalysis: true,
+    });
+
+    expect(firstRun.fundamentals.snapshotsCreated).toBe(1);
+    expect(firstRun.fundamentals.snapshotsUpdated).toBe(0);
+
+    expect(secondRun.fundamentals.snapshotsCreated).toBe(0);
+    expect(secondRun.fundamentals.snapshotsUpdated).toBe(1);
+    expect(secondRun.fundamentals.results[0]?.snapshotUpdated).toBe(true);
+    expect(
+      secondRun.fundamentals.results[0]?.warnings.some((warning) =>
+        warning.includes("already exists for today"),
+      ) ?? false,
+    ).toBe(false);
+
+    const latestReport = await getLatestAIReportByStockId(stock.id);
+    expect(latestReport).not.toBeNull();
+    expect(latestReport?.fundamentalSummary).toContain("P/E 18.0");
+
+    const snapshots = await listFundamentalSnapshotsByStockId(stock.id, 10);
+    const sameDaySnapshots = snapshots.filter((snapshot) => {
+      return (
+        snapshot.capturedAt.getUTCFullYear() === snapshots[0]?.capturedAt.getUTCFullYear() &&
+        snapshot.capturedAt.getUTCMonth() === snapshots[0]?.capturedAt.getUTCMonth() &&
+        snapshot.capturedAt.getUTCDate() === snapshots[0]?.capturedAt.getUTCDate()
+      );
+    });
+
+    expect(sameDaySnapshots).toHaveLength(1);
   });
 });

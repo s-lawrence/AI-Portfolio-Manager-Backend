@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { alertsRoutes } from "./alerts.routes";
 import { devRoutes } from "./dev.routes";
+import { economicsIngestionRoutes } from "./economics-ingestion.routes";
 import { earningsRoutes } from "./earnings.routes";
 import { healthRoutes } from "./health.routes";
 import { holdingsRoutes } from "./holdings.routes";
@@ -20,6 +21,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(holdingsRoutes, { prefix: "/api/holdings" });
   await app.register(stocksRoutes, { prefix: "/api/stocks" });
   await app.register(ingestionRoutes, { prefix: "/api/ingestion" });
+  await app.register(economicsIngestionRoutes, { prefix: "/api/ingestion" });
   await app.register(marketDataRoutes, { prefix: "/api/market-data" });
   await app.register(newsRoutes, { prefix: "/api/news" });
   await app.register(earningsRoutes, { prefix: "/api/earnings" });

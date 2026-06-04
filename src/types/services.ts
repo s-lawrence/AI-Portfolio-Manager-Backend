@@ -163,6 +163,7 @@ export interface AlertCreationInput {
 
 export interface MarketDataSnapshotInput {
   price: number;
+  source?: string | null;
   open?: number | null;
   high?: number | null;
   low?: number | null;
@@ -183,6 +184,7 @@ export interface TechnicalAnalysisInput {
   macd?: number | null;
   macdSignal?: number | null;
   macdHistogram?: number | null;
+  volatility?: number | null;
   volume30DayAverage?: number | null;
   volumeRelativeToAverage?: number | null;
   fiftyTwoWeekHigh?: number | null;
@@ -283,6 +285,30 @@ export interface SeedDemoMarketDataResult {
   analysis?: PortfolioAnalysisResult;
 }
 
+export interface PurgeDemoAnalyticalDataOptions {
+  ticker?: string;
+  portfolioId?: string;
+  allowLegacyDemoPurge?: boolean;
+}
+
+export interface PurgeDemoAnalyticalDataResult {
+  scope: {
+    ticker?: string;
+    portfolioId?: string;
+    affectedStockIds: string[];
+    affectedPortfolioIds: string[];
+  };
+  priceSnapshotsDeleted: number;
+  fundamentalSnapshotsDeleted: number;
+  earningsEventsDeleted: number;
+  newsArticlesDeleted: number;
+  aiReportsDeleted: number;
+  predictionsDeleted: number;
+  portfolioSummariesDeleted: number;
+  alertsDeleted: number;
+  warnings: string[];
+}
+
 export interface IngestTickerMarketDataOptions {
   historicalLimit?: number;
 }
@@ -292,6 +318,7 @@ export interface IngestTickerMarketDataResult {
   profileUpdated: boolean;
   quoteSnapshotCreated: boolean;
   historicalSnapshotsCreated: number;
+  historicalSnapshotsUpdated: number;
   historicalSnapshotsSkipped: number;
   technicalSnapshotCreated: boolean;
   warnings: string[];
@@ -321,6 +348,8 @@ export interface IngestPortfolioMarketDataResult {
 export interface IngestTickerFundamentalsResult {
   ticker: string;
   snapshotCreated: boolean;
+  snapshotUpdated: boolean;
+  snapshotSkipped: boolean;
   fieldsPopulated: string[];
   warnings: string[];
 }
@@ -331,6 +360,9 @@ export interface IngestPortfolioFundamentalsResult {
   finishedAt: string;
   tickersProcessed: number;
   tickersFailed: number;
+  snapshotsCreated: number;
+  snapshotsUpdated: number;
+  snapshotsSkipped: number;
   results: IngestTickerFundamentalsResult[];
   failedTickers: IngestPortfolioTickerFailure[];
 }
@@ -381,6 +413,64 @@ export interface IngestPortfolioNewsResult {
   failedTickers: IngestPortfolioTickerFailure[];
 }
 
+export interface FmpEconomicsIngestionSectionResult {
+  recordsCreated: number;
+  recordsUpdated: number;
+  recordsSkipped: number;
+  warnings: string[];
+}
+
+export interface IngestFmpTreasuryRatesOptions {
+  from?: Date;
+  to?: Date;
+  limit?: number;
+}
+
+export interface IngestFmpEconomicIndicatorsOptions {
+  namesOrSeries?: string[];
+  from?: Date;
+  to?: Date;
+  limit?: number;
+}
+
+export interface IngestFmpEconomicCalendarOptions {
+  from: Date;
+  to: Date;
+}
+
+export interface IngestFmpMarketRiskPremiumOptions {
+  from?: Date;
+  to?: Date;
+}
+
+export interface IngestFmpEconomicsDefaultSetOptions {
+  includeTreasuryRates?: boolean;
+  includeIndicators?: boolean;
+  includeCalendar?: boolean;
+  includeMarketRiskPremium?: boolean;
+  treasuryRatesFrom?: Date;
+  treasuryRatesTo?: Date;
+  treasuryRatesLimit?: number;
+  indicatorsFrom?: Date;
+  indicatorsTo?: Date;
+  indicatorsLimit?: number;
+  indicatorNamesOrSeries?: string[];
+  calendarFrom?: Date;
+  calendarTo?: Date;
+  marketRiskPremiumFrom?: Date;
+  marketRiskPremiumTo?: Date;
+}
+
+export interface IngestFmpEconomicsDefaultSetResult {
+  startedAt: string;
+  finishedAt: string;
+  treasuryRates: FmpEconomicsIngestionSectionResult;
+  economicIndicators: FmpEconomicsIngestionSectionResult;
+  economicCalendar: FmpEconomicsIngestionSectionResult;
+  marketRiskPremium: FmpEconomicsIngestionSectionResult;
+  warnings: string[];
+}
+
 export interface IngestPortfolioFullBasicOptions {
   historicalLimit?: number;
   runAnalysis?: boolean;
@@ -398,6 +488,7 @@ export interface IngestPortfolioFullBasicResult {
 export interface PortfolioFmpFullRefreshOptions {
   historicalLimit?: number;
   newsLimitPerTicker?: number;
+  includeEconomics?: boolean;
   runAnalysis?: boolean;
 }
 
@@ -409,6 +500,7 @@ export interface PortfolioFmpFullRefreshResult {
   fundamentals: IngestPortfolioFundamentalsResult;
   earnings: PortfolioEarningsIngestionResult;
   news: IngestPortfolioNewsResult;
+  economics?: IngestFmpEconomicsDefaultSetResult;
   analysis?: PortfolioAnalysisResult;
   warnings: string[];
 }

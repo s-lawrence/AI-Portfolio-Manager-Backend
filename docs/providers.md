@@ -29,6 +29,10 @@ Notes:
 - /earnings?symbol={symbol}
 - /earnings-calendar?from={YYYY-MM-DD}&to={YYYY-MM-DD}&page={n}
 - /news/stock?symbols={symbol}
+- /treasury-rates
+- /economic-indicators
+- /economic-calendar (fallback /economics-calendar)
+- /market-risk-premium
 
 ### Ticker Examples
 
@@ -49,7 +53,11 @@ U.S. examples:
 
 - Tickers are normalized to uppercase and preserve suffixes such as .TO and .V.
 - Technical indicators are calculated internally from stored price history after ingestion; they are not sourced directly from FMP.
+- Technical calculation targets include SMA20/SMA50/SMA200, RSI14, and MACD components when enough close history exists.
+- If history is insufficient for a specific indicator window, ingestion returns explicit warnings.
+- Annualized volatility is computed from recent close returns for research-bundle projection.
 - Fundamentals ingestion merges the latest values across key metrics, ratios, growth, income statement, cash flow, and profile endpoints.
+- Fundamentals storage is same-day upsert idempotent (UTC-day scoped): re-runs refresh the existing same-day snapshot instead of skipping.
 - If one fundamentals endpoint returns 404/no-data, ingestion continues with available endpoints.
 - Percent-like fundamentals fields are normalized to decimal fractions internally (for example 5.4% stored as 0.054).
 - Percent normalization applies to revenueGrowth, grossMargin, operatingMargin, netMargin, and dividendYield.
@@ -63,3 +71,37 @@ U.S. examples:
 - If provider sentiment/materiality is missing, deterministic local fallback classification is applied.
 - Demo-marked local fake news is explicitly identified so reports can prefer real company headlines.
 - Combined portfolio full-refresh orchestration runs market-data, fundamentals, earnings, and news ingestion in sequence before optional portfolio analysis.
+
+### Snapshot Source Conventions
+
+- Market quote snapshots ingested from FMP are stored with `source = FMP_QUOTE`.
+- Historical daily snapshots ingested from FMP are stored with `source = FMP_HISTORICAL`.
+- Historical daily ingestion is upserted by stock + UTC day: existing same-day rows are refreshed to FMP values rather than skipped.
+- Local demo market snapshots are stored with `source = DEMO`.
+- Latest snapshot selection is source-aware and will not allow `DEMO` rows to override available FMP rows.
+- Technical calculations use source-aware historical prices and prefer FMP rows when sufficient provider history exists.
+
+### Demo Data Seeding Notes
+
+- `prisma/seed.ts` always creates only core demo context (user, preferences, portfolio, stocks, holdings).
+- Demo analytical data (price/fundamentals/news/earnings/reports/predictions) is disabled by default.
+- Set `SEED_DEMO_ANALYTICS=true` only when explicit local fake analytical seeding is required.
+
+### Market Data CapturedAt Conventions
+
+- Quote snapshots are persisted with ingestion-time `capturedAt` (current timestamp), representing latest tradable context.
+- Historical EOD snapshots are persisted with provider historical date `capturedAt` (typically UTC midnight timestamps).
+- Latest market snapshot reads use canonical selector logic:
+	- newest `capturedAt` first,
+	- intraday timestamp preferred on ties,
+	- newest `createdAt` fallback tie-breaker.
+- `PriceSnapshot` currently has no persisted `source` column, so source-level cleanup (for example demo-only purge by source) is not yet safe to automate.
+
+### FMP Economics Market-Context Notes
+
+- FMP economics ingestion is stored as market-context macro data (provider-level series/events), not ticker-level stock fundamentals.
+- Treasury rates and market risk premium values are persisted in macro-series storage for reusable macro context.
+- Economic calendar releases are persisted in macro-event storage for upcoming event context and report enrichment.
+- Default economics ingestion set is designed for resilient partial completion; one category failure does not block others.
+- This milestone uses FMP as the macro-context foundation only.
+- FRED and Bank of Canada remain out of scope in this phase and will be added later as primary macro and Canadian-source integrations.

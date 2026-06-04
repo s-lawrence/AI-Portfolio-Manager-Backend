@@ -43,15 +43,18 @@ import {
   upsertNewsArticleByUrl,
 } from "../repositories/news-articles.repository";
 import {
-  getLatestFundamentals,
-  recordFundamentalSnapshot,
+  upsertFundamentalSnapshotForUtcDay,
 } from "./fundamentals.service";
-import { recordPriceSnapshot } from "./market-data.service";
+import {
+  recordPriceSnapshot,
+  upsertHistoricalPriceSnapshotForDay,
+} from "./market-data.service";
 import {
   classifyNewsSentiment,
   estimateMateriality,
 } from "./news.service";
 import { runPortfolioAnalysis } from "./portfolio-analysis.service";
+import { ingestFmpEconomicsDefaultSet } from "./fmp-economics-ingestion.service";
 import { getPortfolioOverview } from "./portfolios.service";
 import {
   StockMetadataInput,
@@ -165,14 +168,6 @@ function toBigIntOrNull(value: number | undefined): bigint | null {
   }
 
   return BigInt(Math.trunc(normalized));
-}
-
-function isSameUtcCalendarDay(left: Date, right: Date): boolean {
-  return (
-    left.getUTCFullYear() === right.getUTCFullYear() &&
-    left.getUTCMonth() === right.getUTCMonth() &&
-    left.getUTCDate() === right.getUTCDate()
-  );
 }
 
 function getPopulatedFundamentalFields(
@@ -337,6 +332,7 @@ export async function ingestTickerMarketData(
   }
 
   await recordPriceSnapshot(normalizedTicker, {
+    source: "FMP_QUOTE",
     price: quotePrice,
     open: normalizeFiniteNumber(quote.open),
     high: normalizeFiniteNumber(quote.high),
@@ -359,6 +355,7 @@ export async function ingestTickerMarketData(
   }
 
   let historicalSnapshotsCreated = 0;
+  let historicalSnapshotsUpdated = 0;
   let historicalSnapshotsSkipped = 0;
   let previousClose: number | undefined;
 
@@ -372,8 +369,10 @@ export async function ingestTickerMarketData(
       continue;
     }
 
-    try {
-      await recordPriceSnapshot(normalizedTicker, {
+    const historicalUpsert = await upsertHistoricalPriceSnapshotForDay(
+      normalizedTicker,
+      {
+        source: "FMP_HISTORICAL",
         price: resolvedClose,
         open: normalizeFiniteNumber(historical.open),
         high: normalizeFiniteNumber(historical.high),
@@ -382,15 +381,18 @@ export async function ingestTickerMarketData(
         previousClose,
         volume: normalizeFiniteNumber(historical.volume),
         capturedAt: new Date(historical.date.getTime()),
-      });
+      },
+      {
+        cleanupLegacyDuplicates: true,
+      },
+    );
 
+    if (historicalUpsert.created) {
       historicalSnapshotsCreated += 1;
-    } catch (error) {
-      if (isDuplicateCapturedAtError(error)) {
-        historicalSnapshotsSkipped += 1;
-      } else {
-        throw error;
-      }
+    } else if (historicalUpsert.updated) {
+      historicalSnapshotsUpdated += 1;
+    } else if (historicalUpsert.skipped) {
+      historicalSnapshotsSkipped += 1;
     }
 
     previousClose = resolvedClose;
@@ -402,6 +404,40 @@ export async function ingestTickerMarketData(
   if (technicalInput) {
     await recordTechnicalSnapshot(normalizedTicker, technicalInput);
     technicalSnapshotCreated = true;
+
+    if (technicalInput.sma50 == null) {
+      warnings.push(
+        `Technical snapshot for ${normalizedTicker} is missing SMA50 (insufficient close history).`,
+      );
+    }
+
+    if (technicalInput.sma200 == null) {
+      warnings.push(
+        `Technical snapshot for ${normalizedTicker} is missing SMA200 (insufficient close history).`,
+      );
+    }
+
+    if (technicalInput.rsi14 == null) {
+      warnings.push(
+        `Technical snapshot for ${normalizedTicker} is missing RSI14 (insufficient close history).`,
+      );
+    }
+
+    if (technicalInput.macd == null || technicalInput.macdSignal == null) {
+      warnings.push(
+        `Technical snapshot for ${normalizedTicker} is missing MACD components (insufficient close history).`,
+      );
+    }
+
+    if (technicalInput.volatility == null) {
+      warnings.push(
+        `Technical projection for ${normalizedTicker} is missing annualized volatility (insufficient close history).`,
+      );
+    } else if (technicalInput.volatility > 2) {
+      warnings.push(
+        `Technical projection for ${normalizedTicker} returned unusually high annualized volatility (${technicalInput.volatility.toFixed(4)}).`,
+      );
+    }
   } else {
     warnings.push(
       `Technical snapshot was not created for ${normalizedTicker} due to insufficient price history.`,
@@ -413,6 +449,7 @@ export async function ingestTickerMarketData(
     profileUpdated,
     quoteSnapshotCreated: true,
     historicalSnapshotsCreated,
+    historicalSnapshotsUpdated,
     historicalSnapshotsSkipped,
     technicalSnapshotCreated,
     warnings,
@@ -434,6 +471,8 @@ export async function ingestTickerFundamentals(
     return {
       ticker: normalizedTicker,
       snapshotCreated: false,
+      snapshotUpdated: false,
+      snapshotSkipped: true,
       fieldsPopulated: [],
       warnings,
     };
@@ -442,22 +481,9 @@ export async function ingestTickerFundamentals(
   const fieldsPopulated = getPopulatedFundamentalFields(fundamentals);
 
   const now = new Date();
-  const latestFundamentals = await getLatestFundamentals(normalizedTicker);
-  if (latestFundamentals && isSameUtcCalendarDay(latestFundamentals.capturedAt, now)) {
-    warnings.push(
-      `Skipped fundamentals snapshot for ${normalizedTicker}; a snapshot already exists for today.`,
-    );
-
-    return {
-      ticker: normalizedTicker,
-      snapshotCreated: false,
-      fieldsPopulated,
-      warnings,
-    };
-  }
 
   try {
-    await recordFundamentalSnapshot(normalizedTicker, {
+    const upsertResult = await upsertFundamentalSnapshotForUtcDay(normalizedTicker, {
       capturedAt: now,
       source: normalizeMetadataValue(fundamentals.source) ?? "FMP",
       marketCap: toBigIntOrNull(fundamentals.marketCap),
@@ -478,15 +504,44 @@ export async function ingestTickerFundamentals(
       dividendYield: normalizeFiniteNumber(fundamentals.dividendYield) ?? null,
       analystConsensus: normalizeMetadataValue(fundamentals.analystConsensus) ?? null,
     });
+
+    return {
+      ticker: normalizedTicker,
+      snapshotCreated: upsertResult.created,
+      snapshotUpdated: upsertResult.updated,
+      snapshotSkipped: false,
+      fieldsPopulated,
+      warnings,
+    };
   } catch (error) {
     if (isDuplicateCapturedAtError(error)) {
-      warnings.push(
-        `Skipped fundamentals snapshot for ${normalizedTicker}; duplicate timestamp detected.`,
-      );
+      const upsertResult = await upsertFundamentalSnapshotForUtcDay(normalizedTicker, {
+        capturedAt: now,
+        source: normalizeMetadataValue(fundamentals.source) ?? "FMP",
+        marketCap: toBigIntOrNull(fundamentals.marketCap),
+        peRatio: normalizeFiniteNumber(fundamentals.peRatio) ?? null,
+        forwardPeRatio: normalizeFiniteNumber(fundamentals.forwardPeRatio) ?? null,
+        pegRatio: normalizeFiniteNumber(fundamentals.pegRatio) ?? null,
+        priceToSales: normalizeFiniteNumber(fundamentals.priceToSales) ?? null,
+        priceToBook: normalizeFiniteNumber(fundamentals.priceToBook) ?? null,
+        evToEbitda: normalizeFiniteNumber(fundamentals.evToEbitda) ?? null,
+        eps: normalizeFiniteNumber(fundamentals.eps) ?? null,
+        revenueGrowth: normalizeFiniteNumber(fundamentals.revenueGrowth) ?? null,
+        grossMargin: normalizeFiniteNumber(fundamentals.grossMargin) ?? null,
+        operatingMargin: normalizeFiniteNumber(fundamentals.operatingMargin) ?? null,
+        netMargin: normalizeFiniteNumber(fundamentals.netMargin) ?? null,
+        debtToEquity: normalizeFiniteNumber(fundamentals.debtToEquity) ?? null,
+        currentRatio: normalizeFiniteNumber(fundamentals.currentRatio) ?? null,
+        freeCashFlow: toBigIntOrNull(fundamentals.freeCashFlow),
+        dividendYield: normalizeFiniteNumber(fundamentals.dividendYield) ?? null,
+        analystConsensus: normalizeMetadataValue(fundamentals.analystConsensus) ?? null,
+      });
 
       return {
         ticker: normalizedTicker,
-        snapshotCreated: false,
+        snapshotCreated: upsertResult.created,
+        snapshotUpdated: upsertResult.updated,
+        snapshotSkipped: false,
         fieldsPopulated,
         warnings,
       };
@@ -494,13 +549,6 @@ export async function ingestTickerFundamentals(
 
     throw error;
   }
-
-  return {
-    ticker: normalizedTicker,
-    snapshotCreated: true,
-    fieldsPopulated,
-    warnings,
-  };
 }
 
 export async function ingestPortfolioFundamentals(
@@ -533,12 +581,30 @@ export async function ingestPortfolioFundamentals(
 
   const finishedAtDate = new Date();
 
+  const snapshotsCreated = results.reduce(
+    (count, result) => count + (result.snapshotCreated ? 1 : 0),
+    0,
+  );
+
+  const snapshotsUpdated = results.reduce(
+    (count, result) => count + (result.snapshotUpdated ? 1 : 0),
+    0,
+  );
+
+  const snapshotsSkipped = results.reduce(
+    (count, result) => count + (result.snapshotSkipped ? 1 : 0),
+    0,
+  );
+
   return {
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
     tickersProcessed: overview.holdings.length,
     tickersFailed: failedTickers.length,
+    snapshotsCreated,
+    snapshotsUpdated,
+    snapshotsSkipped,
     results,
     failedTickers,
   };
@@ -883,6 +949,43 @@ export async function ingestPortfolioFmpFullRefresh(
     limitPerTicker: options.newsLimitPerTicker,
   });
 
+  let economics: PortfolioFmpFullRefreshResult["economics"];
+  if (options.includeEconomics) {
+    try {
+      economics = await ingestFmpEconomicsDefaultSet();
+    } catch (error) {
+      economics = {
+        startedAt: startedAtDate.toISOString(),
+        finishedAt: new Date().toISOString(),
+        treasuryRates: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        economicIndicators: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        economicCalendar: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        marketRiskPremium: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        warnings: [toErrorReason(error)],
+      };
+    }
+  }
+
   let analysis: PortfolioFmpFullRefreshResult["analysis"];
   if (options.runAnalysis) {
     analysis = await runPortfolioAnalysis(normalizedPortfolioId);
@@ -912,6 +1015,12 @@ export async function ingestPortfolioFmpFullRefresh(
     warnings.push(`News ingestion had ${news.tickersFailed} ticker failure(s).`);
   }
 
+  if (economics && economics.warnings.length > 0) {
+    warnings.push(
+      `Economics ingestion completed with ${economics.warnings.length} warning(s).`,
+    );
+  }
+
   const finishedAtDate = new Date();
 
   return {
@@ -922,6 +1031,7 @@ export async function ingestPortfolioFmpFullRefresh(
     fundamentals,
     earnings,
     news,
+    economics,
     analysis,
     warnings,
   };

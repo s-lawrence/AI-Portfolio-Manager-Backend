@@ -22,7 +22,7 @@ import {
   findOpenPredictionByStockHoldingHorizonAndDay,
   updatePrediction,
 } from "../repositories/predictions.repository";
-import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
+import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import {
   endOfUtcDay,
   normalizeListLimit,
@@ -30,6 +30,8 @@ import {
   startOfUtcDay,
 } from "../types/common";
 import { listRecentNewsByTicker } from "../repositories/news-articles.repository";
+import { listUpcomingMacroEventsByProvider } from "../repositories/macro-events.repository";
+import { getLatestMacroSeriesObservation } from "../repositories/macro-series-observations.repository";
 import {
   AIReportWithStockMetadata,
   DailyTickerReportInput,
@@ -134,6 +136,191 @@ function buildNewsSummaryText(args: {
   }
 
   return "No recent news available.";
+}
+
+type TechnicalSnapshotLike = {
+  trendDirection?: string | null;
+  sma20?: number | null;
+  sma50?: number | null;
+  sma200?: number | null;
+  rsi14?: number | null;
+  rsi?: number | null;
+  ma50?: number | null;
+  ma200?: number | null;
+  macd?: number | null;
+  macdSignal?: number | null;
+  macdHistogram?: number | null;
+  volatility?: number | null;
+};
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizeTechnicalSnapshot(
+  technical: unknown,
+): {
+  exists: boolean;
+  trendDirection: string | null;
+  sma20: number | null;
+  sma50: number | null;
+  sma200: number | null;
+  rsi: number | null;
+  macd: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  volatility: number | null;
+} {
+  if (!technical || typeof technical !== "object") {
+    return {
+      exists: false,
+      trendDirection: null,
+      sma20: null,
+      sma50: null,
+      sma200: null,
+      rsi: null,
+      macd: null,
+      macdSignal: null,
+      macdHistogram: null,
+      volatility: null,
+    };
+  }
+
+  const snapshot = technical as TechnicalSnapshotLike;
+
+  return {
+    exists: true,
+    trendDirection: typeof snapshot.trendDirection === "string"
+      ? snapshot.trendDirection
+      : null,
+    sma20: toFiniteNumber(snapshot.sma20),
+    sma50: toFiniteNumber(snapshot.sma50 ?? snapshot.ma50),
+    sma200: toFiniteNumber(snapshot.sma200 ?? snapshot.ma200),
+    rsi: toFiniteNumber(snapshot.rsi14 ?? snapshot.rsi),
+    macd: toFiniteNumber(snapshot.macd),
+    macdSignal: toFiniteNumber(snapshot.macdSignal),
+    macdHistogram: toFiniteNumber(snapshot.macdHistogram),
+    volatility: toFiniteNumber(snapshot.volatility),
+  };
+}
+
+function buildTechnicalSummary(args: {
+  technicalExists: boolean;
+  trendDirection: string | null;
+  currentPrice: number;
+  sma20: number | null;
+  sma50: number | null;
+  sma200: number | null;
+  rsi: number | null;
+  macd: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  volatility: number | null;
+}): string {
+  if (!args.technicalExists) {
+    return "Technical trend unavailable.";
+  }
+
+  const parts: string[] = [];
+
+  if (args.trendDirection) {
+    parts.push(`Trend is ${args.trendDirection}.`);
+  }
+
+  if (args.rsi != null) {
+    parts.push(`RSI is ${args.rsi.toFixed(1)}.`);
+  }
+
+  if (args.sma50 != null) {
+    const relation = args.currentPrice >= args.sma50 ? "above" : "below";
+    parts.push(`Price is ${relation} the 50-day moving average.`);
+  }
+
+  if (args.sma200 != null) {
+    const relation = args.currentPrice >= args.sma200 ? "above" : "below";
+    parts.push(`Price is ${relation} the 200-day moving average.`);
+  }
+
+  if (args.macd != null) {
+    const macdSign = args.macd >= 0 ? "positive" : "negative";
+
+    if (args.macdSignal != null) {
+      const relation = args.macd >= args.macdSignal ? "above" : "below";
+      parts.push(
+        `MACD is ${macdSign} at ${args.macd.toFixed(2)} and ${relation} signal (${args.macdSignal.toFixed(2)}).`,
+      );
+    } else {
+      parts.push(`MACD is ${macdSign} at ${args.macd.toFixed(2)}.`);
+    }
+  } else if (args.macdHistogram != null) {
+    const histSign = args.macdHistogram >= 0 ? "positive" : "negative";
+    parts.push(`MACD histogram is ${histSign} at ${args.macdHistogram.toFixed(2)}.`);
+  }
+
+  if (args.volatility != null) {
+    parts.push(`Annualized volatility is ${(args.volatility * 100).toFixed(1)}%.`);
+  }
+
+  if (parts.length === 0) {
+    return "Technical indicators are unavailable.";
+  }
+
+  return parts.join(" ");
+}
+
+function formatMacroNumber(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(2) : String(value);
+}
+
+async function buildMacroSummary(): Promise<string> {
+  const [us10y, us2y, mrpTotalUs, upcomingHighImportance] = await Promise.all([
+    getLatestMacroSeriesObservation("FMP", "FMP_TREASURY_10Y"),
+    getLatestMacroSeriesObservation("FMP", "FMP_TREASURY_2Y"),
+    getLatestMacroSeriesObservation("FMP", "FMP_MRP_TOTAL_US"),
+    listUpcomingMacroEventsByProvider("FMP", {
+      from: new Date(),
+      importanceLevels: ["HIGH", "VERY HIGH", "CRITICAL"],
+      limit: 3,
+    }),
+  ]);
+
+  const parts: string[] = [];
+
+  if (us10y && us2y) {
+    parts.push(
+      `US Treasury curve snapshot: 10Y ${formatMacroNumber(us10y.value)}% vs 2Y ${formatMacroNumber(us2y.value)}%.`,
+    );
+  } else if (us10y) {
+    parts.push(`US 10Y Treasury latest: ${formatMacroNumber(us10y.value)}%.`);
+  } else if (us2y) {
+    parts.push(`US 2Y Treasury latest: ${formatMacroNumber(us2y.value)}%.`);
+  }
+
+  if (mrpTotalUs) {
+    parts.push(`US total market risk premium: ${formatMacroNumber(mrpTotalUs.value)}%.`);
+  }
+
+  if (upcomingHighImportance.length > 0) {
+    const list = upcomingHighImportance
+      .map((event) => {
+        const when = event.eventDate ? event.eventDate.toISOString().slice(0, 10) : "unknown-date";
+        const country = event.country ?? "global";
+        return `${event.title} (${country}, ${when})`;
+      })
+      .join("; ");
+
+    parts.push(`Upcoming high-importance macro events: ${list}.`);
+  }
+
+  if (parts.length === 0) {
+    return "No macro context available from local economics storage in this phase.";
+  }
+
+  return parts.join(" ");
 }
 
 function riskLevelFromScore(riskScore: number): RiskLevel {
@@ -425,6 +612,10 @@ export async function generateMockTickerReport(
         100
       : null);
 
+  const technical = normalizeTechnicalSnapshot(bundle.latestTechnicalSnapshot);
+  const trendDirection = technical.trendDirection;
+  const currentPrice = bundle.latestPriceSnapshot.price;
+
   if (dailyChange != null) {
     evidenceCount += 1;
 
@@ -439,9 +630,10 @@ export async function generateMockTickerReport(
     dataWarnings.push("Missing daily price-change context.");
   }
 
-  const trendDirection = bundle.latestTechnicalSnapshot?.trendDirection ?? null;
+  let hasTechnicalSignal = false;
+
   if (trendDirection) {
-    evidenceCount += 1;
+    hasTechnicalSignal = true;
 
     if (trendDirection === "STRONG_UPTREND") {
       score += 3;
@@ -456,8 +648,73 @@ export async function generateMockTickerReport(
       score -= 3;
       bearishFactors.push("Trend structure indicates strong downtrend.");
     }
-  } else {
+  }
+
+  if (!technical.exists) {
     dataWarnings.push("Missing technical trend snapshot.");
+  }
+
+  if (technical.sma50 != null) {
+    hasTechnicalSignal = true;
+    if (currentPrice > technical.sma50) {
+      score += 1;
+      bullishFactors.push("Price is trading above the 50-day moving average.");
+    } else if (currentPrice < technical.sma50) {
+      score -= 1;
+      bearishFactors.push("Price is trading below the 50-day moving average.");
+    }
+  }
+
+  if (technical.sma200 != null) {
+    hasTechnicalSignal = true;
+    if (currentPrice > technical.sma200) {
+      score += 1;
+      bullishFactors.push("Price is trading above the 200-day moving average.");
+    } else if (currentPrice < technical.sma200) {
+      score -= 1;
+      bearishFactors.push("Price is trading below the 200-day moving average.");
+    }
+  }
+
+  if (technical.rsi != null) {
+    hasTechnicalSignal = true;
+
+    if (technical.rsi > 70) {
+      score -= 1;
+      bearishFactors.push("RSI indicates overbought conditions.");
+    } else if (technical.rsi < 30) {
+      score -= 1;
+      bearishFactors.push("RSI indicates oversold conditions and weak momentum.");
+    } else if (technical.rsi >= 45 && technical.rsi <= 65) {
+      score += 1;
+      bullishFactors.push("RSI is in a balanced momentum range.");
+    }
+  }
+
+  if (technical.macd != null && technical.macdSignal != null) {
+    hasTechnicalSignal = true;
+
+    if (technical.macd > technical.macdSignal) {
+      score += 1;
+      bullishFactors.push("MACD is above its signal line.");
+    } else if (technical.macd < technical.macdSignal) {
+      score -= 1;
+      bearishFactors.push("MACD is below its signal line.");
+    }
+  } else if (technical.macdHistogram != null) {
+    hasTechnicalSignal = true;
+
+    if (technical.macdHistogram > 0) {
+      score += 1;
+      bullishFactors.push("MACD histogram is positive.");
+    } else if (technical.macdHistogram < 0) {
+      score -= 1;
+      bearishFactors.push("MACD histogram is negative.");
+    }
+  }
+
+  if (hasTechnicalSignal) {
+    evidenceCount += 1;
   }
 
   const fundamentals = bundle.latestFundamentalSnapshot;
@@ -713,6 +970,7 @@ export async function generateMockTickerReport(
     };
 
   const reportDate = new Date();
+  const macroSummary = await buildMacroSummary();
 
   const report = await createOrUpdateDailyReport({
     stockId: stock.id,
@@ -731,9 +989,19 @@ export async function generateMockTickerReport(
     keyTakeaway,
     bullishFactors,
     bearishFactors: [...bearishFactors, ...dataWarnings],
-    technicalSummary: trendDirection
-      ? `Trend classified as ${trendDirection}.`
-      : "Technical trend unavailable.",
+    technicalSummary: buildTechnicalSummary({
+      technicalExists: technical.exists,
+      trendDirection,
+      currentPrice,
+      sma20: technical.sma20,
+      sma50: technical.sma50,
+      sma200: technical.sma200,
+      rsi: technical.rsi,
+      macd: technical.macd,
+      macdSignal: technical.macdSignal,
+      macdHistogram: technical.macdHistogram,
+      volatility: technical.volatility,
+    }),
     fundamentalSummary,
     newsSummary:
       buildNewsSummaryText({
@@ -742,7 +1010,7 @@ export async function generateMockTickerReport(
         demoHeadlines: demoNews.map((article) => article.headline),
       }),
     earningsSummary: buildEarningsSummary(bundle.nextEarningsEvent),
-    macroGeopoliticalSummary: "No external macro provider connected in this phase.",
+    macroGeopoliticalSummary: macroSummary,
     whatChanged: "Generated from deterministic local-data heuristic scoring.",
     whatWouldChangeRecommendation:
       "New price/technical/fundamental/news data may change this deterministic result.",
@@ -861,7 +1129,7 @@ export async function createTickerReportFromInput(
     };
   }
 
-  const latestSnapshot = await getLatestPriceSnapshot(stock.id);
+  const latestSnapshot = await getLatestMarketSnapshotForStock(stock.id);
   const startingPrice = input.currentPrice ?? latestSnapshot?.price ?? null;
 
   if (startingPrice == null || startingPrice <= 0) {

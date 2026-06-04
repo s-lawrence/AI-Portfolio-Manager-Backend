@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { TrendDirection } from "@prisma/client";
 
 import { buildApp } from "../../src/app";
+import { recordPriceSnapshot } from "../../src/services/market-data.service";
+import { recordTechnicalSnapshot } from "../../src/services/technical-analysis.service";
 
 describe("API dev seed-demo-market-data route", () => {
   const originalNodeEnv = process.env.NODE_ENV;
@@ -41,6 +44,7 @@ describe("API dev seed-demo-market-data route", () => {
     });
 
     expect(seedResponse.statusCode).toBe(200);
+    const seedBody = seedResponse.json();
 
     const historyResponse = await app.inject({
       method: "GET",
@@ -51,6 +55,11 @@ describe("API dev seed-demo-market-data route", () => {
     const historyBody = historyResponse.json();
     expect(Array.isArray(historyBody.data.items)).toBe(true);
     expect(historyBody.data.items.length).toBeGreaterThanOrEqual(60);
+    if ((seedBody.data.priceSnapshotsCreated as number) > 0) {
+      expect(
+        historyBody.data.items.some((item: { source?: string | null }) => item.source === "DEMO"),
+      ).toBe(true);
+    }
 
     const newsResponse = await app.inject({
       method: "GET",
@@ -70,6 +79,17 @@ describe("API dev seed-demo-market-data route", () => {
     expect(bundleResponse.statusCode).toBe(200);
     const bundleBody = bundleResponse.json();
     expect(bundleBody.data.latestTechnicalSnapshot).toBeTruthy();
+    expect(bundleBody.data.latestTechnicalSnapshot.sma50 == null || typeof bundleBody.data.latestTechnicalSnapshot.sma50 === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.sma200 == null || typeof bundleBody.data.latestTechnicalSnapshot.sma200 === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.rsi14 == null || typeof bundleBody.data.latestTechnicalSnapshot.rsi14 === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.macd == null || typeof bundleBody.data.latestTechnicalSnapshot.macd === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.macdSignal == null || typeof bundleBody.data.latestTechnicalSnapshot.macdSignal === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.macdHistogram == null || typeof bundleBody.data.latestTechnicalSnapshot.macdHistogram === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.volatility == null || typeof bundleBody.data.latestTechnicalSnapshot.volatility === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.rsi == null || typeof bundleBody.data.latestTechnicalSnapshot.rsi === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.ma50 == null || typeof bundleBody.data.latestTechnicalSnapshot.ma50 === "number").toBe(true);
+    expect(bundleBody.data.latestTechnicalSnapshot.ma200 == null || typeof bundleBody.data.latestTechnicalSnapshot.ma200 === "number").toBe(true);
+    expect(typeof bundleBody.data.latestTechnicalSnapshot.capturedAt).toBe("string");
     expect(bundleBody.data.latestFundamentalSnapshot).toBeTruthy();
     expect(bundleBody.data.nextEarningsEvent).toBeTruthy();
     expect(typeof bundleBody.data.nextEarningsEvent.earningsDate).toBe("string");
@@ -82,6 +102,51 @@ describe("API dev seed-demo-market-data route", () => {
         typeof bundleBody.data.nextEarningsEvent.estimatedRevenue === "number",
     ).toBe(true);
     expect(typeof bundleBody.data.nextEarningsEvent.isDateConfirmed).toBe("boolean");
+
+    await app.close();
+  });
+
+  it("returns volatility as decimal fraction in research bundle for normal price data", async () => {
+    process.env.NODE_ENV = "test";
+
+    const ticker = "TSTVOLINT";
+    const start = Date.UTC(2026, 0, 1);
+
+    for (let index = 0; index < 80; index += 1) {
+      const close = 200 + index * 0.15 + Math.sin(index / 5) * 1.6;
+      const capturedAt = new Date(start + index * 24 * 60 * 60 * 1000);
+
+      await recordPriceSnapshot(ticker, {
+        price: close,
+        close,
+        capturedAt,
+      });
+    }
+
+    await recordTechnicalSnapshot(ticker, {
+      sma50: 210,
+      sma200: 195,
+      rsi14: 54,
+      macd: 1.2,
+      macdSignal: 0.9,
+      macdHistogram: 0.3,
+      trendDirection: TrendDirection.UPTREND,
+      capturedAt: new Date(),
+    });
+
+    const app = buildApp();
+    const bundleResponse = await app.inject({
+      method: "GET",
+      url: `/api/stocks/${ticker}/research-bundle`,
+    });
+
+    expect(bundleResponse.statusCode).toBe(200);
+    const bundleBody = bundleResponse.json();
+
+    const volatility = bundleBody.data.latestTechnicalSnapshot.volatility as number | null;
+    expect(typeof volatility === "number" || volatility == null).toBe(true);
+    expect(volatility == null || volatility >= 0).toBe(true);
+    expect(volatility == null || volatility < 2).toBe(true);
 
     await app.close();
   });

@@ -10,7 +10,7 @@ import {
 } from "../repositories/holdings.repository";
 import { listNewsByStockId } from "../repositories/news-articles.repository";
 import { getPortfolioById, getPortfolioWithHoldings } from "../repositories/portfolios.repository";
-import { getLatestPriceSnapshot } from "../repositories/price-snapshots.repository";
+import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getLatestTechnicalSnapshot } from "../repositories/technical-snapshots.repository";
 import { getLatestFundamentalSnapshot } from "../repositories/fundamental-snapshots.repository";
 import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
@@ -121,7 +121,7 @@ export async function getHoldingOverview(
     latestAIReport,
     recentNews,
   ] = await Promise.all([
-    getLatestPriceSnapshot(holding.stockId),
+    getLatestMarketSnapshotForStock(holding.stockId),
     getLatestTechnicalSnapshot(holding.stockId),
     getLatestFundamentalSnapshot(holding.stockId),
     getLatestAIReportByStockId(holding.stockId),

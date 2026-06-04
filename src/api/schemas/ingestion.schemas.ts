@@ -43,5 +43,6 @@ export const ingestPortfolioFullBasicBodySchema = z.object({
 export const ingestPortfolioFullRefreshBodySchema = z.object({
   historicalLimit: optionalLimitSchema,
   newsLimitPerTicker: optionalLimitSchema,
+  includeEconomics: booleanQuerySchema.optional(),
   runAnalysis: booleanQuerySchema.optional(),
 });

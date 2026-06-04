@@ -1,11 +1,17 @@
-import { Sentiment } from "@prisma/client";
+import { Prisma, Sentiment } from "@prisma/client";
 
 import { listFundamentalSnapshotsByStockId } from "../repositories/fundamental-snapshots.repository";
 import { listPortfoliosByUserId } from "../repositories/portfolios.repository";
+import { getPortfolioWithHoldings } from "../repositories/portfolios.repository";
 import { listPriceSnapshotsByStockId } from "../repositories/price-snapshots.repository";
+import { listPriceSnapshotsByStockIdByCreatedAt } from "../repositories/price-snapshots.repository";
 import { listTechnicalSnapshotsByStockId } from "../repositories/technical-snapshots.repository";
 import { getUserByEmail } from "../repositories/users.repository";
+import { prisma } from "../db/prisma";
+import { normalizeTickerOrThrow } from "../types/common";
 import {
+  PurgeDemoAnalyticalDataOptions,
+  PurgeDemoAnalyticalDataResult,
   SeedDemoMarketDataOptions,
   SeedDemoMarketDataResult,
 } from "../types/services";
@@ -449,6 +455,7 @@ async function seedPriceSnapshotsForTicker(
 
     try {
       await recordPriceSnapshot(ticker, {
+        source: "DEMO",
         price: point.close,
         open: point.open,
         high: point.high,
@@ -614,6 +621,9 @@ async function seedEarningsForTicker(
       isDateConfirmed: false,
       estimatedEps: profile.estimatedEps,
       estimatedRevenue: profile.estimatedRevenue,
+      guidanceSummary: "[DEMO] Local fake earnings event for development only.",
+      earningsCallUrl: `https://demo.local/earnings/${ticker.toLowerCase()}/call`,
+      transcriptUrl: `https://demo.local/earnings/${ticker.toLowerCase()}/transcript`,
     });
 
     return 0;
@@ -627,6 +637,9 @@ async function seedEarningsForTicker(
     isDateConfirmed: false,
     estimatedEps: profile.estimatedEps,
     estimatedRevenue: profile.estimatedRevenue,
+    guidanceSummary: "[DEMO] Local fake earnings event for development only.",
+    earningsCallUrl: `https://demo.local/earnings/${ticker.toLowerCase()}/call`,
+    transcriptUrl: `https://demo.local/earnings/${ticker.toLowerCase()}/transcript`,
   });
 
   return 1;
@@ -714,4 +727,340 @@ export async function seedDemoMarketData(
   }
 
   return result;
+}
+
+function buildScopedWhere<T extends object>(
+  base: T,
+  affectedStockIds: string[],
+): T & { stockId?: { in: string[] } } {
+  if (affectedStockIds.length === 0) {
+    return base as T & { stockId?: { in: string[] } };
+  }
+
+  return {
+    ...base,
+    stockId: {
+      in: affectedStockIds,
+    },
+  };
+}
+
+export async function purgeDemoAnalyticalData(
+  options: PurgeDemoAnalyticalDataOptions = {},
+): Promise<PurgeDemoAnalyticalDataResult> {
+  const warnings: string[] = [];
+  const isScopedRequest = Boolean(options.ticker || options.portfolioId);
+
+  let scopedStockIds: string[] = [];
+  const scopedPortfolioIds = new Set<string>();
+
+  if (options.ticker) {
+    const ticker = normalizeTickerOrThrow(options.ticker);
+    const stock = await prisma.stock.findUnique({
+      where: { ticker },
+      select: { id: true },
+    });
+
+    if (!stock) {
+      warnings.push(`No stock found for ticker ${ticker}. Nothing was purged for ticker scope.`);
+    } else {
+      scopedStockIds.push(stock.id);
+    }
+  }
+
+  if (options.portfolioId) {
+    const portfolio = await getPortfolioWithHoldings(options.portfolioId);
+    if (!portfolio) {
+      throw new Error("Portfolio not found.");
+    }
+
+    scopedPortfolioIds.add(portfolio.id);
+    scopedStockIds.push(...portfolio.holdings.map((holding) => holding.stockId));
+  }
+
+  scopedStockIds = [...new Set(scopedStockIds)];
+
+  if (isScopedRequest && scopedStockIds.length === 0) {
+    warnings.push("No matching stocks were found for the provided scope. Nothing was purged.");
+
+    return {
+      scope: {
+        ticker: options.ticker ? normalizeTickerOrThrow(options.ticker) : undefined,
+        portfolioId: options.portfolioId,
+        affectedStockIds: [],
+        affectedPortfolioIds: [],
+      },
+      priceSnapshotsDeleted: 0,
+      fundamentalSnapshotsDeleted: 0,
+      earningsEventsDeleted: 0,
+      newsArticlesDeleted: 0,
+      aiReportsDeleted: 0,
+      predictionsDeleted: 0,
+      portfolioSummariesDeleted: 0,
+      alertsDeleted: 0,
+      warnings,
+    };
+  }
+
+  if (!options.ticker && !options.portfolioId) {
+    const allStockIds = await prisma.stock.findMany({ select: { id: true } });
+    scopedStockIds = allStockIds.map((stock) => stock.id);
+  }
+
+  if (!options.portfolioId) {
+    const portfolioLinks = await prisma.holding.findMany({
+      where: scopedStockIds.length > 0
+        ? {
+            stockId: {
+              in: scopedStockIds,
+            },
+          }
+        : undefined,
+      select: {
+        portfolioId: true,
+      },
+      distinct: ["portfolioId"],
+    });
+
+    for (const link of portfolioLinks) {
+      scopedPortfolioIds.add(link.portfolioId);
+    }
+  }
+
+  const [reportIds, predictionIds] = await Promise.all([
+    prisma.aIReport.findMany({
+      where: scopedStockIds.length > 0
+        ? {
+            stockId: {
+              in: scopedStockIds,
+            },
+          }
+        : undefined,
+      select: { id: true },
+    }),
+    prisma.prediction.findMany({
+      where: scopedStockIds.length > 0
+        ? {
+            stockId: {
+              in: scopedStockIds,
+            },
+          }
+        : undefined,
+      select: { id: true },
+    }),
+  ]);
+
+  const reportIdList = reportIds.map((item) => item.id);
+  const predictionIdList = predictionIds.map((item) => item.id);
+
+  const alertsDeletedLinked = await prisma.alert.deleteMany({
+    where: {
+      OR: [
+        {
+          sourceType: "AI_REPORT",
+          sourceId: {
+            in: reportIdList.length > 0 ? reportIdList : ["__none__"],
+          },
+        },
+        {
+          sourceType: "PREDICTION",
+          sourceId: {
+            in: predictionIdList.length > 0 ? predictionIdList : ["__none__"],
+          },
+        },
+      ],
+    },
+  });
+
+  const deletedPredictionOutcomes = await prisma.predictionOutcome.deleteMany({
+    where: {
+      predictionId: {
+        in: predictionIdList,
+      },
+    },
+  });
+
+  const predictionsDeleted = await prisma.prediction.deleteMany({
+    where: scopedStockIds.length > 0
+      ? {
+          stockId: {
+            in: scopedStockIds,
+          },
+        }
+      : undefined,
+  });
+
+  const aiReportsDeleted = await prisma.aIReport.deleteMany({
+    where: scopedStockIds.length > 0
+      ? {
+          stockId: {
+            in: scopedStockIds,
+          },
+        }
+      : undefined,
+  });
+
+  const portfolioSummariesDeleted = await prisma.portfolioSummary.deleteMany({
+    where: scopedPortfolioIds.size > 0
+      ? {
+          portfolioId: {
+            in: [...scopedPortfolioIds],
+          },
+        }
+      : undefined,
+  });
+
+  const priceSnapshotsDeleted = await prisma.priceSnapshot.deleteMany({
+    where: buildScopedWhere(
+      {
+        source: "DEMO",
+      },
+      scopedStockIds,
+    ),
+  });
+
+  let legacyPriceSnapshotsDeleted = 0;
+  if (options.allowLegacyDemoPurge) {
+    const legacyIds: string[] = [];
+
+    for (const stockId of scopedStockIds) {
+      const snapshots = await listPriceSnapshotsByStockIdByCreatedAt(stockId, 2000);
+      const fmpRowsByDay = new Set(
+        snapshots
+          .filter((snapshot) => snapshot.source === "FMP_HISTORICAL")
+          .map((snapshot) => snapshot.capturedAt.toISOString().slice(0, 10)),
+      );
+
+      for (const snapshot of snapshots) {
+        if (snapshot.source !== null) {
+          continue;
+        }
+
+        const dayKey = snapshot.capturedAt.toISOString().slice(0, 10);
+        if (fmpRowsByDay.has(dayKey)) {
+          legacyIds.push(snapshot.id);
+        }
+      }
+    }
+
+    if (legacyIds.length > 0) {
+      const deletedLegacy = await prisma.priceSnapshot.deleteMany({
+        where: {
+          id: {
+            in: legacyIds,
+          },
+        },
+      });
+
+      legacyPriceSnapshotsDeleted = deletedLegacy.count;
+    }
+  } else {
+    warnings.push(
+      "Legacy null-source price snapshots were not purged. Re-run with allowLegacyDemoPurge=true for time-pattern based cleanup.",
+    );
+  }
+
+  const fundamentalSnapshotsDeleted = await prisma.fundamentalSnapshot.deleteMany({
+    where: buildScopedWhere(
+      {
+        OR: [
+          {
+            source: {
+              contains: "demo",
+              mode: "insensitive" as const,
+            },
+          },
+          {
+            source: {
+              contains: "local fake data",
+              mode: "insensitive" as const,
+            },
+          },
+        ],
+      },
+      scopedStockIds,
+    ),
+  });
+
+  const newsArticlesDeleted = await prisma.newsArticle.deleteMany({
+    where: buildScopedWhere(
+      {
+        OR: [
+          {
+            source: {
+              contains: "demo",
+              mode: "insensitive" as const,
+            },
+          },
+          {
+            url: {
+              startsWith: "https://demo.local/",
+            },
+          },
+          {
+            headline: {
+              startsWith: "[DEMO]",
+            },
+          },
+        ],
+      },
+      scopedStockIds,
+    ),
+  });
+
+  const earningsEventsDeleted = await prisma.earningsEvent.deleteMany({
+    where: buildScopedWhere(
+      {
+        OR: [
+          {
+            guidanceSummary: {
+              contains: "demo",
+              mode: "insensitive" as const,
+            },
+          },
+          {
+            guidanceSummary: {
+              contains: "local fake data",
+              mode: "insensitive" as const,
+            },
+          },
+          {
+            earningsCallUrl: {
+              startsWith: "https://demo.local/",
+            },
+          },
+          {
+            transcriptUrl: {
+              startsWith: "https://demo.local/",
+            },
+          },
+        ],
+      },
+      scopedStockIds,
+    ),
+  });
+
+  if (deletedPredictionOutcomes.count > 0) {
+    warnings.push(
+      `Deleted ${deletedPredictionOutcomes.count} prediction outcome row(s) linked to purged predictions.`,
+    );
+  }
+
+  return {
+    scope: {
+      ticker: options.ticker ? normalizeTickerOrThrow(options.ticker) : undefined,
+      portfolioId: options.portfolioId,
+      affectedStockIds: scopedStockIds,
+      affectedPortfolioIds: [...scopedPortfolioIds],
+    },
+    priceSnapshotsDeleted: priceSnapshotsDeleted.count + legacyPriceSnapshotsDeleted,
+    fundamentalSnapshotsDeleted: fundamentalSnapshotsDeleted.count,
+    earningsEventsDeleted: earningsEventsDeleted.count,
+    newsArticlesDeleted: newsArticlesDeleted.count,
+    aiReportsDeleted: aiReportsDeleted.count,
+    predictionsDeleted: predictionsDeleted.count,
+    portfolioSummariesDeleted: portfolioSummariesDeleted.count,
+    alertsDeleted: alertsDeletedLinked.count,
+    warnings,
+  };
 }

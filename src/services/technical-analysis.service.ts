@@ -1,4 +1,4 @@
-import { TechnicalSnapshot, TrendDirection } from "@prisma/client";
+import { PriceSnapshot, TechnicalSnapshot, TrendDirection } from "@prisma/client";
 
 import { listPriceSnapshotsByStockId } from "../repositories/price-snapshots.repository";
 import { createTechnicalSnapshot } from "../repositories/technical-snapshots.repository";
@@ -10,6 +10,89 @@ export interface MACDResult {
   macd: number | null;
   signal: number | null;
   histogram: number | null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isFmpPriceSource(source: string | null): boolean {
+  return source === "FMP_HISTORICAL" || source === "FMP_QUOTE";
+}
+
+function isUtcMidnight(value: Date): boolean {
+  return (
+    value.getUTCHours() === 0 &&
+    value.getUTCMinutes() === 0 &&
+    value.getUTCSeconds() === 0 &&
+    value.getUTCMilliseconds() === 0
+  );
+}
+
+function utcDayKey(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function technicalSourcePriority(snapshot: PriceSnapshot): number {
+  const source = snapshot.source;
+
+  if (source === "FMP_HISTORICAL" && isUtcMidnight(snapshot.capturedAt)) {
+    return 6;
+  }
+
+  if (source === "FMP_HISTORICAL") {
+    return 5;
+  }
+
+  if (source === "FMP_QUOTE") {
+    return 4;
+  }
+
+  if (source == null) {
+    return 2;
+  }
+
+  if (source === "DEMO") {
+    return 1;
+  }
+
+  return 3;
+}
+
+function compareSnapshotPriority(left: PriceSnapshot, right: PriceSnapshot): number {
+  const sourceDiff = technicalSourcePriority(right) - technicalSourcePriority(left);
+  if (sourceDiff !== 0) {
+    return sourceDiff;
+  }
+
+  const capturedDiff = right.capturedAt.getTime() - left.capturedAt.getTime();
+  if (capturedDiff !== 0) {
+    return capturedDiff;
+  }
+
+  const createdDiff = right.createdAt.getTime() - left.createdAt.getTime();
+  if (createdDiff !== 0) {
+    return createdDiff;
+  }
+
+  return right.id.localeCompare(left.id);
+}
+
+function dedupeSnapshotsByUtcDay(snapshots: PriceSnapshot[]): PriceSnapshot[] {
+  const deduped = new Map<string, PriceSnapshot>();
+
+  const prioritized = [...snapshots].sort(compareSnapshotPriority);
+  for (const snapshot of prioritized) {
+    const dayKey = utcDayKey(snapshot.capturedAt);
+
+    if (!deduped.has(dayKey)) {
+      deduped.set(dayKey, snapshot);
+    }
+  }
+
+  return [...deduped.values()].sort(
+    (left, right) => left.capturedAt.getTime() - right.capturedAt.getTime(),
+  );
 }
 
 function average(values: number[]): number | null {
@@ -110,6 +193,76 @@ export function calculateMACD(closes: number[]): MACDResult {
 }
 
 /**
+ * Calculates annualized volatility from daily close returns.
+ * Returns decimal fraction (for example 0.22 means 22% annualized volatility).
+ */
+export function calculateAnnualizedVolatility(
+  closes: number[],
+  period: number = 30,
+): number | null {
+  if (period <= 1) {
+    return null;
+  }
+
+  const validCloses = closes.filter(
+    (value): value is number => isFiniteNumber(value) && value > 0,
+  );
+
+  if (validCloses.length < period + 1) {
+    return null;
+  }
+
+  const window = validCloses.slice(validCloses.length - (period + 1));
+  const dailyReturns: number[] = [];
+  let outlierReturnsSkipped = 0;
+
+  const maxAbsDailyLogReturn = 0.5;
+
+  for (let index = 1; index < window.length; index += 1) {
+    const previous = window[index - 1];
+    const current = window[index];
+
+    if (!isFiniteNumber(previous) || !isFiniteNumber(current) || previous <= 0 || current <= 0) {
+      continue;
+    }
+
+    const dailyReturn = Math.log(current / previous);
+    if (!Number.isFinite(dailyReturn)) {
+      continue;
+    }
+
+    if (Math.abs(dailyReturn) > maxAbsDailyLogReturn) {
+      outlierReturnsSkipped += 1;
+      continue;
+    }
+
+    dailyReturns.push(dailyReturn);
+  }
+
+  if (dailyReturns.length < 2) {
+    return null;
+  }
+
+  if (outlierReturnsSkipped > 0 && process.env.NODE_ENV !== "production") {
+    console.warn(
+      `[volatility-warning] Skipped ${outlierReturnsSkipped} outlier daily return(s) when computing annualized volatility.`,
+    );
+  }
+
+  const mean = dailyReturns.reduce((sum, value) => sum + value, 0) / dailyReturns.length;
+  const variance =
+    dailyReturns.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    (dailyReturns.length - 1);
+
+  if (!Number.isFinite(variance) || variance < 0) {
+    return null;
+  }
+
+  const dailyStd = Math.sqrt(variance);
+  return dailyStd * Math.sqrt(252);
+}
+
+/**
  * Classifies trend direction from current price and medium/long moving averages.
  */
 export function classifyTrend(input: {
@@ -162,11 +315,26 @@ export async function calculateTechnicalSnapshot(
     return null;
   }
 
-  const orderedSnapshots = [...snapshots].sort(
-    (left, right) => left.capturedAt.getTime() - right.capturedAt.getTime(),
+  const dedupedSnapshots = dedupeSnapshotsByUtcDay(snapshots);
+  const fmpHistoricalSnapshots = dedupedSnapshots.filter(
+    (snapshot) => snapshot.source === "FMP_HISTORICAL",
   );
+  const fmpSnapshots = dedupedSnapshots.filter((snapshot) => isFmpPriceSource(snapshot.source));
 
-  const closes = orderedSnapshots.map((snapshot) => snapshot.close ?? snapshot.price);
+  const orderedSnapshots = fmpHistoricalSnapshots.length >= 30
+    ? fmpHistoricalSnapshots
+    : fmpSnapshots.length >= 30
+      ? fmpSnapshots
+      : dedupedSnapshots;
+
+  const closes = orderedSnapshots
+    .map((snapshot) => snapshot.close ?? snapshot.price)
+    .filter((value): value is number => isFiniteNumber(value) && value > 0);
+
+  if (closes.length === 0) {
+    return null;
+  }
+
   const latestSnapshot = orderedSnapshots[orderedSnapshots.length - 1];
   const currentPrice = latestSnapshot.close ?? latestSnapshot.price;
 
@@ -176,6 +344,7 @@ export async function calculateTechnicalSnapshot(
   const sma200 = calculateSMA(closes, 200);
   const rsi14 = calculateRSI(closes, 14);
   const macdResult = calculateMACD(closes);
+  const volatility = calculateAnnualizedVolatility(closes, 30);
 
   const volumes = orderedSnapshots
     .map((snapshot) => (snapshot.volume != null ? Number(snapshot.volume) : null))
@@ -215,6 +384,7 @@ export async function calculateTechnicalSnapshot(
     macd: macdResult.macd,
     macdSignal: macdResult.signal,
     macdHistogram: macdResult.histogram,
+    volatility,
     volume30DayAverage,
     volumeRelativeToAverage,
     fiftyTwoWeekHigh,

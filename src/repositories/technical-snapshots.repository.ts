@@ -14,7 +14,7 @@ export async function getLatestTechnicalSnapshot(
 ): Promise<TechnicalSnapshot | null> {
   return prisma.technicalSnapshot.findFirst({
     where: { stockId },
-    orderBy: [{ capturedAt: "desc" }, { createdAt: "desc" }],
+    orderBy: [{ createdAt: "desc" }, { capturedAt: "desc" }],
   });
 }
 

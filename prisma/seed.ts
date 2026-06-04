@@ -1,4 +1,5 @@
 import { HoldingStatus, PrismaClient, RiskLevel } from "@prisma/client";
+import { isDemoAnalyticsSeedingEnabled } from "../src/services/demo-seed-policy.service";
 
 const prisma = new PrismaClient();
 
@@ -165,6 +166,18 @@ async function main() {
         thesis: item.thesis,
       },
     });
+  }
+
+  const shouldSeedDemoAnalytics = isDemoAnalyticsSeedingEnabled(
+    process.env.SEED_DEMO_ANALYTICS,
+  );
+
+  if (shouldSeedDemoAnalytics) {
+    const { seedDemoMarketData } = await import("../src/services/demo-data.service");
+    await seedDemoMarketData({ runAnalysis: false });
+    console.log("Demo analytical data seeded (SEED_DEMO_ANALYTICS=true).");
+  } else {
+    console.log("Skipped demo analytical data seeding (set SEED_DEMO_ANALYTICS=true to enable).");
   }
 
   console.log("Database seeded successfully.");
