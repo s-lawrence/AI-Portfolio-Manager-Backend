@@ -185,6 +185,24 @@ describe("API portfolio workflow routes", () => {
     expect(summary.latestConfidenceScore).toBeTypeOf("number");
     expect(summary.latestRiskScore).toBeTypeOf("number");
     expect(summary.latestReportDate).toBeTruthy();
+    expect(summary.nativeCurrency).toBeNull();
+    expect(summary.latestPriceNative).toBe(111);
+    expect(summary.marketValueNative).toBe(777);
+    expect(summary.marketValue).toBe(777);
+    expect(summary.costBasis).toBeNull();
+    expect(summary.unrealizedGainLoss).toBeNull();
+    expect(summary.conversionStatus).toBe("UNSUPPORTED_CURRENCY");
+    expect(summary.marketValueCad).toBeNull();
+    expect(overviewBody.data.portfolioBaseCurrency).toBe("CAD");
+    expect(overviewBody.data.totalMarketValueNative).toBeNull();
+    expect(overviewBody.data.totalMarketValueCad).toBeNull();
+    expect(overviewBody.data.holdingsMissingFx).toEqual([]);
+    expect(overviewBody.data.holdingsUnsupportedCurrency).toEqual([
+      {
+        ticker,
+        currency: null,
+      },
+    ]);
 
     await app.close();
   });

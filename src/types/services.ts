@@ -33,6 +33,24 @@ export interface SectorCount {
   count: number;
 }
 
+export type CadConversionStatus =
+  | "DIRECT_CAD"
+  | "CONVERTED"
+  | "MISSING_FX"
+  | "UNSUPPORTED_CURRENCY";
+
+export interface PortfolioFxIssue {
+  ticker: string;
+  currency: string | null;
+}
+
+export interface PortfolioFxRateUsed {
+  pair: "USD/CAD";
+  rate: number;
+  source: string | null;
+  capturedAt: Date | string | null;
+}
+
 export interface PortfolioOverviewHoldingSummary extends Holding {
   stock: Stock;
   holdingId: string;
@@ -52,6 +70,22 @@ export interface PortfolioOverviewHoldingSummary extends Holding {
   previousClose?: number | null;
   volume?: number | string | null;
   marketCap?: number | string | null;
+  nativeCurrency?: string | null;
+  latestPriceNative?: number | null;
+  marketValueNative?: number | null;
+  costBasisNative?: number | null;
+  unrealizedGainLossNative?: number | null;
+  unrealizedGainLossPercent?: number | null;
+  marketValue?: number | null;
+  costBasis?: number | null;
+  unrealizedGainLoss?: number | null;
+  cadFxRate?: number | null;
+  cadFxRateSource?: string | null;
+  cadFxRateCapturedAt?: Date | string | null;
+  marketValueCad?: number | null;
+  costBasisCad?: number | null;
+  unrealizedGainLossCad?: number | null;
+  conversionStatus?: CadConversionStatus;
   latestRecommendation?: Recommendation | null;
   latestSentiment?: Sentiment | null;
   latestConfidenceScore?: number | null;
@@ -62,15 +96,41 @@ export interface PortfolioOverviewHoldingSummary extends Holding {
 export interface PortfolioOverview {
   portfolio: Portfolio;
   holdings: PortfolioOverviewHoldingSummary[];
+  portfolioBaseCurrency: "CAD";
   holdingCount: number;
   ownedHoldingCount: number;
   watchlistHoldingCount: number;
   estimatedMarketValue: number | null;
+  totalMarketValueNative: number | null;
+  totalMarketValueCad: number | null;
+  totalCostBasisCad: number | null;
+  totalUnrealizedGainLossCad: number | null;
+  totalUnrealizedGainLossPercentCad: number | null;
+  fxRateUsed: PortfolioFxRateUsed | null;
+  holdingsMissingFx: PortfolioFxIssue[];
+  holdingsUnsupportedCurrency: PortfolioFxIssue[];
   topSectorsByCount: SectorCount[];
 }
 
 export interface HoldingOverview {
   holding: Holding & { stock: Stock };
+  nativeCurrency: string | null;
+  latestPriceNative: number | null;
+  marketValueNative: number | null;
+  costBasisNative: number | null;
+  unrealizedGainLossNative: number | null;
+  unrealizedGainLossPercent: number | null;
+  latestPrice: number | null;
+  marketValue: number | null;
+  costBasis: number | null;
+  unrealizedGainLoss: number | null;
+  cadFxRate: number | null;
+  cadFxRateSource: string | null;
+  cadFxRateCapturedAt: Date | string | null;
+  marketValueCad: number | null;
+  costBasisCad: number | null;
+  unrealizedGainLossCad: number | null;
+  conversionStatus: CadConversionStatus;
   latestPriceSnapshot: PriceSnapshot | null;
   latestTechnicalSnapshot: TechnicalSnapshot | null;
   latestFundamentalSnapshot: FundamentalSnapshot | null;

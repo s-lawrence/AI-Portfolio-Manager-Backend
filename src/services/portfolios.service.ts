@@ -12,6 +12,12 @@ import { getLatestAIReportByStockId } from "../repositories/ai-reports.repositor
 import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getUserById } from "../repositories/users.repository";
 import {
+  convertAmountWithRate,
+  convertMoneyToCad,
+  type ConvertMoneyToCadResult,
+} from "./fx-rates.service";
+import {
+  PortfolioFxIssue,
   PortfolioOverview,
   PortfolioOverviewHoldingSummary,
   SectorCount,
@@ -54,6 +60,79 @@ function normalizeBigIntForResponse(
   }
 
   return value.toString();
+}
+
+function normalizeCurrencyCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function roundMoney(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function calculateUnrealizedGainLossPercent(
+  gain: number | null,
+  costBasis: number | null,
+): number | null {
+  if (gain == null || costBasis == null || costBasis === 0) {
+    return null;
+  }
+
+  return Number(((gain / costBasis) * 100).toFixed(2));
+}
+
+function convertNativeAmountToCad(
+  amount: number | null,
+  conversion: ConvertMoneyToCadResult,
+): number | null {
+  if (amount == null) {
+    return null;
+  }
+
+  if (conversion.conversionStatus === "DIRECT_CAD") {
+    return roundMoney(amount);
+  }
+
+  if (conversion.conversionStatus === "CONVERTED" && conversion.fxRate != null) {
+    return roundMoney(convertAmountWithRate(amount, conversion.fxRate));
+  }
+
+  return null;
+}
+
+async function getCurrencyConversion(
+  currency: string | null,
+  usdCadCachedProbe: ConvertMoneyToCadResult | null,
+): Promise<{ conversion: ConvertMoneyToCadResult; cachedUsdCadProbe: ConvertMoneyToCadResult | null }> {
+  if (currency === "USD") {
+    if (usdCadCachedProbe) {
+      return {
+        conversion: usdCadCachedProbe,
+        cachedUsdCadProbe: usdCadCachedProbe,
+      };
+    }
+
+    const conversion = await convertMoneyToCad({
+      amount: 1,
+      currency,
+    });
+
+    return {
+      conversion,
+      cachedUsdCadProbe: conversion,
+    };
+  }
+
+  const conversion = await convertMoneyToCad({
+    amount: 1,
+    currency: currency ?? "",
+  });
+
+  return {
+    conversion,
+    cachedUsdCadProbe: usdCadCachedProbe,
+  };
 }
 
 export async function createPortfolioForUser(
@@ -105,10 +184,44 @@ export async function getPortfolioOverview(
     portfolio.holdings.map((holding) => getLatestAIReportByStockId(holding.stockId)),
   );
 
-  const holdings: PortfolioOverviewHoldingSummary[] = portfolio.holdings.map(
-    (holding, index) => {
+  let usdCadCachedProbe: ConvertMoneyToCadResult | null = null;
+
+  const holdings: PortfolioOverviewHoldingSummary[] = await Promise.all(
+    portfolio.holdings.map(async (holding, index) => {
       const latestPriceSnapshot = latestPrices[index];
       const latestAIReport = latestReports[index];
+
+      const latestPriceNative = normalizeFiniteNumber(latestPriceSnapshot?.price);
+      const marketValueNative =
+        holding.shares != null && latestPriceNative != null
+          ? roundMoney(holding.shares * latestPriceNative)
+          : null;
+      const costBasisNative =
+        holding.shares != null && holding.averageCost != null
+          ? roundMoney(holding.shares * holding.averageCost)
+          : null;
+      const unrealizedGainLossNative =
+        marketValueNative != null && costBasisNative != null
+          ? roundMoney(marketValueNative - costBasisNative)
+          : null;
+      const unrealizedGainLossPercent = calculateUnrealizedGainLossPercent(
+        unrealizedGainLossNative,
+        costBasisNative,
+      );
+
+      const nativeCurrency = normalizeCurrencyCode(holding.stock.currency);
+      const conversionResult = await getCurrencyConversion(nativeCurrency, usdCadCachedProbe);
+      usdCadCachedProbe = conversionResult.cachedUsdCadProbe;
+
+      const marketValueCad = convertNativeAmountToCad(
+        marketValueNative,
+        conversionResult.conversion,
+      );
+      const costBasisCad = convertNativeAmountToCad(costBasisNative, conversionResult.conversion);
+      const unrealizedGainLossCad =
+        marketValueCad != null && costBasisCad != null
+          ? roundMoney(marketValueCad - costBasisCad)
+          : null;
 
       return {
         ...holding,
@@ -118,8 +231,24 @@ export async function getPortfolioOverview(
         sector: holding.stock.sector ?? null,
         industry: holding.stock.industry ?? null,
         exchange: holding.stock.exchange ?? null,
-        currency: holding.stock.currency ?? null,
-        latestPrice: normalizeFiniteNumber(latestPriceSnapshot?.price),
+        currency: nativeCurrency,
+        nativeCurrency,
+        latestPriceNative,
+        marketValueNative,
+        costBasisNative,
+        unrealizedGainLossNative,
+        unrealizedGainLossPercent,
+        latestPrice: latestPriceNative,
+        marketValue: marketValueNative,
+        costBasis: costBasisNative,
+        unrealizedGainLoss: unrealizedGainLossNative,
+        cadFxRate: conversionResult.conversion.fxRate,
+        cadFxRateSource: conversionResult.conversion.fxRateSource,
+        cadFxRateCapturedAt: conversionResult.conversion.fxRateCapturedAt,
+        marketValueCad,
+        costBasisCad,
+        unrealizedGainLossCad,
+        conversionStatus: conversionResult.conversion.conversionStatus,
         latestPriceCapturedAt: latestPriceSnapshot?.capturedAt ?? null,
         dailyChangePercent: normalizeFiniteNumber(latestPriceSnapshot?.changePercent),
         previousClose: normalizeFiniteNumber(latestPriceSnapshot?.previousClose),
@@ -131,24 +260,96 @@ export async function getPortfolioOverview(
         latestRiskScore: normalizeFiniteNumber(latestAIReport?.riskScore),
         latestReportDate: latestAIReport?.reportDate ?? null,
       };
-    },
+    }),
   );
 
   let estimatedMarketValue = 0;
   let marketValueAvailable = false;
+  let totalMarketValueCad = 0;
+  let totalMarketValueCadAvailable = false;
+  let totalCostBasisCad = 0;
+  let totalCostBasisCadAvailable = false;
+  let totalMarketValueNativeSingleCurrency = 0;
+  let totalMarketValueNativeSingleCurrencyAvailable = false;
+  const ownedCurrencies = new Set<string>();
+  const holdingsMissingFx: PortfolioFxIssue[] = [];
+  const holdingsUnsupportedCurrency: PortfolioFxIssue[] = [];
+  let fxRateUsed: PortfolioOverview["fxRateUsed"] = null;
 
   for (const holding of holdings) {
-    const latestPrice = normalizeFiniteNumber(holding.latestPrice);
+    if (holding.status !== HoldingStatus.OWNED) {
+      continue;
+    }
+
+    if (holding.nativeCurrency) {
+      ownedCurrencies.add(holding.nativeCurrency);
+    }
+
+    if (holding.marketValueNative != null) {
+      marketValueAvailable = true;
+      estimatedMarketValue += holding.marketValueNative;
+      totalMarketValueNativeSingleCurrencyAvailable = true;
+      totalMarketValueNativeSingleCurrency += holding.marketValueNative;
+    }
+
+    if (holding.marketValueCad != null) {
+      totalMarketValueCadAvailable = true;
+      totalMarketValueCad += holding.marketValueCad;
+    }
+
+    if (holding.costBasisCad != null) {
+      totalCostBasisCadAvailable = true;
+      totalCostBasisCad += holding.costBasisCad;
+    }
+
+    if (holding.conversionStatus === "MISSING_FX") {
+      holdingsMissingFx.push({
+        ticker: holding.ticker,
+        currency: holding.nativeCurrency ?? null,
+      });
+    }
+
+    if (holding.conversionStatus === "UNSUPPORTED_CURRENCY") {
+      holdingsUnsupportedCurrency.push({
+        ticker: holding.ticker,
+        currency: holding.nativeCurrency ?? null,
+      });
+    }
 
     if (
-      holding.status === HoldingStatus.OWNED &&
-      holding.shares != null &&
-      latestPrice != null
+      !fxRateUsed &&
+      holding.conversionStatus === "CONVERTED" &&
+      holding.cadFxRate != null
     ) {
-      marketValueAvailable = true;
-      estimatedMarketValue += holding.shares * latestPrice;
+      fxRateUsed = {
+        pair: "USD/CAD",
+        rate: holding.cadFxRate,
+        source: holding.cadFxRateSource ?? null,
+        capturedAt: holding.cadFxRateCapturedAt ?? null,
+      };
     }
   }
+
+  const hasSingleOwnedCurrency = ownedCurrencies.size === 1;
+  const totalMarketValueNative =
+    hasSingleOwnedCurrency && totalMarketValueNativeSingleCurrencyAvailable
+      ? roundMoney(totalMarketValueNativeSingleCurrency)
+      : null;
+
+  const resolvedTotalMarketValueCad = totalMarketValueCadAvailable
+    ? roundMoney(totalMarketValueCad)
+    : null;
+  const resolvedTotalCostBasisCad = totalCostBasisCadAvailable
+    ? roundMoney(totalCostBasisCad)
+    : null;
+  const totalUnrealizedGainLossCad =
+    resolvedTotalMarketValueCad != null && resolvedTotalCostBasisCad != null
+      ? roundMoney(resolvedTotalMarketValueCad - resolvedTotalCostBasisCad)
+      : null;
+  const totalUnrealizedGainLossPercentCad = calculateUnrealizedGainLossPercent(
+    totalUnrealizedGainLossCad,
+    resolvedTotalCostBasisCad,
+  );
 
   const sectorCounts = new Map<string, number>();
   for (const holding of portfolio.holdings) {
@@ -174,12 +375,21 @@ export async function getPortfolioOverview(
   return {
     portfolio,
     holdings,
+    portfolioBaseCurrency: "CAD",
     holdingCount,
     ownedHoldingCount,
     watchlistHoldingCount,
     estimatedMarketValue: marketValueAvailable
-      ? Number(estimatedMarketValue.toFixed(2))
+      ? roundMoney(estimatedMarketValue)
       : null,
+    totalMarketValueNative,
+    totalMarketValueCad: resolvedTotalMarketValueCad,
+    totalCostBasisCad: resolvedTotalCostBasisCad,
+    totalUnrealizedGainLossCad,
+    totalUnrealizedGainLossPercentCad,
+    fxRateUsed,
+    holdingsMissingFx,
+    holdingsUnsupportedCurrency,
     topSectorsByCount,
   };
 }

@@ -80,6 +80,23 @@ export async function getLatestFxRateSnapshot(
   });
 }
 
+export async function getLatestFxRateSnapshotAsOf(
+  baseCurrency: string,
+  quoteCurrency: string,
+  asOf: Date,
+): Promise<FxRateSnapshot | null> {
+  return prisma.fxRateSnapshot.findFirst({
+    where: {
+      baseCurrency: baseCurrency.trim().toUpperCase(),
+      quoteCurrency: quoteCurrency.trim().toUpperCase(),
+      capturedAt: {
+        lte: asOf,
+      },
+    },
+    orderBy: [{ capturedAt: "desc" }, { createdAt: "desc" }],
+  });
+}
+
 export async function listFxRateSnapshots(
   baseCurrency: string,
   quoteCurrency: string,

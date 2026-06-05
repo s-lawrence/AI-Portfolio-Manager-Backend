@@ -117,6 +117,13 @@ describe("portfolio workflow integration", () => {
 
     expect(holdingOverview).not.toBeNull();
     expect(holdingOverview?.latestAIReport?.id).toBe(reportResult.report.id);
+    expect(holdingOverview?.latestPriceNative).toBe(108);
+    expect(holdingOverview?.marketValueNative).toBe(1296);
+    expect(holdingOverview?.costBasisNative).toBe(1140);
+    expect(holdingOverview?.unrealizedGainLossNative).toBe(156);
+    expect(holdingOverview?.unrealizedGainLossPercent).toBeCloseTo(13.68, 2);
+    expect(holdingOverview?.conversionStatus).toBe("UNSUPPORTED_CURRENCY");
+    expect(holdingOverview?.marketValueCad).toBeNull();
 
     expect(portfolioOverview).not.toBeNull();
     expect(portfolioOverview?.holdings).toHaveLength(1);

@@ -16,6 +16,7 @@ import { getLatestFundamentalSnapshot } from "../repositories/fundamental-snapsh
 import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
 import { normalizeTickerOrThrow } from "../types/common";
 import { HoldingOverview } from "../types/services";
+import { convertAmountWithRate, convertMoneyToCad } from "./fx-rates.service";
 import { ensureStockExists } from "./stocks.service";
 
 export type AddTickerToPortfolioInput = Omit<
@@ -36,6 +37,34 @@ function assertNonBlank(value: string, label: string): string {
   }
 
   return trimmed;
+}
+
+function normalizeFiniteNumber(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return value;
+}
+
+function normalizeCurrencyCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function roundMoney(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function calculateUnrealizedGainLossPercent(
+  gain: number | null,
+  costBasis: number | null,
+): number | null {
+  if (gain == null || costBasis == null || costBasis === 0) {
+    return null;
+  }
+
+  return Number(((gain / costBasis) * 100).toFixed(2));
 }
 
 export async function addTickerToPortfolio(
@@ -128,8 +157,70 @@ export async function getHoldingOverview(
     listNewsByStockId(holding.stockId, 20),
   ]);
 
+  const latestPriceNative = normalizeFiniteNumber(latestPriceSnapshot?.price);
+  const marketValueNative =
+    holding.shares != null && latestPriceNative != null
+      ? roundMoney(holding.shares * latestPriceNative)
+      : null;
+  const costBasisNative =
+    holding.shares != null && holding.averageCost != null
+      ? roundMoney(holding.shares * holding.averageCost)
+      : null;
+  const unrealizedGainLossNative =
+    marketValueNative != null && costBasisNative != null
+      ? roundMoney(marketValueNative - costBasisNative)
+      : null;
+  const unrealizedGainLossPercent = calculateUnrealizedGainLossPercent(
+    unrealizedGainLossNative,
+    costBasisNative,
+  );
+
+  const nativeCurrency = normalizeCurrencyCode(holding.stock.currency);
+  const conversion = await convertMoneyToCad({
+    amount: 1,
+    currency: nativeCurrency ?? "",
+  });
+
+  const marketValueCad =
+    marketValueNative != null
+      ? conversion.conversionStatus === "DIRECT_CAD"
+        ? roundMoney(marketValueNative)
+        : conversion.conversionStatus === "CONVERTED" && conversion.fxRate != null
+          ? roundMoney(convertAmountWithRate(marketValueNative, conversion.fxRate))
+          : null
+      : null;
+  const costBasisCad =
+    costBasisNative != null
+      ? conversion.conversionStatus === "DIRECT_CAD"
+        ? roundMoney(costBasisNative)
+        : conversion.conversionStatus === "CONVERTED" && conversion.fxRate != null
+          ? roundMoney(convertAmountWithRate(costBasisNative, conversion.fxRate))
+          : null
+      : null;
+  const unrealizedGainLossCad =
+    marketValueCad != null && costBasisCad != null
+      ? roundMoney(marketValueCad - costBasisCad)
+      : null;
+
   return {
     holding,
+    nativeCurrency,
+    latestPriceNative,
+    marketValueNative,
+    costBasisNative,
+    unrealizedGainLossNative,
+    unrealizedGainLossPercent,
+    latestPrice: latestPriceNative,
+    marketValue: marketValueNative,
+    costBasis: costBasisNative,
+    unrealizedGainLoss: unrealizedGainLossNative,
+    cadFxRate: conversion.fxRate,
+    cadFxRateSource: conversion.fxRateSource,
+    cadFxRateCapturedAt: conversion.fxRateCapturedAt,
+    marketValueCad,
+    costBasisCad,
+    unrealizedGainLossCad,
+    conversionStatus: conversion.conversionStatus,
     latestPriceSnapshot,
     latestTechnicalSnapshot,
     latestFundamentalSnapshot,

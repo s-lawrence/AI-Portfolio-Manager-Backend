@@ -186,6 +186,8 @@ U.S. examples:
 
 - Macro and FX ingestion now supports FRED and Bank of Canada as first-class providers.
 - BoC USD/CAD snapshots are stored with convention: base `USD`, quote `CAD`, and value = CAD per 1 USD.
+- Portfolio and holding CAD-equivalent valuation reads the latest stored USD/CAD snapshot from this BoC-backed FX stream.
+- If no USD/CAD snapshot exists yet, USD holdings are flagged as missing FX for CAD totals until ingestion runs.
 - FRED observation values with `value = "."` are ignored during ingestion.
 - Default macro ingestion can run BoC and FRED together; section failures are non-blocking and surfaced as warnings.
 - FRED default-series ingestion runs in small batches (instead of fully sequential single-series calls) to reduce wall-clock time.

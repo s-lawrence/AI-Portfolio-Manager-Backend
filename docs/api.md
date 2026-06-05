@@ -198,6 +198,26 @@ Portfolio overview payload:
   - `marketCap`
   - `currency`
   - `exchange`
+- Each holding includes valuation fields in native currency:
+  - `nativeCurrency`
+  - `latestPriceNative`
+  - `marketValueNative`
+  - `costBasisNative`
+  - `unrealizedGainLossNative`
+  - `unrealizedGainLossPercent`
+- Each holding includes CAD conversion metadata and values:
+  - `cadFxRate`
+  - `cadFxRateSource`
+  - `cadFxRateCapturedAt`
+  - `marketValueCad`
+  - `costBasisCad`
+  - `unrealizedGainLossCad`
+  - `conversionStatus` (`DIRECT_CAD`, `CONVERTED`, `MISSING_FX`, `UNSUPPORTED_CURRENCY`)
+- Compatibility valuation fields remain in native currency:
+  - `latestPrice`
+  - `marketValue`
+  - `costBasis`
+  - `unrealizedGainLoss`
 - Each holding includes latest report summary fields when available:
   - `latestRecommendation`
   - `latestSentiment`
@@ -205,6 +225,21 @@ Portfolio overview payload:
   - `latestRiskScore`
   - `latestReportDate`
 - `estimatedMarketValue` is computed from OWNED holdings only, using `shares * latestPrice` when both are present.
+- Portfolio-level CAD totals and FX metadata:
+  - `portfolioBaseCurrency` (current portfolio intelligence valuation currency, `CAD`)
+  - `totalMarketValueNative` (only populated for single-currency OWNED holdings)
+  - `totalMarketValueCad`
+  - `totalCostBasisCad`
+  - `totalUnrealizedGainLossCad`
+  - `totalUnrealizedGainLossPercentCad`
+  - `fxRateUsed` (`USD/CAD` pair metadata when conversion occurred)
+  - `holdingsMissingFx` (OWNED holdings excluded from CAD totals due to missing USD/CAD rate)
+  - `holdingsUnsupportedCurrency` (OWNED holdings excluded from CAD totals due to unsupported currency)
+
+Holding overview payload:
+
+- `GET /api/holdings/<HOLDING_CUID>` includes the same native and CAD valuation fields as portfolio holdings.
+- USD/CAD conversion convention is: `baseCurrency = USD`, `quoteCurrency = CAD`, `rate = CAD per 1 USD`.
 
 Canonical latest market snapshot selection:
 
