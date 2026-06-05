@@ -30,7 +30,7 @@ export async function upsertMacroSeriesObservation(
     category?: string | null;
     unit?: string | null;
   },
-): Promise<{ observation: MacroSeriesObservation; created: boolean }> {
+): Promise<{ observation: MacroSeriesObservation; created: boolean; updated: boolean }> {
   const existing = await prisma.macroSeriesObservation.findUnique({
     where: {
       provider_seriesId_observedAt: {
@@ -42,20 +42,41 @@ export async function upsertMacroSeriesObservation(
   });
 
   if (existing) {
+    const nextName = input.name ?? null;
+    const nextCountry = input.country ?? null;
+    const nextCategory = input.category ?? null;
+    const nextUnit = input.unit ?? null;
+
+    const unchanged =
+      existing.value === input.value &&
+      existing.name === nextName &&
+      existing.country === nextCountry &&
+      existing.category === nextCategory &&
+      existing.unit === nextUnit;
+
+    if (unchanged) {
+      return {
+        observation: existing,
+        created: false,
+        updated: false,
+      };
+    }
+
     const updated = await prisma.macroSeriesObservation.update({
       where: { id: existing.id },
       data: {
         value: input.value,
-        name: input.name ?? null,
-        country: input.country ?? null,
-        category: input.category ?? null,
-        unit: input.unit ?? null,
+        name: nextName,
+        country: nextCountry,
+        category: nextCategory,
+        unit: nextUnit,
       },
     });
 
     return {
       observation: updated,
       created: false,
+      updated: true,
     };
   }
 
@@ -75,6 +96,7 @@ export async function upsertMacroSeriesObservation(
   return {
     observation: created,
     created: true,
+    updated: false,
   };
 }
 

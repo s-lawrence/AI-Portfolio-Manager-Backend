@@ -15,3 +15,6 @@ export * from "./portfolio-analysis.service";
 export * from "./demo-data.service";
 export * from "./real-data-ingestion.service";
 export * from "./fmp-economics-ingestion.service";
+export * from "./fx-rates.service";
+export * from "./macro-series.service";
+export * from "./macro-ingestion.service";

@@ -1,5 +1,6 @@
 import { Prisma, Sentiment } from "@prisma/client";
 
+import { env } from "../config/env";
 import {
   fmpEarningsProvider,
   fmpFundamentalsProvider,
@@ -28,6 +29,7 @@ import {
   IngestTickerMarketDataResult,
   IngestTickerNewsOptions,
   IngestTickerNewsResult,
+  MacroIngestionSectionResult,
   PortfolioEarningsIngestionResult,
   TickerEarningsIngestionResult,
 } from "../types/services";
@@ -55,6 +57,7 @@ import {
 } from "./news.service";
 import { runPortfolioAnalysis } from "./portfolio-analysis.service";
 import { ingestFmpEconomicsDefaultSet } from "./fmp-economics-ingestion.service";
+import { ingestDefaultMacroAndFx } from "./macro-ingestion.service";
 import { getPortfolioOverview } from "./portfolios.service";
 import {
   StockMetadataInput,
@@ -67,6 +70,19 @@ import {
 } from "./technical-analysis.service";
 
 const DEFAULT_HISTORICAL_LIMIT = 250;
+const DEFAULT_HISTORICAL_LIMIT_QUICK = 120;
+const DEFAULT_NEWS_LIMIT_PER_TICKER_QUICK = 12;
+const DEFAULT_NEWS_LIMIT_PER_TICKER_FULL = 20;
+const DEFAULT_ECONOMICS_CALENDAR_PAST_DAYS_QUICK = 7;
+const DEFAULT_ECONOMICS_CALENDAR_FUTURE_DAYS_QUICK = 30;
+const DEFAULT_ECONOMICS_CALENDAR_PAST_DAYS_FULL = 30;
+const DEFAULT_ECONOMICS_CALENDAR_FUTURE_DAYS_FULL = 90;
+const DEFAULT_FRED_OBSERVATION_LIMIT_QUICK = 120;
+const DEFAULT_FRED_OBSERVATION_LIMIT_FULL = 300;
+const DEFAULT_BOC_OBSERVATION_LIMIT_QUICK = 120;
+const DEFAULT_BOC_OBSERVATION_LIMIT_FULL = 300;
+const SECTION_SLOW_LOG_THRESHOLD_MS = 10_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const FUNDAMENTAL_FIELD_NAMES: Array<keyof ProviderFundamentalSnapshot> = [
   "period",
@@ -107,6 +123,104 @@ function toErrorReason(error: unknown): string {
   }
 
   return String(error);
+}
+
+function calculateDurationMs(startedAtDate: Date, finishedAtDate: Date): number {
+  return Math.max(0, finishedAtDate.getTime() - startedAtDate.getTime());
+}
+
+function addDurationMetadata<
+  T extends {
+    startedAt?: string;
+    finishedAt?: string;
+    durationMs?: number;
+  },
+>(
+  section: T,
+  startedAtDate: Date,
+  finishedAtDate: Date,
+): T {
+  return {
+    ...section,
+    startedAt: section.startedAt ?? startedAtDate.toISOString(),
+    finishedAt: section.finishedAt ?? finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
+  };
+}
+
+function logSlowSection(
+  section: string,
+  durationMs: number,
+  summary: Record<string, number | string | boolean | undefined>,
+): void {
+  if (env.NODE_ENV !== "development" || durationMs <= SECTION_SLOW_LOG_THRESHOLD_MS) {
+    return;
+  }
+
+  const compactSummary = Object.entries(summary).reduce<Record<string, number | string | boolean>>(
+    (accumulator, [key, value]) => {
+      if (value !== undefined) {
+        accumulator[key] = value;
+      }
+
+      return accumulator;
+    },
+    {},
+  );
+
+  console.warn(
+    `[full-refresh-slow] section=${section} durationMs=${durationMs} summary=${JSON.stringify(compactSummary)}`,
+  );
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  const normalized = Math.floor(value);
+  if (normalized <= 0) {
+    return fallback;
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalPositiveInteger(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const normalized = Math.floor(value);
+  if (normalized <= 0) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function parseOptionalIsoTimestamp(value: string | undefined): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) {
+    return undefined;
+  }
+
+  return new Date(timestamp);
+}
+
+function emptyMacroIngestionSection(
+  warning?: string,
+): MacroIngestionSectionResult {
+  return {
+    recordsCreated: 0,
+    recordsUpdated: 0,
+    recordsSkipped: 0,
+    warnings: warning ? [warning] : [],
+  };
 }
 
 function normalizeHistoricalLimit(limit?: number): number {
@@ -600,6 +714,7 @@ export async function ingestPortfolioFundamentals(
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
     tickersProcessed: overview.holdings.length,
     tickersFailed: failedTickers.length,
     snapshotsCreated,
@@ -730,6 +845,7 @@ export async function ingestPortfolioEarnings(
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
     tickersProcessed: overview.holdings.length,
     tickersFailed: failedTickers.length,
     results,
@@ -841,6 +957,7 @@ export async function ingestPortfolioNews(
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
     tickersProcessed: overview.holdings.length,
     tickersFailed: failedTickers.length,
     results,
@@ -892,6 +1009,7 @@ export async function ingestPortfolioMarketData(
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
     tickersProcessed: overview.holdings.length,
     tickersFailed: failedTickers.length,
     results,
@@ -925,6 +1043,7 @@ export async function ingestPortfolioFullBasic(
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
     marketData,
     fundamentals,
     analysis,
@@ -938,57 +1057,293 @@ export async function ingestPortfolioFmpFullRefresh(
   const normalizedPortfolioId = assertNonBlank(portfolioId, "portfolioId");
   const startedAtDate = new Date();
 
-  const marketData = await ingestPortfolioMarketData(normalizedPortfolioId, {
-    historicalLimit: options.historicalLimit,
-    runAnalysis: false,
+  const refreshMode = options.refreshMode ?? "quick";
+  const includeEconomics = options.includeEconomics === true;
+  const includeBankOfCanada = options.includeBankOfCanada === true;
+  const includeFred = options.includeFred === true;
+
+  const historicalLimit =
+    options.historicalLimit ??
+    (refreshMode === "full" ? DEFAULT_HISTORICAL_LIMIT : DEFAULT_HISTORICAL_LIMIT_QUICK);
+  const newsLimitPerTicker =
+    options.newsLimitPerTicker ??
+    (refreshMode === "full"
+      ? DEFAULT_NEWS_LIMIT_PER_TICKER_FULL
+      : DEFAULT_NEWS_LIMIT_PER_TICKER_QUICK);
+
+  const economicsCalendarPastDays = normalizePositiveInteger(
+    options.economicsCalendarPastDays,
+    refreshMode === "full"
+      ? DEFAULT_ECONOMICS_CALENDAR_PAST_DAYS_FULL
+      : DEFAULT_ECONOMICS_CALENDAR_PAST_DAYS_QUICK,
+  );
+  const economicsCalendarFutureDays = normalizePositiveInteger(
+    options.economicsCalendarFutureDays,
+    refreshMode === "full"
+      ? DEFAULT_ECONOMICS_CALENDAR_FUTURE_DAYS_FULL
+      : DEFAULT_ECONOMICS_CALENDAR_FUTURE_DAYS_QUICK,
+  );
+
+  const fredObservationLimit = normalizePositiveInteger(
+    options.fredObservationLimit,
+    refreshMode === "full"
+      ? DEFAULT_FRED_OBSERVATION_LIMIT_FULL
+      : DEFAULT_FRED_OBSERVATION_LIMIT_QUICK,
+  );
+  const bocObservationLimit = normalizePositiveInteger(
+    options.bocObservationLimit,
+    refreshMode === "full"
+      ? DEFAULT_BOC_OBSERVATION_LIMIT_FULL
+      : DEFAULT_BOC_OBSERVATION_LIMIT_QUICK,
+  );
+  const macroMaxSeries = normalizeOptionalPositiveInteger(options.macroMaxSeries);
+
+  const marketDataStartedAt = new Date();
+  const marketData = addDurationMetadata(
+    await ingestPortfolioMarketData(normalizedPortfolioId, {
+      historicalLimit,
+      runAnalysis: false,
+    }),
+    marketDataStartedAt,
+    new Date(),
+  );
+  logSlowSection("marketData", marketData.durationMs ?? 0, {
+    tickersProcessed: marketData.tickersProcessed,
+    tickersFailed: marketData.tickersFailed,
   });
 
-  const fundamentals = await ingestPortfolioFundamentals(normalizedPortfolioId);
-  const earnings = await ingestPortfolioEarnings(normalizedPortfolioId);
-  const news = await ingestPortfolioNews(normalizedPortfolioId, {
-    limitPerTicker: options.newsLimitPerTicker,
+  const fundamentalsStartedAt = new Date();
+  const fundamentals = addDurationMetadata(
+    await ingestPortfolioFundamentals(normalizedPortfolioId),
+    fundamentalsStartedAt,
+    new Date(),
+  );
+  logSlowSection("fundamentals", fundamentals.durationMs ?? 0, {
+    tickersProcessed: fundamentals.tickersProcessed,
+    tickersFailed: fundamentals.tickersFailed,
+    snapshotsCreated: fundamentals.snapshotsCreated,
+    snapshotsUpdated: fundamentals.snapshotsUpdated,
+    snapshotsSkipped: fundamentals.snapshotsSkipped,
+  });
+
+  const earningsStartedAt = new Date();
+  const earnings = addDurationMetadata(
+    await ingestPortfolioEarnings(normalizedPortfolioId),
+    earningsStartedAt,
+    new Date(),
+  );
+  logSlowSection("earnings", earnings.durationMs ?? 0, {
+    tickersProcessed: earnings.tickersProcessed,
+    tickersFailed: earnings.tickersFailed,
+  });
+
+  const newsStartedAt = new Date();
+  const news = addDurationMetadata(
+    await ingestPortfolioNews(normalizedPortfolioId, {
+      limitPerTicker: newsLimitPerTicker,
+    }),
+    newsStartedAt,
+    new Date(),
+  );
+  logSlowSection("news", news.durationMs ?? 0, {
+    tickersProcessed: news.tickersProcessed,
+    tickersFailed: news.tickersFailed,
   });
 
   let economics: PortfolioFmpFullRefreshResult["economics"];
-  if (options.includeEconomics) {
+  if (includeEconomics) {
+    const economicsStartedAt = new Date();
+
     try {
-      economics = await ingestFmpEconomicsDefaultSet();
+      const now = new Date();
+
+      economics = addDurationMetadata(
+        await ingestFmpEconomicsDefaultSet({
+          calendarFrom: new Date(now.getTime() - economicsCalendarPastDays * DAY_MS),
+          calendarTo: new Date(now.getTime() + economicsCalendarFutureDays * DAY_MS),
+        }),
+        economicsStartedAt,
+        new Date(),
+      );
     } catch (error) {
-      economics = {
-        startedAt: startedAtDate.toISOString(),
-        finishedAt: new Date().toISOString(),
-        treasuryRates: {
-          recordsCreated: 0,
-          recordsUpdated: 0,
-          recordsSkipped: 0,
-          warnings: [],
+      economics = addDurationMetadata(
+        {
+          startedAt: economicsStartedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+          treasuryRates: {
+            recordsCreated: 0,
+            recordsUpdated: 0,
+            recordsSkipped: 0,
+            warnings: [],
+          },
+          economicIndicators: {
+            recordsCreated: 0,
+            recordsUpdated: 0,
+            recordsSkipped: 0,
+            warnings: [],
+          },
+          economicCalendar: {
+            recordsCreated: 0,
+            recordsUpdated: 0,
+            recordsSkipped: 0,
+            warnings: [],
+          },
+          marketRiskPremium: {
+            recordsCreated: 0,
+            recordsUpdated: 0,
+            recordsSkipped: 0,
+            warnings: [],
+          },
+          warnings: [toErrorReason(error)],
         },
-        economicIndicators: {
-          recordsCreated: 0,
-          recordsUpdated: 0,
-          recordsSkipped: 0,
-          warnings: [],
+        economicsStartedAt,
+        new Date(),
+      );
+    }
+
+    const economicsRecords =
+      economics.treasuryRates.recordsCreated +
+      economics.treasuryRates.recordsUpdated +
+      economics.economicIndicators.recordsCreated +
+      economics.economicIndicators.recordsUpdated +
+      economics.economicCalendar.recordsCreated +
+      economics.economicCalendar.recordsUpdated +
+      economics.marketRiskPremium.recordsCreated +
+      economics.marketRiskPremium.recordsUpdated;
+
+    logSlowSection("economics", economics.durationMs ?? 0, {
+      recordsTouched: economicsRecords,
+      warnings: economics.warnings.length,
+    });
+  }
+
+  let macro: PortfolioFmpFullRefreshResult["macro"];
+  let bankOfCanada: PortfolioFmpFullRefreshResult["bankOfCanada"];
+  let fred: PortfolioFmpFullRefreshResult["fred"];
+
+  if (includeBankOfCanada || includeFred) {
+    const macroStartedAt = new Date();
+
+    try {
+      const macroWindowDays = refreshMode === "full" ? 730 : 365;
+      const macroWindowTo = new Date();
+      const macroWindowFrom = new Date(macroWindowTo.getTime() - macroWindowDays * DAY_MS);
+
+      const macroResult = addDurationMetadata(
+        await ingestDefaultMacroAndFx({
+          includeBankOfCanada,
+          includeFred,
+          from: macroWindowFrom,
+          to: macroWindowTo,
+          bankOfCanadaLimit: bocObservationLimit,
+          fredObservationLimit,
+          maxFredSeries: macroMaxSeries,
+        }),
+        macroStartedAt,
+        new Date(),
+      );
+
+      macro = macroResult;
+
+      if (includeBankOfCanada) {
+        const sectionStartedAt = parseOptionalIsoTimestamp(macroResult.bankOfCanada.startedAt) ??
+          macroStartedAt;
+        const sectionFinishedAt = parseOptionalIsoTimestamp(macroResult.bankOfCanada.finishedAt) ??
+          new Date();
+
+        bankOfCanada = addDurationMetadata(
+          macroResult.bankOfCanada,
+          sectionStartedAt,
+          sectionFinishedAt,
+        );
+      }
+
+      if (includeFred) {
+        const sectionStartedAt = parseOptionalIsoTimestamp(macroResult.fred.startedAt) ??
+          macroStartedAt;
+        const sectionFinishedAt = parseOptionalIsoTimestamp(macroResult.fred.finishedAt) ??
+          new Date();
+
+        fred = addDurationMetadata(
+          macroResult.fred,
+          sectionStartedAt,
+          sectionFinishedAt,
+        );
+      }
+    } catch (error) {
+      const warning = toErrorReason(error);
+      const macroFinishedAt = new Date();
+
+      macro = addDurationMetadata(
+        {
+          startedAt: macroStartedAt.toISOString(),
+          finishedAt: macroFinishedAt.toISOString(),
+          bankOfCanada: emptyMacroIngestionSection(),
+          fred: emptyMacroIngestionSection(),
+          warnings: [warning],
         },
-        economicCalendar: {
-          recordsCreated: 0,
-          recordsUpdated: 0,
-          recordsSkipped: 0,
-          warnings: [],
-        },
-        marketRiskPremium: {
-          recordsCreated: 0,
-          recordsUpdated: 0,
-          recordsSkipped: 0,
-          warnings: [],
-        },
-        warnings: [toErrorReason(error)],
-      };
+        macroStartedAt,
+        macroFinishedAt,
+      );
+
+      if (includeBankOfCanada) {
+        bankOfCanada = addDurationMetadata(
+          emptyMacroIngestionSection(warning),
+          macroStartedAt,
+          macroFinishedAt,
+        );
+      }
+
+      if (includeFred) {
+        fred = addDurationMetadata(
+          emptyMacroIngestionSection(warning),
+          macroStartedAt,
+          macroFinishedAt,
+        );
+      }
+    }
+
+    if (bankOfCanada) {
+      logSlowSection("bankOfCanada", bankOfCanada.durationMs ?? 0, {
+        recordsCreated: bankOfCanada.recordsCreated,
+        recordsUpdated: bankOfCanada.recordsUpdated,
+        recordsSkipped: bankOfCanada.recordsSkipped,
+        warnings: bankOfCanada.warnings.length,
+      });
+    }
+
+    if (fred) {
+      logSlowSection("fred", fred.durationMs ?? 0, {
+        recordsCreated: fred.recordsCreated,
+        recordsUpdated: fred.recordsUpdated,
+        recordsSkipped: fred.recordsSkipped,
+        warnings: fred.warnings.length,
+        failedSeries: fred.failedSeries?.length,
+      });
+    }
+
+    if (macro) {
+      logSlowSection("macro", macro.durationMs ?? 0, {
+        warnings: macro.warnings.length,
+      });
     }
   }
 
   let analysis: PortfolioFmpFullRefreshResult["analysis"];
   if (options.runAnalysis) {
-    analysis = await runPortfolioAnalysis(normalizedPortfolioId);
+    const analysisStartedAt = new Date();
+    analysis = addDurationMetadata(
+      await runPortfolioAnalysis(normalizedPortfolioId),
+      analysisStartedAt,
+      new Date(),
+    );
+
+    logSlowSection("analysis", analysis.durationMs ?? 0, {
+      holdingsAnalyzed: analysis.holdingsAnalyzed,
+      reportsCreated: analysis.reportsCreated,
+      predictionsCreated: analysis.predictionsCreated,
+      failedTickers: analysis.failedTickers.length,
+    });
   }
 
   const warnings: string[] = [];
@@ -1021,17 +1376,38 @@ export async function ingestPortfolioFmpFullRefresh(
     );
   }
 
+  if (bankOfCanada && bankOfCanada.warnings.length > 0) {
+    warnings.push(
+      `Bank of Canada macro/FX ingestion completed with ${bankOfCanada.warnings.length} warning(s).`,
+    );
+  }
+
+  if (fred && fred.warnings.length > 0) {
+    warnings.push(
+      `FRED macro ingestion completed with ${fred.warnings.length} warning(s).`,
+    );
+  }
+
+  if (macro && macro.warnings.length > 0) {
+    warnings.push(`Macro ingestion completed with ${macro.warnings.length} warning(s).`);
+  }
+
   const finishedAtDate = new Date();
+  const durationMs = calculateDurationMs(startedAtDate, finishedAtDate);
 
   return {
     portfolioId: normalizedPortfolioId,
     startedAt: startedAtDate.toISOString(),
     finishedAt: finishedAtDate.toISOString(),
+    durationMs,
     marketData,
     fundamentals,
     earnings,
     news,
     economics,
+    bankOfCanada,
+    fred,
+    macro,
     analysis,
     warnings,
   };

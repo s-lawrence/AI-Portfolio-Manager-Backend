@@ -219,7 +219,9 @@ export async function cleanupTestData(): Promise<void> {
     where: {
       OR: [
         {
-          provider: "FMP",
+          provider: {
+            in: ["FMP", "FRED", "BANK_OF_CANADA"],
+          },
         },
         {
           name: {
@@ -234,10 +236,30 @@ export async function cleanupTestData(): Promise<void> {
     where: {
       OR: [
         {
-          provider: "FMP",
+          provider: {
+            in: ["FMP", "FRED", "BANK_OF_CANADA"],
+          },
         },
         {
           title: {
+            contains: TEST_TEXT_MARKER,
+          },
+        },
+      ],
+    },
+  });
+
+  await testPrisma.fxRateSnapshot.deleteMany({
+    where: {
+      OR: [
+        {
+          source: {
+            contains: "Bank of Canada",
+            mode: "insensitive",
+          },
+        },
+        {
+          source: {
             contains: TEST_TEXT_MARKER,
           },
         },

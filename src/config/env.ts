@@ -29,9 +29,11 @@ const envSchema = z.object({
   FRONTEND_ORIGIN: z.string().url().default("http://localhost:3000"),
   FMP_API_KEY: optionalSecretString,
   FMP_BASE_URL: optionalUrlWithDefault("https://financialmodelingprep.com/stable"),
+  PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(20000),
   FRED_API_KEY: optionalSecretString,
   FRED_BASE_URL: optionalUrlWithDefault("https://api.stlouisfed.org/fred"),
   BANK_OF_CANADA_BASE_URL: optionalUrlWithDefault("https://www.bankofcanada.ca/valet"),
+  BANK_OF_CANADA_USD_CAD_SERIES_ID: z.string().trim().min(1).default("FXUSDCAD"),
   GDELT_BASE_URL: optionalUrlWithDefault("https://api.gdeltproject.org/api/v2"),
 });
 

@@ -9,12 +9,72 @@ Set these values in your local environment file:
 ```bash
 FMP_API_KEY=""
 FMP_BASE_URL="https://financialmodelingprep.com/stable"
+PROVIDER_HTTP_TIMEOUT_MS="20000"
 ```
 
 Notes:
 - Keep API keys in environment variables only.
 - Do not commit populated .env files.
 - If FMP_API_KEY is missing, server startup still works; ingestion calls fail with a clear configuration error when invoked.
+- All provider fetch calls use timeout protection (`PROVIDER_HTTP_TIMEOUT_MS`, default 20000ms).
+
+## Federal Reserve Economic Data (FRED)
+
+### Environment Configuration
+
+Set these values in your local environment file:
+
+```bash
+FRED_API_KEY=""
+FRED_BASE_URL="https://api.stlouisfed.org/fred"
+```
+
+Notes:
+- `FRED_API_KEY` is required for FRED requests.
+- The API key is validated lazily (on call), so server startup still succeeds without it.
+- If `FRED_API_KEY` is missing when a FRED ingestion endpoint is called, the request fails with a clear configuration error.
+- If FRED times out, the provider surfaces a timeout request error and full-refresh keeps running remaining sections.
+
+### Supported FRED Endpoints In This Milestone
+
+- `/series/observations?series_id={SERIES_ID}`
+
+### Default FRED Macro Series In This Milestone
+
+- `FEDFUNDS`
+- `DGS10`
+- `DGS2`
+- `T10Y2Y`
+- `CPIAUCSL`
+- `CPILFESL`
+- `UNRATE`
+- `PAYEMS`
+- `ICSA`
+- `GDP`
+- `BAMLH0A0HYM2`
+- `VIXCLS`
+- `DTWEXBGS`
+- `DCOILWTICO`
+
+## Bank of Canada Valet
+
+### Environment Configuration
+
+Set these values in your local environment file:
+
+```bash
+BANK_OF_CANADA_BASE_URL="https://www.bankofcanada.ca/valet"
+BANK_OF_CANADA_USD_CAD_SERIES_ID="FXUSDCAD"
+```
+
+Notes:
+- Bank of Canada Valet does not require an API key for this integration.
+- `BANK_OF_CANADA_USD_CAD_SERIES_ID` controls which BoC series is used for USD/CAD ingestion.
+- BoC calls also use the shared provider timeout guard (`PROVIDER_HTTP_TIMEOUT_MS`).
+
+### Supported Bank of Canada Endpoints In This Milestone
+
+- `/observations/{SERIES_ID}/json`
 
 ### Supported FMP Endpoints In This Milestone
 
@@ -121,5 +181,19 @@ U.S. examples:
 - Treasury rates and market risk premium values are persisted in macro-series storage for reusable macro context.
 - Economic calendar releases are persisted in macro-event storage for upcoming event context and report enrichment.
 - Default economics ingestion set is designed for resilient partial completion; one category failure does not block others.
-- This milestone uses FMP as the macro-context foundation only.
-- FRED and Bank of Canada remain out of scope in this phase and will be added later as primary macro and Canadian-source integrations.
+
+### BoC/FRED Macro Integration Notes
+
+- Macro and FX ingestion now supports FRED and Bank of Canada as first-class providers.
+- BoC USD/CAD snapshots are stored with convention: base `USD`, quote `CAD`, and value = CAD per 1 USD.
+- FRED observation values with `value = "."` are ignored during ingestion.
+- Default macro ingestion can run BoC and FRED together; section failures are non-blocking and surfaced as warnings.
+- FRED default-series ingestion runs in small batches (instead of fully sequential single-series calls) to reduce wall-clock time.
+- Full-refresh supports `fredObservationLimit`, `bocObservationLimit`, and optional `macroMaxSeries` to bound macro ingestion work.
+- Macro and economics upserts now skip no-op updates where data is unchanged to reduce repeated write load.
+
+### Current Limitations
+
+- FRED and BoC ingestion currently covers observations only (no historical revisions endpoint handling).
+- Currency ingestion currently targets USD/CAD only in the default BoC flow.
+- Series metadata for FRED is statically mapped for the default set and may need extension for custom series.

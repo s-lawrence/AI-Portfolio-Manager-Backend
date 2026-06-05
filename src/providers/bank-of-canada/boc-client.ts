@@ -1,51 +1,49 @@
 import { env } from "../../config/env";
-import {
-  ProviderConfigurationError,
-  ProviderRequestError,
-  ProviderResponseError,
-} from "../errors";
+import { ProviderRateLimitError, ProviderRequestError, ProviderResponseError } from "../errors";
 
-export const FMP_PROVIDER_NAME = "Financial Modeling Prep";
+export const BANK_OF_CANADA_PROVIDER_NAME = "Bank of Canada Valet";
 
-export type FmpJsonQueryValue = string | number | boolean | Date | null | undefined;
+export type BocJsonQueryValue = string | number | boolean | Date | null | undefined;
 
-export type FmpJsonQuery = Record<string, FmpJsonQueryValue>;
+export type BocJsonQuery = Record<string, BocJsonQueryValue>;
 
-export interface FmpClientOptions {
+export interface BocClientOptions {
   baseUrl?: string;
-  apiKey?: string;
   providerName?: string;
 }
 
-export interface FmpJsonClient {
-  getJson<T>(path: string, query?: FmpJsonQuery): Promise<T>;
+export interface BocJsonClient {
+  getJson<T>(path: string, query?: BocJsonQuery): Promise<T>;
 }
 
-function stringifyQueryValue(value: Exclude<FmpJsonQueryValue, null | undefined>): string {
+function formatDateOnly(value: Date): string {
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(value.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function stringifyQueryValue(value: Exclude<BocJsonQueryValue, null | undefined>): string {
   if (value instanceof Date) {
-    return value.toISOString();
+    return formatDateOnly(value);
   }
 
   return String(value);
 }
 
-export class FmpClient implements FmpJsonClient {
+export class BocClient implements BocJsonClient {
   private readonly providerName: string;
 
   private readonly baseUrlOverride?: string;
 
-  private readonly apiKeyOverride?: string;
-
-  constructor(options: FmpClientOptions = {}) {
-    this.providerName = options.providerName ?? FMP_PROVIDER_NAME;
+  constructor(options: BocClientOptions = {}) {
+    this.providerName = options.providerName ?? BANK_OF_CANADA_PROVIDER_NAME;
     this.baseUrlOverride = options.baseUrl;
-    this.apiKeyOverride = options.apiKey;
   }
 
-  async getJson<T>(path: string, query: FmpJsonQuery = {}): Promise<T> {
+  async getJson<T>(path: string, query: BocJsonQuery = {}): Promise<T> {
     const endpoint = this.normalizeEndpoint(path);
-    const apiKey = this.requireApiKey(endpoint);
-    const url = this.buildUrl(endpoint, query, apiKey);
+    const url = this.buildUrl(endpoint, query);
     const timeoutMs = this.resolveTimeoutMs();
 
     let response: Response;
@@ -77,6 +75,17 @@ export class FmpClient implements FmpJsonClient {
     }
 
     if (!response.ok) {
+      if (response.status === 429) {
+        throw new ProviderRateLimitError(
+          this.providerName,
+          `${this.providerName} rate limit exceeded.`,
+          {
+            endpoint,
+            statusCode: response.status,
+          },
+        );
+      }
+
       throw new ProviderRequestError(
         this.providerName,
         `${this.providerName} request failed with status ${response.status}.`,
@@ -114,22 +123,8 @@ export class FmpClient implements FmpJsonClient {
     return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   }
 
-  private requireApiKey(endpoint: string): string {
-    const apiKey = (this.apiKeyOverride ?? env.FMP_API_KEY)?.trim();
-
-    if (!apiKey) {
-      throw new ProviderConfigurationError(
-        this.providerName,
-        `${this.providerName} API key is not configured.`,
-        { endpoint },
-      );
-    }
-
-    return apiKey;
-  }
-
-  private buildUrl(endpoint: string, query: FmpJsonQuery, apiKey: string): URL {
-    const baseUrl = this.baseUrlOverride ?? env.FMP_BASE_URL;
+  private buildUrl(endpoint: string, query: BocJsonQuery): URL {
+    const baseUrl = this.baseUrlOverride ?? env.BANK_OF_CANADA_BASE_URL;
     const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 
     const base = new URL(normalizedBaseUrl);
@@ -142,8 +137,6 @@ export class FmpClient implements FmpJsonClient {
 
       url.searchParams.set(key, stringifyQueryValue(value));
     }
-
-    url.searchParams.set("apikey", apiKey);
 
     return url;
   }

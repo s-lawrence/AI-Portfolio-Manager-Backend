@@ -114,12 +114,31 @@ export interface ProviderNewsArticle {
 }
 
 export interface ProviderMacroObservation {
+  provider: string;
   seriesId: string;
-  date: Date;
-  value?: number | null;
-  unit?: string;
-  frequency?: string;
-  source?: string;
+  name?: string | null;
+  country?: string | null;
+  category?: string | null;
+  value: number;
+  unit?: string | null;
+  observedAt: Date;
+  source?: string | null;
+}
+
+export interface ProviderFxRate {
+  baseCurrency: string;
+  quoteCurrency: string;
+  rate: number;
+  capturedAt: Date;
+  source?: string | null;
+}
+
+export interface ProviderIngestionSectionResult {
+  recordsCreated: number;
+  recordsUpdated: number;
+  recordsSkipped: number;
+  warnings: string[];
+  failedSeries?: string[];
 }
 
 export interface ProviderGeoEvent {
@@ -232,6 +251,12 @@ export interface MacroProvider {
     seriesId: string,
     options?: ProviderDateRangeOptions,
   ): Promise<ProviderMacroObservation[]>;
+}
+
+export interface FxRateProvider {
+  getUsdCadRate(
+    options?: ProviderDateRangeOptions,
+  ): Promise<ProviderFxRate[]>;
 }
 
 export interface GeopoliticalProvider {

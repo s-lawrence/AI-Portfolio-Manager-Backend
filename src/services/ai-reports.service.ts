@@ -38,6 +38,7 @@ import {
   TickerReportGenerationResult,
 } from "../types/services";
 import { getNewsSentimentSummary, isDemoNewsArticle } from "./news.service";
+import { getLatestFxRate } from "./fx-rates.service";
 import {
   ensureStockExists,
   getStockProfile,
@@ -277,7 +278,26 @@ function formatMacroNumber(value: number): string {
 }
 
 async function buildMacroSummary(): Promise<string> {
-  const [us10y, us2y, mrpTotalUs, upcomingHighImportance] = await Promise.all([
+  const [
+    usdCad,
+    fred10y,
+    fred2y,
+    fedFunds,
+    cpi,
+    unemployment,
+    oil,
+    us10y,
+    us2y,
+    mrpTotalUs,
+    upcomingHighImportance,
+  ] = await Promise.all([
+    getLatestFxRate("USD", "CAD"),
+    getLatestMacroSeriesObservation("FRED", "DGS10"),
+    getLatestMacroSeriesObservation("FRED", "DGS2"),
+    getLatestMacroSeriesObservation("FRED", "FEDFUNDS"),
+    getLatestMacroSeriesObservation("FRED", "CPIAUCSL"),
+    getLatestMacroSeriesObservation("FRED", "UNRATE"),
+    getLatestMacroSeriesObservation("FRED", "DCOILWTICO"),
     getLatestMacroSeriesObservation("FMP", "FMP_TREASURY_10Y"),
     getLatestMacroSeriesObservation("FMP", "FMP_TREASURY_2Y"),
     getLatestMacroSeriesObservation("FMP", "FMP_MRP_TOTAL_US"),
@@ -289,6 +309,72 @@ async function buildMacroSummary(): Promise<string> {
   ]);
 
   const parts: string[] = [];
+
+  const hasBocOrFredData =
+    usdCad != null ||
+    fred10y != null ||
+    fred2y != null ||
+    fedFunds != null ||
+    cpi != null ||
+    unemployment != null ||
+    oil != null;
+
+  const resolved10y = fred10y ?? us10y;
+  const resolved2y = fred2y ?? us2y;
+
+  if (hasBocOrFredData) {
+    if (usdCad) {
+      parts.push(`USD/CAD latest: ${usdCad.rate.toFixed(4)} CAD per 1 USD.`);
+    }
+
+    if (resolved10y && resolved2y) {
+      parts.push(
+        `US Treasury curve snapshot: 10Y ${formatMacroNumber(resolved10y.value)}% vs 2Y ${formatMacroNumber(resolved2y.value)}%.`,
+      );
+    } else if (resolved10y) {
+      parts.push(`US 10Y Treasury latest: ${formatMacroNumber(resolved10y.value)}%.`);
+    } else if (resolved2y) {
+      parts.push(`US 2Y Treasury latest: ${formatMacroNumber(resolved2y.value)}%.`);
+    }
+
+    if (fedFunds) {
+      parts.push(`Fed funds latest: ${formatMacroNumber(fedFunds.value)}%.`);
+    }
+
+    if (cpi) {
+      parts.push(`US CPI latest index: ${formatMacroNumber(cpi.value)}.`);
+    }
+
+    if (unemployment) {
+      parts.push(`US unemployment latest: ${formatMacroNumber(unemployment.value)}%.`);
+    }
+
+    if (oil) {
+      parts.push(`WTI crude latest: ${formatMacroNumber(oil.value)} USD/bbl.`);
+    }
+
+    if (mrpTotalUs) {
+      parts.push(`US total market risk premium: ${formatMacroNumber(mrpTotalUs.value)}%.`);
+    }
+
+    if (upcomingHighImportance.length > 0) {
+      const list = upcomingHighImportance
+        .map((event) => {
+          const when = event.eventDate ? event.eventDate.toISOString().slice(0, 10) : "unknown-date";
+          const country = event.country ?? "global";
+          return `${event.title} (${country}, ${when})`;
+        })
+        .join("; ");
+
+      parts.push(`Upcoming high-importance macro events: ${list}.`);
+    }
+
+    if (parts.length === 0) {
+      return "No macro context available from local economics storage in this phase.";
+    }
+
+    return parts.join(" ");
+  }
 
   if (us10y && us2y) {
     parts.push(

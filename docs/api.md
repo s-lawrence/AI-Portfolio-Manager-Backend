@@ -366,23 +366,56 @@ Run full FMP portfolio refresh in one call (market-data + fundamentals + earning
 curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/full-refresh \
   -H "Content-Type: application/json" \
   -d '{
-    "historicalLimit": 250,
-    "newsLimitPerTicker": 20,
+    "refreshMode": "quick",
+    "historicalLimit": 120,
+    "newsLimitPerTicker": 12,
     "includeEconomics": false,
+    "includeBankOfCanada": false,
+    "includeFred": false,
+    "economicsCalendarPastDays": 7,
+    "economicsCalendarFutureDays": 30,
+    "fredObservationLimit": 120,
+    "bocObservationLimit": 120,
+    "macroMaxSeries": 6,
     "runAnalysis": true
   }'
 ```
 
+Full-refresh request options:
+
+- `refreshMode`: optional, one of `quick` or `full` (default `quick`).
+- `includeEconomics`: optional boolean (default `false`).
+- `includeBankOfCanada`: optional boolean (default `false`).
+- `includeFred`: optional boolean (default `false`).
+- `economicsCalendarPastDays`: optional integer, calendar lookback window.
+- `economicsCalendarFutureDays`: optional integer, calendar lookahead window.
+- `fredObservationLimit`: optional integer limit for per-series FRED observations.
+- `bocObservationLimit`: optional integer limit for BoC USD/CAD observations.
+- `macroMaxSeries`: optional integer to cap number of default FRED series processed.
+
+Include-flag semantics:
+
+- `includeEconomics=false` skips FMP economics and omits `economics` from response.
+- `includeBankOfCanada=false` skips BoC macro/FX and omits `bankOfCanada` from response.
+- `includeFred=false` skips FRED macro and omits `fred` from response.
+- If all macro flags are `false`, macro ingestion is skipped and `macro` is omitted.
+
 Full-refresh response includes:
 
-- `portfolioId`, `startedAt`, `finishedAt`.
+- `portfolioId`, `startedAt`, `finishedAt`, `durationMs`.
 - `marketData` category result (including per-ticker failures).
 - `fundamentals` category result (including per-ticker failures).
 - `earnings` category result (including per-ticker failures).
 - `news` category result (including per-ticker failures).
 - optional `analysis` when `runAnalysis=true`.
 - optional `economics` when `includeEconomics=true`.
+- optional `bankOfCanada`, `fred`, and `macro` when macro flags are enabled.
 - `warnings` aggregated across category-level partial failures.
+
+Timing fields:
+
+- Each executed section includes `durationMs`.
+- `marketData`, `fundamentals`, `earnings`, `news`, `economics`, `bankOfCanada`, `fred`, `macro`, and `analysis` (when present) include timing metadata.
 
 Each full-refresh category result includes:
 
@@ -390,6 +423,7 @@ Each full-refresh category result includes:
 - `tickersFailed`
 - `results`
 - `failedTickers`
+- `durationMs`
 
 FMP economics ingestion endpoints:
 
@@ -437,6 +471,57 @@ Economics ingestion default-set result includes:
 - `treasuryRates`, `economicIndicators`, `economicCalendar`, `marketRiskPremium`
 - each section includes `recordsCreated`, `recordsUpdated`, `recordsSkipped`, and `warnings`
 - `warnings` aggregates section-level failures while allowing partial completion
+
+Macro/FX ingestion endpoints (BoC/FRED):
+
+- `POST /api/ingestion/macro/boc/usd-cad`
+- `POST /api/ingestion/macro/boc/series/<SERIES_ID>`
+- `POST /api/ingestion/macro/fred/<SERIES_ID>`
+- `POST /api/ingestion/macro/fred/default-set`
+- `POST /api/ingestion/macro/default`
+
+Macro ingestion request body:
+
+- `from` optional date string `YYYY-MM-DD`
+- `to` optional date string `YYYY-MM-DD`
+- `limit` optional max records per series
+
+Example macro requests:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/macro/boc/usd-cad \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "2026-06-01",
+    "to": "2026-06-30",
+    "limit": 100
+  }'
+```
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/macro/fred/default-set \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "2026-06-01",
+    "to": "2026-06-30"
+  }'
+```
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/macro/default \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "2026-06-01",
+    "to": "2026-06-30"
+  }'
+```
+
+`POST /api/ingestion/macro/default` response includes:
+
+- `startedAt`, `finishedAt`
+- `bankOfCanada` section (`recordsCreated`, `recordsUpdated`, `recordsSkipped`, `warnings`, optional `failedSeries`)
+- `fred` section (`recordsCreated`, `recordsUpdated`, `recordsSkipped`, `warnings`, optional `failedSeries`)
+- `warnings` aggregated across sections
 
 Fundamentals ingestion responses include:
 

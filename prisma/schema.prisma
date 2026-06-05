@@ -333,6 +333,20 @@ model MacroSeriesObservation {
   @@index([provider, seriesId, observedAt])
 }
 
+model FxRateSnapshot {
+  id            String   @id @default(cuid())
+  baseCurrency  String
+  quoteCurrency String
+  rate          Float
+  source        String?
+  capturedAt    DateTime
+  createdAt     DateTime @default(now())
+
+  @@unique([baseCurrency, quoteCurrency, capturedAt])
+  @@index([baseCurrency, quoteCurrency])
+  @@index([capturedAt])
+}
+
 model AIReport {
   id                              String         @id @default(cuid())
   stockId                         String

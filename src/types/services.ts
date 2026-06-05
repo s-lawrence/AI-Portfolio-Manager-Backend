@@ -257,6 +257,7 @@ export interface PortfolioAnalysisResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   holdingsAnalyzed: number;
   reportsCreated: number;
   predictionsCreated: number;
@@ -338,6 +339,7 @@ export interface IngestPortfolioMarketDataResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   tickersProcessed: number;
   tickersFailed: number;
   results: IngestTickerMarketDataResult[];
@@ -358,6 +360,7 @@ export interface IngestPortfolioFundamentalsResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   tickersProcessed: number;
   tickersFailed: number;
   snapshotsCreated: number;
@@ -379,6 +382,7 @@ export interface PortfolioEarningsIngestionResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   tickersProcessed: number;
   tickersFailed: number;
   results: TickerEarningsIngestionResult[];
@@ -407,6 +411,7 @@ export interface IngestPortfolioNewsResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   tickersProcessed: number;
   tickersFailed: number;
   results: IngestTickerNewsResult[];
@@ -417,6 +422,49 @@ export interface FmpEconomicsIngestionSectionResult {
   recordsCreated: number;
   recordsUpdated: number;
   recordsSkipped: number;
+  warnings: string[];
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+}
+
+export interface MacroIngestionSectionResult {
+  recordsCreated: number;
+  recordsUpdated: number;
+  recordsSkipped: number;
+  warnings: string[];
+  failedSeries?: string[];
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+}
+
+export interface MacroIngestionDateRangeOptions {
+  from?: Date;
+  to?: Date;
+  limit?: number;
+}
+
+export interface IngestDefaultFredMacroSetOptions extends MacroIngestionDateRangeOptions {
+  seriesIds?: string[];
+  maxSeries?: number;
+}
+
+export interface IngestDefaultMacroAndFxOptions extends MacroIngestionDateRangeOptions {
+  includeBankOfCanada?: boolean;
+  includeFred?: boolean;
+  fredSeriesIds?: string[];
+  bankOfCanadaLimit?: number;
+  fredObservationLimit?: number;
+  maxFredSeries?: number;
+}
+
+export interface IngestDefaultMacroAndFxResult {
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  bankOfCanada: MacroIngestionSectionResult;
+  fred: MacroIngestionSectionResult;
   warnings: string[];
 }
 
@@ -464,6 +512,7 @@ export interface IngestFmpEconomicsDefaultSetOptions {
 export interface IngestFmpEconomicsDefaultSetResult {
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   treasuryRates: FmpEconomicsIngestionSectionResult;
   economicIndicators: FmpEconomicsIngestionSectionResult;
   economicCalendar: FmpEconomicsIngestionSectionResult;
@@ -480,6 +529,7 @@ export interface IngestPortfolioFullBasicResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs?: number;
   marketData: IngestPortfolioMarketDataResult;
   fundamentals: IngestPortfolioFundamentalsResult;
   analysis?: PortfolioAnalysisResult;
@@ -489,6 +539,14 @@ export interface PortfolioFmpFullRefreshOptions {
   historicalLimit?: number;
   newsLimitPerTicker?: number;
   includeEconomics?: boolean;
+  includeBankOfCanada?: boolean;
+  includeFred?: boolean;
+  economicsCalendarPastDays?: number;
+  economicsCalendarFutureDays?: number;
+  fredObservationLimit?: number;
+  bocObservationLimit?: number;
+  macroMaxSeries?: number;
+  refreshMode?: "quick" | "full";
   runAnalysis?: boolean;
 }
 
@@ -496,11 +554,15 @@ export interface PortfolioFmpFullRefreshResult {
   portfolioId: string;
   startedAt: string;
   finishedAt: string;
+  durationMs: number;
   marketData: IngestPortfolioMarketDataResult;
   fundamentals: IngestPortfolioFundamentalsResult;
   earnings: PortfolioEarningsIngestionResult;
   news: IngestPortfolioNewsResult;
   economics?: IngestFmpEconomicsDefaultSetResult;
+  bankOfCanada?: MacroIngestionSectionResult;
+  fred?: MacroIngestionSectionResult;
+  macro?: IngestDefaultMacroAndFxResult;
   analysis?: PortfolioAnalysisResult;
   warnings: string[];
 }

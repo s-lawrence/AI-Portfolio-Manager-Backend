@@ -3,6 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app";
 import { env } from "../../src/config/env";
 import {
+  bankOfCanadaProvider,
+} from "../../src/providers/bank-of-canada";
+import {
+  fredProvider,
+} from "../../src/providers/fred";
+import {
   fmpEconomicsProvider,
   fmpEarningsProvider,
   fmpFundamentalsProvider,
@@ -992,6 +998,120 @@ describe("API ingestion routes", () => {
     await app.close();
   });
 
+  it("returns success envelopes for BoC/FRED macro ingestion endpoints", async () => {
+    vi.spyOn(bankOfCanadaProvider, "getUsdCadRate").mockResolvedValue([
+      {
+        baseCurrency: "USD",
+        quoteCurrency: "CAD",
+        rate: 1.3712,
+        capturedAt: new Date("2026-06-15T00:00:00.000Z"),
+        source: "Bank of Canada Valet:FXUSDCAD",
+      },
+    ]);
+
+    vi.spyOn(bankOfCanadaProvider, "getSeriesObservations").mockResolvedValue([
+      {
+        provider: "BANK_OF_CANADA",
+        seriesId: "FXUSDCAD",
+        name: "FXUSDCAD",
+        country: "CA",
+        category: "currency",
+        value: 1.3712,
+        observedAt: new Date("2026-06-15T00:00:00.000Z"),
+        source: "Bank of Canada Valet",
+      },
+    ]);
+
+    vi.spyOn(fredProvider, "getSeriesObservations").mockImplementation(async (seriesId) => [
+      {
+        provider: "FRED",
+        seriesId,
+        name: seriesId,
+        country: "US",
+        category: "rates",
+        value: 4.25,
+        observedAt: new Date("2026-06-15T00:00:00.000Z"),
+        source: "FRED",
+      },
+    ]);
+
+    const app = buildApp();
+
+    const bocUsdCadResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/macro/boc/usd-cad",
+      payload: {
+        from: "2026-06-01",
+        to: "2026-06-20",
+        limit: 50,
+      },
+    });
+
+    expect(bocUsdCadResponse.statusCode).toBe(200);
+    expect(bocUsdCadResponse.json().success).toBe(true);
+    expect(bocUsdCadResponse.json().data.recordsCreated).toBeGreaterThan(0);
+
+    const bocSeriesResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/macro/boc/series/fxusdcad",
+      payload: {
+        from: "2026-06-01",
+        to: "2026-06-20",
+      },
+    });
+
+    expect(bocSeriesResponse.statusCode).toBe(200);
+    expect(bocSeriesResponse.json().success).toBe(true);
+
+    const fredSingleResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/macro/fred/dgs10",
+      payload: {
+        from: "2026-06-01",
+        to: "2026-06-20",
+      },
+    });
+
+    expect(fredSingleResponse.statusCode).toBe(200);
+    expect(fredSingleResponse.json().success).toBe(true);
+
+    const fredDefaultResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/macro/fred/default-set",
+      payload: {
+        from: "2026-06-01",
+        to: "2026-06-20",
+      },
+    });
+
+    expect(fredDefaultResponse.statusCode).toBe(200);
+    expect(fredDefaultResponse.json().success).toBe(true);
+
+    const macroDefaultResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/macro/default",
+      payload: {
+        from: "2026-06-01",
+        to: "2026-06-20",
+      },
+    });
+
+    expect(macroDefaultResponse.statusCode).toBe(200);
+    expect(macroDefaultResponse.json().success).toBe(true);
+    expect(
+      macroDefaultResponse.json().data.bankOfCanada.recordsCreated +
+        macroDefaultResponse.json().data.bankOfCanada.recordsUpdated +
+        macroDefaultResponse.json().data.bankOfCanada.recordsSkipped,
+    ).toBeGreaterThan(0);
+    expect(
+      macroDefaultResponse.json().data.fred.recordsCreated +
+        macroDefaultResponse.json().data.fred.recordsUpdated +
+        macroDefaultResponse.json().data.fred.recordsSkipped,
+    ).toBeGreaterThan(0);
+
+    await app.close();
+  });
+
   it("includes economics result in full-refresh when includeEconomics is true", async () => {
     env.FMP_API_KEY = "test-fmp-key";
 
@@ -1116,6 +1236,116 @@ describe("API ingestion routes", () => {
     expect(body.success).toBe(true);
     expect(body.data.economics).toBeDefined();
     expect(body.data.economics.treasuryRates.recordsCreated).toBeGreaterThan(0);
+
+    await app.close();
+  });
+
+  it("includes BoC/FRED macro in full-refresh and remains non-blocking on FRED failures", async () => {
+    env.FMP_API_KEY = "test-fmp-key";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockImplementation(async (ticker) => ({
+      ticker,
+      companyName: `${ticker} Company`,
+      exchange: "NASDAQ",
+      sector: "Technology",
+      industry: "Software",
+      country: "US",
+      currency: "USD",
+      assetType: "EQUITY",
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockImplementation(async (ticker) => ({
+      ticker,
+      price: 130,
+      previousClose: 128,
+      close: 130,
+      volume: 8_000,
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockImplementation(
+      async (ticker) => buildHistoricalSeries(ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockImplementation(
+      async (ticker) => ({
+        ticker,
+        marketCap: 3_500_000_000,
+        peRatio: 25,
+        source: "FMP",
+      }),
+    );
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    vi.spyOn(bankOfCanadaProvider, "getUsdCadRate").mockResolvedValue([
+      {
+        baseCurrency: "USD",
+        quoteCurrency: "CAD",
+        rate: 1.374,
+        capturedAt: new Date("2026-06-21T00:00:00.000Z"),
+        source: "Bank of Canada Valet:FXUSDCAD",
+      },
+    ]);
+
+    vi.spyOn(fredProvider, "getSeriesObservations").mockRejectedValue(
+      new Error("simulated fred outage"),
+    );
+
+    const app = buildApp();
+
+    const user = await createUser({
+      email: `test+api-full-refresh-macro-${Date.now()}@example.com`,
+      name: "[TEST] API Full Refresh Macro User",
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Full Refresh Macro Portfolio",
+        baseCurrency: "USD",
+      },
+    });
+
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker: "TSTFRM01",
+        status: "OWNED",
+        shares: 4,
+      },
+    });
+
+    const ingestionResponse = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/portfolio/${portfolioId}/full-refresh`,
+      payload: {
+        historicalLimit: 50,
+        newsLimitPerTicker: 10,
+        includeBankOfCanada: true,
+        includeFred: true,
+        runAnalysis: false,
+      },
+    });
+
+    expect(ingestionResponse.statusCode).toBe(200);
+
+    const body = ingestionResponse.json();
+    expect(body.success).toBe(true);
+    expect(body.data.marketData).toBeDefined();
+    expect(body.data.fundamentals).toBeDefined();
+    expect(body.data.earnings).toBeDefined();
+    expect(body.data.news).toBeDefined();
+    expect(body.data.bankOfCanada.recordsCreated).toBeGreaterThan(0);
+    expect(body.data.fred).toBeDefined();
+    expect(body.data.warnings.some((warning: string) => warning.includes("FRED"))).toBe(true);
 
     await app.close();
   });

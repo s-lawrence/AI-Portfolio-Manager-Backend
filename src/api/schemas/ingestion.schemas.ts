@@ -44,5 +44,13 @@ export const ingestPortfolioFullRefreshBodySchema = z.object({
   historicalLimit: optionalLimitSchema,
   newsLimitPerTicker: optionalLimitSchema,
   includeEconomics: booleanQuerySchema.optional(),
+  includeBankOfCanada: booleanQuerySchema.optional(),
+  includeFred: booleanQuerySchema.optional(),
+  economicsCalendarPastDays: z.coerce.number().int().min(0).max(3650).optional(),
+  economicsCalendarFutureDays: z.coerce.number().int().min(0).max(3650).optional(),
+  fredObservationLimit: optionalLimitSchema,
+  bocObservationLimit: optionalLimitSchema,
+  macroMaxSeries: optionalLimitSchema,
+  refreshMode: z.enum(["quick", "full"]).optional(),
   runAnalysis: booleanQuerySchema.optional(),
 });

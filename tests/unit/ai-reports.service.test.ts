@@ -17,6 +17,7 @@ import { upsertMacroSeriesObservation } from "../../src/repositories/macro-serie
 import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
 import { getStockProfile } from "../../src/services/stocks.service";
 import { recordFundamentalSnapshot } from "../../src/services/fundamentals.service";
+import { upsertFxRateSnapshot } from "../../src/services/fx-rates.service";
 import { recordPriceSnapshot } from "../../src/services/market-data.service";
 import { recordNewsArticles } from "../../src/services/news.service";
 import { recordTechnicalSnapshot } from "../../src/services/technical-analysis.service";
@@ -376,6 +377,44 @@ describe("ai-reports.service", () => {
     expect(macroSummary).toContain("2Y");
     expect(macroSummary).toContain("risk premium");
     expect(macroSummary).toContain("Upcoming high-importance macro events");
+  });
+
+  it("includes USD/CAD and FRED 10Y/2Y context when available", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    await upsertFxRateSnapshot({
+      baseCurrency: "USD",
+      quoteCurrency: "CAD",
+      rate: 1.3722,
+      capturedAt: new Date("2026-06-21T00:00:00.000Z"),
+      source: "Bank of Canada Valet:FXUSDCAD",
+    });
+
+    await upsertMacroSeriesObservation({
+      provider: "FRED",
+      seriesId: "DGS10",
+      observedAt: new Date("2026-06-21T00:00:00.000Z"),
+      value: 4.42,
+      category: "rates",
+      country: "US",
+    });
+
+    await upsertMacroSeriesObservation({
+      provider: "FRED",
+      seriesId: "DGS2",
+      observedAt: new Date("2026-06-21T00:00:00.000Z"),
+      value: 3.95,
+      category: "rates",
+      country: "US",
+    });
+
+    const result = await generateMockTickerReport(ticker);
+
+    const macroSummary = result.report.macroGeopoliticalSummary ?? "";
+    expect(macroSummary).toContain("USD/CAD latest");
+    expect(macroSummary).toContain("10Y");
+    expect(macroSummary).toContain("2Y");
   });
 
   it("writes a structured valuation/profitability/health fundamentals summary", async () => {

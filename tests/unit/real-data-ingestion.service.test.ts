@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { env } from "../../src/config/env";
 import { ProviderNotFoundError } from "../../src/providers/errors";
 import {
   fmpEarningsProvider,
@@ -29,6 +30,8 @@ import {
   ingestTickerMarketData,
   ingestTickerNews,
 } from "../../src/services/real-data-ingestion.service";
+import * as fmpEconomicsIngestionService from "../../src/services/fmp-economics-ingestion.service";
+import * as macroIngestionService from "../../src/services/macro-ingestion.service";
 import * as portfolioAnalysisService from "../../src/services/portfolio-analysis.service";
 import { getLatestFundamentals } from "../../src/services/fundamentals.service";
 import { getStockProfile, getStockResearchBundle } from "../../src/services/stocks.service";
@@ -92,6 +95,42 @@ function buildLongHistoricalSeries(
       volume: 20_000 + index * 15,
     };
   });
+}
+
+function mockSuccessfulFullRefreshProviders(ticker: string): void {
+  vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+    ticker,
+    companyName: `${ticker} Co.`,
+    exchange: "NASDAQ",
+    sector: "Technology",
+    industry: "Software",
+    country: "US",
+    currency: "USD",
+    assetType: "EQUITY",
+  });
+
+  vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+    ticker,
+    price: 180,
+    previousClose: 178,
+    close: 180,
+    volume: 10_000,
+  });
+
+  vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+    buildHistoricalSeries(ticker),
+  );
+
+  vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockResolvedValue({
+    ticker,
+    marketCap: 2_500_000_000,
+    peRatio: 19,
+    source: "FMP",
+  });
+
+  vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+  vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+  vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
 }
 
 describe("real-data-ingestion.service", () => {
@@ -325,7 +364,7 @@ describe("real-data-ingestion.service", () => {
     expect(research).not.toBeNull();
     expect(research?.latestTechnicalSnapshot).toBeTruthy();
     expect(research?.latestTechnicalSnapshot?.sma50 ?? 0).toBeGreaterThan(290);
-  });
+  }, 15000);
 
   it("creates a complete technical snapshot with 250 historical prices", async () => {
     const ticker = "TSTFMP250";
@@ -1177,6 +1216,414 @@ describe("real-data-ingestion.service", () => {
 
     expect(result.analysis).toBeDefined();
     expect(analysisSpy).toHaveBeenCalled();
+  });
+
+  it("full-refresh includes durationMs on top-level and executed sections", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRDUR");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: true,
+    });
+
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.marketData.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.fundamentals.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.earnings.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.news.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.analysis?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.economics).toBeUndefined();
+    expect(result.bankOfCanada).toBeUndefined();
+    expect(result.fred).toBeUndefined();
+    expect(result.macro).toBeUndefined();
+  });
+
+  it("full-refresh omits economics and does not call economics ingestion when includeEconomics=false", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRECO0");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const economicsSpy = vi.spyOn(fmpEconomicsIngestionService, "ingestFmpEconomicsDefaultSet");
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeEconomics: false,
+      runAnalysis: false,
+    });
+
+    expect(economicsSpy).not.toHaveBeenCalled();
+    expect(result.economics).toBeUndefined();
+  });
+
+  it("full-refresh includeFred=false omits fred and forwards includeFred=false to macro ingestion", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRFRED0");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const macroSpy = vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockResolvedValue({
+      startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-20T00:00:05.000Z").toISOString(),
+      durationMs: 5000,
+      bankOfCanada: {
+        recordsCreated: 1,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      fred: {
+        recordsCreated: 0,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      warnings: [],
+    });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeBankOfCanada: true,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(macroSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeBankOfCanada: true,
+        includeFred: false,
+      }),
+    );
+    expect(result.bankOfCanada).toBeDefined();
+    expect(result.fred).toBeUndefined();
+  });
+
+  it("full-refresh includeBankOfCanada=false omits bankOfCanada and forwards includeBankOfCanada=false", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRBOC0");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const macroSpy = vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockResolvedValue({
+      startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-20T00:00:05.000Z").toISOString(),
+      durationMs: 5000,
+      bankOfCanada: {
+        recordsCreated: 0,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      fred: {
+        recordsCreated: 2,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      warnings: [],
+    });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeBankOfCanada: false,
+      includeFred: true,
+      runAnalysis: false,
+    });
+
+    expect(macroSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeBankOfCanada: false,
+        includeFred: true,
+      }),
+    );
+    expect(result.bankOfCanada).toBeUndefined();
+    expect(result.fred).toBeDefined();
+  });
+
+  it("does not warn about missing FRED API key when includeFred=false", async () => {
+    const originalFredApiKey = env.FRED_API_KEY;
+    env.FRED_API_KEY = undefined;
+
+    try {
+      const portfolio = await createTestPortfolio();
+      const stock = await createTestStock("TSTFMPFRNFRD");
+
+      await createTestHolding(portfolio.id, stock.id);
+      mockSuccessfulFullRefreshProviders(stock.ticker);
+
+      const macroSpy = vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx");
+
+      const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+        includeEconomics: false,
+        includeBankOfCanada: false,
+        includeFred: false,
+        runAnalysis: false,
+      });
+
+      expect(macroSpy).not.toHaveBeenCalled();
+      expect(result.warnings.some((warning) => /fred/i.test(warning))).toBe(false);
+      expect(result.fred).toBeUndefined();
+    } finally {
+      env.FRED_API_KEY = originalFredApiKey;
+    }
+  });
+
+  it("passes fredObservationLimit and bocObservationLimit to macro ingestion", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRLIM1");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const macroSpy = vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockResolvedValue({
+      startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-20T00:00:02.000Z").toISOString(),
+      durationMs: 2000,
+      bankOfCanada: {
+        recordsCreated: 0,
+        recordsUpdated: 1,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      fred: {
+        recordsCreated: 0,
+        recordsUpdated: 2,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      warnings: [],
+    });
+
+    await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeBankOfCanada: true,
+      includeFred: true,
+      bocObservationLimit: 44,
+      fredObservationLimit: 33,
+      macroMaxSeries: 5,
+      runAnalysis: false,
+    });
+
+    expect(macroSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeBankOfCanada: true,
+        includeFred: true,
+        bankOfCanadaLimit: 44,
+        fredObservationLimit: 33,
+        maxFredSeries: 5,
+      }),
+    );
+  });
+
+  it("passes configured economics calendar past/future windows", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRECO1");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const economicsSpy = vi
+      .spyOn(fmpEconomicsIngestionService, "ingestFmpEconomicsDefaultSet")
+      .mockResolvedValue({
+        startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+        finishedAt: new Date("2026-06-20T00:00:03.000Z").toISOString(),
+        durationMs: 3000,
+        treasuryRates: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        economicIndicators: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        economicCalendar: {
+          recordsCreated: 1,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        marketRiskPremium: {
+          recordsCreated: 0,
+          recordsUpdated: 0,
+          recordsSkipped: 0,
+          warnings: [],
+        },
+        warnings: [],
+      });
+
+    await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeEconomics: true,
+      economicsCalendarPastDays: 3,
+      economicsCalendarFutureDays: 14,
+      runAnalysis: false,
+    });
+
+    const callInput = economicsSpy.mock.calls[0]?.[0];
+    expect(callInput).toBeDefined();
+    expect(callInput?.calendarFrom).toBeInstanceOf(Date);
+    expect(callInput?.calendarTo).toBeInstanceOf(Date);
+
+    if (callInput?.calendarFrom && callInput?.calendarTo) {
+      const spanDays =
+        (callInput.calendarTo.getTime() - callInput.calendarFrom.getTime()) /
+        (24 * 60 * 60 * 1000);
+      expect(spanDays).toBeGreaterThanOrEqual(16.9);
+      expect(spanDays).toBeLessThanOrEqual(17.1);
+    }
+  });
+
+  it("continues full-refresh when provider timeout occurs and returns warnings", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRTIME");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockRejectedValue(
+      new Error("Request to FRED timed out after 20000ms."),
+    );
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: true,
+      runAnalysis: false,
+    });
+
+    expect(result.marketData).toBeDefined();
+    expect(result.fundamentals).toBeDefined();
+    expect(result.earnings).toBeDefined();
+    expect(result.news).toBeDefined();
+    expect(result.fred).toBeDefined();
+    expect(result.fred?.warnings.some((warning) => /timed out/i.test(warning))).toBe(true);
+  });
+
+  it("full-refresh includes BoC/FRED macro results when flags are enabled", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRMAC1");
+
+    await createTestHolding(portfolio.id, stock.id);
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker: stock.ticker,
+      companyName: "Macro Refresh Co.",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker: stock.ticker,
+      price: 222,
+      previousClose: 219,
+      close: 222,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      buildHistoricalSeries(stock.ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockResolvedValue({
+      ticker: stock.ticker,
+      marketCap: 3_000_000_000,
+      peRatio: 18,
+      source: "FMP",
+    });
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    const macroSpy = vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockResolvedValue({
+      startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-20T00:01:00.000Z").toISOString(),
+      bankOfCanada: {
+        recordsCreated: 1,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      fred: {
+        recordsCreated: 3,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        warnings: [],
+      },
+      warnings: [],
+    });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeBankOfCanada: true,
+      includeFred: true,
+      runAnalysis: false,
+    });
+
+    expect(macroSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        includeBankOfCanada: true,
+        includeFred: true,
+      }),
+    );
+    expect(result.macro).toBeDefined();
+    expect(result.bankOfCanada?.recordsCreated).toBe(1);
+    expect(result.fred?.recordsCreated).toBe(3);
+  });
+
+  it("full-refresh remains non-blocking when macro ingestion throws", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRMAC2");
+
+    await createTestHolding(portfolio.id, stock.id);
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockResolvedValue({
+      ticker: stock.ticker,
+      companyName: "Macro Warning Co.",
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockResolvedValue({
+      ticker: stock.ticker,
+      price: 188,
+      previousClose: 186,
+      close: 188,
+    });
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockResolvedValue(
+      buildHistoricalSeries(stock.ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockResolvedValue({
+      ticker: stock.ticker,
+      marketCap: 2_200_000_000,
+      peRatio: 16,
+      source: "FMP",
+    });
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    vi.spyOn(macroIngestionService, "ingestDefaultMacroAndFx").mockRejectedValue(
+      new Error("macro pipeline unavailable"),
+    );
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeBankOfCanada: true,
+      includeFred: true,
+      runAnalysis: false,
+    });
+
+    expect(result.marketData).toBeDefined();
+    expect(result.fundamentals).toBeDefined();
+    expect(result.earnings).toBeDefined();
+    expect(result.news).toBeDefined();
+    expect(result.macro?.warnings.join(" ")).toContain("macro pipeline unavailable");
+    expect(result.warnings.some((warning) => warning.includes("Macro ingestion"))).toBe(true);
   });
 
   it("full-refresh second run refreshes same-day fundamentals and updates same-day report summary", async () => {

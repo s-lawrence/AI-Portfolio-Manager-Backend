@@ -1,48 +1,56 @@
 import { env } from "../../config/env";
 import {
   ProviderConfigurationError,
+  ProviderRateLimitError,
   ProviderRequestError,
   ProviderResponseError,
 } from "../errors";
 
-export const FMP_PROVIDER_NAME = "Financial Modeling Prep";
+export const FRED_PROVIDER_NAME = "FRED";
 
-export type FmpJsonQueryValue = string | number | boolean | Date | null | undefined;
+export type FredJsonQueryValue = string | number | boolean | Date | null | undefined;
 
-export type FmpJsonQuery = Record<string, FmpJsonQueryValue>;
+export type FredJsonQuery = Record<string, FredJsonQueryValue>;
 
-export interface FmpClientOptions {
+export interface FredClientOptions {
   baseUrl?: string;
   apiKey?: string;
   providerName?: string;
 }
 
-export interface FmpJsonClient {
-  getJson<T>(path: string, query?: FmpJsonQuery): Promise<T>;
+export interface FredJsonClient {
+  getJson<T>(path: string, query?: FredJsonQuery): Promise<T>;
 }
 
-function stringifyQueryValue(value: Exclude<FmpJsonQueryValue, null | undefined>): string {
+function formatDateOnly(value: Date): string {
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(value.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function stringifyQueryValue(value: Exclude<FredJsonQueryValue, null | undefined>): string {
   if (value instanceof Date) {
-    return value.toISOString();
+    return formatDateOnly(value);
   }
 
   return String(value);
 }
 
-export class FmpClient implements FmpJsonClient {
+export class FredClient implements FredJsonClient {
   private readonly providerName: string;
 
   private readonly baseUrlOverride?: string;
 
   private readonly apiKeyOverride?: string;
 
-  constructor(options: FmpClientOptions = {}) {
-    this.providerName = options.providerName ?? FMP_PROVIDER_NAME;
+  constructor(options: FredClientOptions = {}) {
+    this.providerName = options.providerName ?? FRED_PROVIDER_NAME;
     this.baseUrlOverride = options.baseUrl;
     this.apiKeyOverride = options.apiKey;
   }
 
-  async getJson<T>(path: string, query: FmpJsonQuery = {}): Promise<T> {
+  async getJson<T>(path: string, query: FredJsonQuery = {}): Promise<T> {
     const endpoint = this.normalizeEndpoint(path);
     const apiKey = this.requireApiKey(endpoint);
     const url = this.buildUrl(endpoint, query, apiKey);
@@ -77,6 +85,17 @@ export class FmpClient implements FmpJsonClient {
     }
 
     if (!response.ok) {
+      if (response.status === 429) {
+        throw new ProviderRateLimitError(
+          this.providerName,
+          `${this.providerName} rate limit exceeded.`,
+          {
+            endpoint,
+            statusCode: response.status,
+          },
+        );
+      }
+
       throw new ProviderRequestError(
         this.providerName,
         `${this.providerName} request failed with status ${response.status}.`,
@@ -105,18 +124,14 @@ export class FmpClient implements FmpJsonClient {
   private normalizeEndpoint(path: string): string {
     const trimmed = path.trim();
     if (!trimmed) {
-      throw new ProviderRequestError(
-        this.providerName,
-        "Provider path is required.",
-      );
+      throw new ProviderRequestError(this.providerName, "Provider path is required.");
     }
 
     return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
   }
 
   private requireApiKey(endpoint: string): string {
-    const apiKey = (this.apiKeyOverride ?? env.FMP_API_KEY)?.trim();
-
+    const apiKey = (this.apiKeyOverride ?? env.FRED_API_KEY)?.trim();
     if (!apiKey) {
       throw new ProviderConfigurationError(
         this.providerName,
@@ -128,8 +143,8 @@ export class FmpClient implements FmpJsonClient {
     return apiKey;
   }
 
-  private buildUrl(endpoint: string, query: FmpJsonQuery, apiKey: string): URL {
-    const baseUrl = this.baseUrlOverride ?? env.FMP_BASE_URL;
+  private buildUrl(endpoint: string, query: FredJsonQuery, apiKey: string): URL {
+    const baseUrl = this.baseUrlOverride ?? env.FRED_BASE_URL;
     const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 
     const base = new URL(normalizedBaseUrl);
@@ -143,7 +158,11 @@ export class FmpClient implements FmpJsonClient {
       url.searchParams.set(key, stringifyQueryValue(value));
     }
 
-    url.searchParams.set("apikey", apiKey);
+    if (!url.searchParams.has("file_type")) {
+      url.searchParams.set("file_type", "json");
+    }
+
+    url.searchParams.set("api_key", apiKey);
 
     return url;
   }

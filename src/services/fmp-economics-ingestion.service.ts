@@ -47,6 +47,19 @@ function asSection(counter: MutableSectionCounter): FmpEconomicsIngestionSection
   };
 }
 
+function withSectionTiming(
+  section: FmpEconomicsIngestionSectionResult,
+  startedAtDate: Date,
+  finishedAtDate: Date,
+): FmpEconomicsIngestionSectionResult {
+  return {
+    ...section,
+    startedAt: startedAtDate.toISOString(),
+    finishedAt: finishedAtDate.toISOString(),
+    durationMs: Math.max(0, finishedAtDate.getTime() - startedAtDate.getTime()),
+  };
+}
+
 function toErrorReason(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -96,14 +109,17 @@ async function writeObservation(
 
   if (result.created) {
     counter.recordsCreated += 1;
-  } else {
+  } else if (result.updated) {
     counter.recordsUpdated += 1;
+  } else {
+    counter.recordsSkipped += 1;
   }
 }
 
 export async function ingestFmpTreasuryRates(
   options: IngestFmpTreasuryRatesOptions = {},
 ): Promise<FmpEconomicsIngestionSectionResult> {
+  const startedAtDate = new Date();
   const counter: MutableSectionCounter = {
     recordsCreated: 0,
     recordsUpdated: 0,
@@ -119,7 +135,7 @@ export async function ingestFmpTreasuryRates(
 
   if (rates.length === 0) {
     counter.warnings.push("No treasury rates returned by FMP.");
-    return asSection(counter);
+    return withSectionTiming(asSection(counter), startedAtDate, new Date());
   }
 
   for (const rate of rates) {
@@ -156,12 +172,13 @@ export async function ingestFmpTreasuryRates(
     }
   }
 
-  return asSection(counter);
+  return withSectionTiming(asSection(counter), startedAtDate, new Date());
 }
 
 export async function ingestFmpEconomicIndicators(
   options: IngestFmpEconomicIndicatorsOptions = {},
 ): Promise<FmpEconomicsIngestionSectionResult> {
+  const startedAtDate = new Date();
   const counter: MutableSectionCounter = {
     recordsCreated: 0,
     recordsUpdated: 0,
@@ -211,12 +228,13 @@ export async function ingestFmpEconomicIndicators(
     }
   }
 
-  return asSection(counter);
+  return withSectionTiming(asSection(counter), startedAtDate, new Date());
 }
 
 export async function ingestFmpEconomicCalendar(
   options: IngestFmpEconomicCalendarOptions,
 ): Promise<FmpEconomicsIngestionSectionResult> {
+  const startedAtDate = new Date();
   const counter: MutableSectionCounter = {
     recordsCreated: 0,
     recordsUpdated: 0,
@@ -231,7 +249,7 @@ export async function ingestFmpEconomicCalendar(
 
   if (events.length === 0) {
     counter.warnings.push("No economic calendar events returned by FMP.");
-    return asSection(counter);
+    return withSectionTiming(asSection(counter), startedAtDate, new Date());
   }
 
   for (const event of events) {
@@ -263,17 +281,20 @@ export async function ingestFmpEconomicCalendar(
 
     if (result.created) {
       counter.recordsCreated += 1;
-    } else {
+    } else if (result.updated) {
       counter.recordsUpdated += 1;
+    } else {
+      counter.recordsSkipped += 1;
     }
   }
 
-  return asSection(counter);
+  return withSectionTiming(asSection(counter), startedAtDate, new Date());
 }
 
 export async function ingestFmpMarketRiskPremium(
   options: IngestFmpMarketRiskPremiumOptions = {},
 ): Promise<FmpEconomicsIngestionSectionResult> {
+  const startedAtDate = new Date();
   const counter: MutableSectionCounter = {
     recordsCreated: 0,
     recordsUpdated: 0,
@@ -288,7 +309,7 @@ export async function ingestFmpMarketRiskPremium(
 
   if (records.length === 0) {
     counter.warnings.push("No market risk premium records returned by FMP.");
-    return asSection(counter);
+    return withSectionTiming(asSection(counter), startedAtDate, new Date());
   }
 
   for (const record of records) {
@@ -331,7 +352,7 @@ export async function ingestFmpMarketRiskPremium(
     }
   }
 
-  return asSection(counter);
+  return withSectionTiming(asSection(counter), startedAtDate, new Date());
 }
 
 export async function ingestFmpEconomicsDefaultSet(
@@ -428,6 +449,7 @@ export async function ingestFmpEconomicsDefaultSet(
   return {
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
+    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
     treasuryRates,
     economicIndicators,
     economicCalendar,

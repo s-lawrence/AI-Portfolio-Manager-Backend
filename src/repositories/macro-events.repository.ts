@@ -88,28 +88,58 @@ export async function upsertMacroEventByProviderIdentity(
     source?: string | null;
     sourceUrl?: string | null;
   },
-): Promise<{ event: MacroEvent; created: boolean }> {
+): Promise<{ event: MacroEvent; created: boolean; updated: boolean }> {
   const existing = await findMacroEventByProviderIdentity(identity);
 
   if (existing) {
+    const nextEventType = payload.eventType ?? null;
+    const nextCategory = payload.category ?? null;
+    const nextImportance = payload.importance ?? null;
+    const nextActual = payload.actual ?? null;
+    const nextEstimate = payload.estimate ?? null;
+    const nextPrevious = payload.previous ?? null;
+    const nextUnit = payload.unit ?? null;
+    const nextSource = payload.source ?? null;
+    const nextSourceUrl = payload.sourceUrl ?? null;
+
+    const unchanged =
+      existing.eventType === nextEventType &&
+      existing.category === nextCategory &&
+      existing.importance === nextImportance &&
+      existing.actual === nextActual &&
+      existing.estimate === nextEstimate &&
+      existing.previous === nextPrevious &&
+      existing.unit === nextUnit &&
+      existing.source === nextSource &&
+      existing.sourceUrl === nextSourceUrl;
+
+    if (unchanged) {
+      return {
+        event: existing,
+        created: false,
+        updated: false,
+      };
+    }
+
     const updated = await prisma.macroEvent.update({
       where: { id: existing.id },
       data: {
-        eventType: payload.eventType ?? null,
-        category: payload.category ?? null,
-        importance: payload.importance ?? null,
-        actual: payload.actual ?? null,
-        estimate: payload.estimate ?? null,
-        previous: payload.previous ?? null,
-        unit: payload.unit ?? null,
-        source: payload.source ?? null,
-        sourceUrl: payload.sourceUrl ?? null,
+        eventType: nextEventType,
+        category: nextCategory,
+        importance: nextImportance,
+        actual: nextActual,
+        estimate: nextEstimate,
+        previous: nextPrevious,
+        unit: nextUnit,
+        source: nextSource,
+        sourceUrl: nextSourceUrl,
       },
     });
 
     return {
       event: updated,
       created: false,
+      updated: true,
     };
   }
 
@@ -134,6 +164,7 @@ export async function upsertMacroEventByProviderIdentity(
   return {
     event: created,
     created: true,
+    updated: false,
   };
 }
 

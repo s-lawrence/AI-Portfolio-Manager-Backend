@@ -4,6 +4,8 @@ import { ProviderConfigurationError } from "./errors";
 export * from "./errors";
 export * from "./types";
 export * from "./fmp";
+export * from "./fred";
+export * from "./bank-of-canada";
 
 export interface ProviderRuntimeConfig {
   provider: string;
