@@ -755,6 +755,14 @@ export async function generateMockTickerReport(
       }
     }
 
+    if (fundamentals.pegRatio != null) {
+      valuationNotes.push(`PEG ${fundamentals.pegRatio.toFixed(2)}`);
+    }
+
+    if (fundamentals.evToEbitda != null) {
+      valuationNotes.push(`EV/EBITDA ${fundamentals.evToEbitda.toFixed(2)}`);
+    }
+
     if (fundamentals.grossMargin != null) {
       profitabilityNotes.push(`Gross margin ${(fundamentals.grossMargin * 100).toFixed(1)}%`);
 
@@ -765,6 +773,12 @@ export async function generateMockTickerReport(
         score -= 1;
         bearishFactors.push("Gross margin profile appears weak.");
       }
+    }
+
+    if (fundamentals.operatingMargin != null) {
+      profitabilityNotes.push(
+        `Operating margin ${(fundamentals.operatingMargin * 100).toFixed(1)}%`,
+      );
     }
 
     if (fundamentals.netMargin != null) {
@@ -812,6 +826,10 @@ export async function generateMockTickerReport(
 
     if (fundamentals.currentRatio != null) {
       healthNotes.push(`Current ratio ${fundamentals.currentRatio.toFixed(2)}`);
+    }
+
+    if (fundamentals.dividendYield != null) {
+      healthNotes.push(`Dividend yield ${(fundamentals.dividendYield * 100).toFixed(2)}%`);
     }
 
     if (fundamentals.priceToSales != null) {

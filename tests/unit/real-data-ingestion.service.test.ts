@@ -525,12 +525,34 @@ describe("real-data-ingestion.service", () => {
         ticker,
         marketCap: 12_000_000_000,
         peRatio: 22,
+        pegRatio: 2.1,
+        priceToSales: 6.5,
+        priceToBook: 9.2,
+        evToEbitda: 15.8,
+        debtToEquity: 1.3,
+        currentRatio: 1.05,
+        grossMargin: 0.42,
+        operatingMargin: 0.2,
+        netMargin: 0.17,
+        dividendYield: 0.004,
+        eps: 4.4,
         source: "FMP",
       })
       .mockResolvedValueOnce({
         ticker,
         marketCap: 13_500_000_000,
         peRatio: 18,
+        pegRatio: 1.7,
+        priceToSales: 5.8,
+        priceToBook: 8.6,
+        evToEbitda: 13.2,
+        debtToEquity: 0.95,
+        currentRatio: 1.21,
+        grossMargin: 0.46,
+        operatingMargin: 0.24,
+        netMargin: 0.19,
+        dividendYield: 0.0045,
+        eps: 5.1,
         source: "FMP",
       });
 
@@ -544,6 +566,23 @@ describe("real-data-ingestion.service", () => {
     expect(secondRun.snapshotCreated).toBe(false);
     expect(secondRun.snapshotUpdated).toBe(true);
     expect(secondRun.snapshotSkipped).toBe(false);
+    expect(secondRun.fieldsPopulated).toEqual(
+      expect.arrayContaining([
+        "marketCap",
+        "peRatio",
+        "pegRatio",
+        "priceToSales",
+        "priceToBook",
+        "evToEbitda",
+        "debtToEquity",
+        "currentRatio",
+        "grossMargin",
+        "operatingMargin",
+        "netMargin",
+        "dividendYield",
+        "eps",
+      ]),
+    );
     expect(secondRun.warnings.some((warning) => warning.includes("already exists"))).toBe(false);
 
     const stock = await getStockProfile(ticker);
@@ -553,6 +592,17 @@ describe("real-data-ingestion.service", () => {
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]?.marketCap).toBe(BigInt(13_500_000_000));
     expect(snapshots[0]?.peRatio).toBe(18);
+    expect(snapshots[0]?.pegRatio).toBe(1.7);
+    expect(snapshots[0]?.priceToSales).toBe(5.8);
+    expect(snapshots[0]?.priceToBook).toBe(8.6);
+    expect(snapshots[0]?.evToEbitda).toBe(13.2);
+    expect(snapshots[0]?.debtToEquity).toBe(0.95);
+    expect(snapshots[0]?.currentRatio).toBe(1.21);
+    expect(snapshots[0]?.grossMargin).toBe(0.46);
+    expect(snapshots[0]?.operatingMargin).toBe(0.24);
+    expect(snapshots[0]?.netMargin).toBe(0.19);
+    expect(snapshots[0]?.dividendYield).toBe(0.0045);
+    expect(snapshots[0]?.eps).toBe(5.1);
   });
 
   it("creates a new fundamentals snapshot on a different UTC day", async () => {

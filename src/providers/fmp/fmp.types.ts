@@ -53,37 +53,66 @@ export interface FmpHistoricalPriceFullResponse {
 export interface FmpKeyMetricsItem {
   symbol?: string;
   date?: string;
+  fiscalYear?: string | number;
   period?: string;
+  reportedCurrency?: string;
   calendarYear?: string | number;
-  marketCap?: number;
-  peRatio?: number;
-  enterpriseValueOverEBITDA?: number;
-  priceToSalesRatio?: number;
-  pbRatio?: number;
-  pfcfRatio?: number;
-  debtToEquity?: number;
-  currentRatio?: number;
-  dividendYield?: number;
-  freeCashFlowPerShare?: number;
+  marketCap?: number | null;
+  enterpriseValue?: number | null;
+  evToSales?: number | null;
+  evToOperatingCashFlow?: number | null;
+  evToFreeCashFlow?: number | null;
+  evToEBITDA?: number | null;
+  netDebtToEBITDA?: number | null;
+  currentRatio?: number | null;
+  returnOnAssets?: number | null;
+  returnOnEquity?: number | null;
+  returnOnInvestedCapital?: number | null;
+  earningsYield?: number | null;
+  freeCashFlowYield?: number | null;
+  freeCashFlowToEquity?: number | null;
+  freeCashFlowToFirm?: number | null;
+  workingCapital?: number | null;
+
+  // Legacy/non-stable aliases kept for defensive parsing.
+  peRatio?: number | null;
+  enterpriseValueOverEBITDA?: number | null;
+  priceToSalesRatio?: number | null;
+  pbRatio?: number | null;
+  pfcfRatio?: number | null;
+  debtToEquity?: number | null;
+  dividendYield?: number | null;
+  freeCashFlowPerShare?: number | null;
 }
 
 export interface FmpRatiosItem {
   symbol?: string;
   date?: string;
+  fiscalYear?: string | number;
   period?: string;
+  reportedCurrency?: string;
   calendarYear?: string | number;
-  priceEarningsRatio?: number;
-  priceToBookRatio?: number;
-  priceToSalesRatio?: number;
-  debtEquityRatio?: number;
-  currentRatio?: number;
-  grossProfitMargin?: number;
-  operatingProfitMargin?: number;
-  netProfitMargin?: number;
-  returnOnEquity?: number;
-  dividendYield?: number;
-  pegRatio?: number;
-  forwardPERatio?: number;
+  grossProfitMargin?: number | null;
+  operatingProfitMargin?: number | null;
+  netProfitMargin?: number | null;
+  currentRatio?: number | null;
+  priceToEarningsRatio?: number | null;
+  priceToEarningsGrowthRatio?: number | null;
+  forwardPriceToEarningsGrowthRatio?: number | null;
+  priceToBookRatio?: number | null;
+  priceToSalesRatio?: number | null;
+  debtToEquityRatio?: number | null;
+  dividendYield?: number | null;
+  dividendYieldPercentage?: number | null;
+  netIncomePerShare?: number | null;
+  enterpriseValueMultiple?: number | null;
+
+  // Legacy/non-stable aliases kept for defensive parsing.
+  priceEarningsRatio?: number | null;
+  debtEquityRatio?: number | null;
+  returnOnEquity?: number | null;
+  pegRatio?: number | null;
+  forwardPERatio?: number | null;
 }
 
 export interface FmpFinancialGrowthItem {
@@ -100,7 +129,10 @@ export interface FmpIncomeStatementItem {
   symbol?: string;
   date?: string;
   period?: string;
+  fiscalYear?: string | number;
   calendarYear?: string | number;
+  reportedCurrency?: string;
+  revenue?: number | null;
   eps?: number;
   weightedAverageShsOutDil?: number;
   netIncome?: number;
@@ -114,6 +146,18 @@ export interface FmpCashFlowStatementItem {
   freeCashFlow?: number;
   operatingCashFlow?: number;
   capitalExpenditure?: number;
+}
+
+export interface FmpBalanceSheetStatementItem {
+  symbol?: string;
+  date?: string;
+  period?: string;
+  fiscalYear?: string | number;
+  calendarYear?: string | number;
+  reportedCurrency?: string;
+  totalDebt?: number | null;
+  totalStockholdersEquity?: number | null;
+  totalShareholderEquity?: number | null;
 }
 
 export interface FmpEarningsReportItem {

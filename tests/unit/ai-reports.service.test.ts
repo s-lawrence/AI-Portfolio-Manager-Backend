@@ -389,6 +389,16 @@ describe("ai-reports.service", () => {
     expect(result.report.fundamentalSummary.toLowerCase()).toContain("financial health:");
   });
 
+  it("includes P/E and Debt/Equity in fundamentalSummary when available", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.fundamentalSummary).toContain("P/E 24.0");
+    expect(result.report.fundamentalSummary).toContain("Debt/Equity 0.80");
+  });
+
   it("assigns lower confidence when fundamentals are missing", async () => {
     const tickerWithFundamentals = nextTicker();
     const tickerWithoutFundamentals = nextTicker();

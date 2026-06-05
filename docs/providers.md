@@ -21,8 +21,8 @@ Notes:
 - /quote?symbol={symbol}
 - /profile?symbol={symbol}
 - /historical-price-eod/full?symbol={symbol}
-- /key-metrics?symbol={symbol}
-- /ratios?symbol={symbol}
+- /stable/key-metrics?symbol={symbol}
+- /stable/ratios?symbol={symbol}
 - /financial-growth?symbol={symbol}
 - /income-statement?symbol={symbol}
 - /cash-flow-statement?symbol={symbol}
@@ -56,11 +56,29 @@ U.S. examples:
 - Technical calculation targets include SMA20/SMA50/SMA200, RSI14, and MACD components when enough close history exists.
 - If history is insufficient for a specific indicator window, ingestion returns explicit warnings.
 - Annualized volatility is computed from recent close returns for research-bundle projection.
-- Fundamentals ingestion merges the latest values across key metrics, ratios, growth, income statement, cash flow, and profile endpoints.
+- Fundamentals ingestion primarily maps valuation/leverage fields from stable ratios and stable key-metrics, then fills additional fields from growth/income/cash-flow/profile endpoints.
+- Ratios and key-metrics selection prefers annual records (`period = FY`) and then picks the most recent record by date.
+- Fundamentals field mapping summary:
+	- `peRatio <- ratios.priceToEarningsRatio` (fallback: `quote.price / eps` when available).
+	- `pegRatio <- ratios.priceToEarningsGrowthRatio`.
+	- `priceToSales <- ratios.priceToSalesRatio`.
+	- `priceToBook <- ratios.priceToBookRatio`.
+	- `debtToEquity <- ratios.debtToEquityRatio` (fallback: `totalDebt / totalStockholdersEquity`).
+	- `evToEbitda <- keyMetrics.evToEBITDA` (fallback: `ratios.enterpriseValueMultiple`).
+	- `marketCap <- keyMetrics.marketCap` (fallback: profile market cap).
+	- `currentRatio <- ratios.currentRatio` (fallback: key metrics current ratio).
+	- `grossMargin <- ratios.grossProfitMargin`.
+	- `operatingMargin <- ratios.operatingProfitMargin`.
+	- `netMargin <- ratios.netProfitMargin`.
+	- `dividendYield <- ratios.dividendYield`; if missing, `dividendYieldPercentage / 100` is used.
+	- `eps <- incomeStatement.eps` (fallback: `ratios.netIncomePerShare`).
+- `forwardPeRatio` remains null unless a true forward P/E source is available. `forwardPriceToEarningsGrowthRatio` (forward PEG) is not mapped to `forwardPeRatio`.
 - Fundamentals storage is same-day upsert idempotent (UTC-day scoped): re-runs refresh the existing same-day snapshot instead of skipping.
 - If one fundamentals endpoint returns 404/no-data, ingestion continues with available endpoints.
 - Percent-like fundamentals fields are normalized to decimal fractions internally (for example 5.4% stored as 0.054).
 - Percent normalization applies to revenueGrowth, grossMargin, operatingMargin, netMargin, and dividendYield.
+- Stable ratios `grossProfitMargin` and `dividendYield` are already decimal fractions and are stored as-is after defensive normalization.
+- `dividendYieldPercentage` is only used when `dividendYield` is missing; it is converted from percentage points to decimal fraction.
 - Valuation and leverage ratios (for example peRatio, priceToSales, priceToBook, debtToEquity) remain plain numeric ratios.
 - Unauthorized API key and rate-limit failures are surfaced as explicit provider errors.
 - Earnings ingestion uses stable /earnings for ticker-level upcoming and historical data.

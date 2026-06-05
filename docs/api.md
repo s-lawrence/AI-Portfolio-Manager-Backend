@@ -475,12 +475,18 @@ Market-data ingestion historical behavior:
 Fundamentals value convention:
 
 - Valuation/ratio fields are plain numbers (for example `peRatio=31.4`, `priceToSales=8.4`).
+- `peRatio` is sourced from stable ratios (`priceToEarningsRatio`) when available.
+- `pegRatio` is sourced from stable ratios (`priceToEarningsGrowthRatio`).
+- `evToEbitda` prefers stable key metrics (`evToEBITDA`) and falls back to ratios (`enterpriseValueMultiple`).
+- `debtToEquity` is sourced from stable ratios (`debtToEquityRatio`) with balance-sheet fallback when needed.
 - Percent-like fields are stored as decimal fractions:
   - `revenueGrowth=0.054` means 5.4%
   - `grossMargin=0.462` means 46.2%
   - `operatingMargin=0.287` means 28.7%
   - `netMargin=0.252` means 25.2%
   - `dividendYield=0.005` means 0.5%
+- `dividendYieldPercentage` is only used when `dividendYield` is missing, and is converted to decimal fraction.
+- `forwardPeRatio` intentionally remains null until a true forward P/E source is wired.
 
 Upcoming earnings endpoint behavior:
 

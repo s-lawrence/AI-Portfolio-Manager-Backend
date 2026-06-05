@@ -136,6 +136,77 @@ function latestRecord(records: Record<string, unknown>[]): Record<string, unknow
   return sorted[0] ?? null;
 }
 
+function sortRecordsByDateDesc(
+  records: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return [...records].sort((left, right) => {
+    const leftDate = recordDate(left)?.getTime() ?? Number.NEGATIVE_INFINITY;
+    const rightDate = recordDate(right)?.getTime() ?? Number.NEGATIVE_INFINITY;
+    return rightDate - leftDate;
+  });
+}
+
+function isFiscalYearRecord(record: Record<string, unknown>): boolean {
+  const period = toStringOrUndefined(record.period);
+  return period?.trim().toUpperCase() === "FY";
+}
+
+function latestAnnualOrLatestRecord(
+  records: Record<string, unknown>[],
+): Record<string, unknown> | null {
+  if (records.length === 0) {
+    return null;
+  }
+
+  const sorted = sortRecordsByDateDesc(records);
+  return sorted.find((record) => isFiscalYearRecord(record)) ?? sorted[0] ?? null;
+}
+
+function safeDivide(
+  numerator: number | undefined,
+  denominator: number | undefined,
+): number | undefined {
+  if (
+    numerator === undefined ||
+    denominator === undefined ||
+    !Number.isFinite(numerator) ||
+    !Number.isFinite(denominator) ||
+    denominator === 0
+  ) {
+    return undefined;
+  }
+
+  return numerator / denominator;
+}
+
+function calculateRevenueGrowthFromIncomeStatements(
+  incomeStatements: Record<string, unknown>[],
+): number | undefined {
+  const sorted = sortRecordsByDateDesc(incomeStatements);
+  const revenues: number[] = [];
+
+  for (const statement of sorted) {
+    const revenue = toFiniteNumber(statement.revenue);
+    if (revenue === undefined) {
+      continue;
+    }
+
+    revenues.push(revenue);
+    if (revenues.length === 2) {
+      break;
+    }
+  }
+
+  if (revenues.length < 2) {
+    return undefined;
+  }
+
+  const currentRevenue = revenues[0];
+  const previousRevenue = revenues[1];
+
+  return safeDivide(currentRevenue - previousRevenue, previousRevenue);
+}
+
 function pickNumber(
   candidates: Array<{
     record: Record<string, unknown> | null;
@@ -222,20 +293,34 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
     const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
 
     const [
-      keyMetrics,
-      ratios,
+      keyMetricsRecords,
+      ratiosRecords,
       profile,
       financialGrowth,
-      incomeStatement,
+      incomeStatementRecords,
       cashFlowStatement,
+      balanceSheet,
+      quote,
     ] = await Promise.all([
-      this.fetchLatestEndpointRecord("/key-metrics", normalizedTicker),
-      this.fetchLatestEndpointRecord("/ratios", normalizedTicker),
+      this.fetchEndpointRecordsWithFallback(
+        ["/stable/key-metrics", "/key-metrics"],
+        normalizedTicker,
+      ),
+      this.fetchEndpointRecordsWithFallback(
+        ["/stable/ratios", "/ratios"],
+        normalizedTicker,
+      ),
       this.fetchLatestEndpointRecord("/profile", normalizedTicker),
       this.fetchLatestEndpointRecord("/financial-growth", normalizedTicker),
-      this.fetchLatestEndpointRecord("/income-statement", normalizedTicker),
+      this.fetchEndpointRecords("/income-statement", normalizedTicker),
       this.fetchLatestEndpointRecord("/cash-flow-statement", normalizedTicker),
+      this.fetchLatestEndpointRecord("/balance-sheet-statement", normalizedTicker),
+      this.fetchLatestEndpointRecord("/quote", normalizedTicker),
     ]);
+
+    const keyMetrics = latestAnnualOrLatestRecord(keyMetricsRecords);
+    const ratios = latestAnnualOrLatestRecord(ratiosRecords);
+    const incomeStatement = latestRecord(incomeStatementRecords);
 
     if (
       !keyMetrics &&
@@ -243,7 +328,8 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       !profile &&
       !financialGrowth &&
       !incomeStatement &&
-      !cashFlowStatement
+      !cashFlowStatement &&
+      !balanceSheet
     ) {
       return null;
     }
@@ -254,6 +340,7 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       { record: financialGrowth, fields: ["period"] },
       { record: incomeStatement, fields: ["period"] },
       { record: cashFlowStatement, fields: ["period"] },
+      { record: balanceSheet, fields: ["period"] },
     ]);
 
     const asOfDate = pickAsOfDate([
@@ -262,15 +349,72 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       financialGrowth,
       incomeStatement,
       cashFlowStatement,
+      balanceSheet,
     ]);
 
     const fiscalYear =
+      parseYearValue(keyMetrics?.fiscalYear) ??
       parseYearValue(keyMetrics?.calendarYear) ??
+      parseYearValue(ratios?.fiscalYear) ??
       parseYearValue(ratios?.calendarYear) ??
+      parseYearValue(financialGrowth?.fiscalYear) ??
       parseYearValue(financialGrowth?.calendarYear) ??
+      parseYearValue(incomeStatement?.fiscalYear) ??
       parseYearValue(incomeStatement?.calendarYear) ??
+      parseYearValue(cashFlowStatement?.fiscalYear) ??
       parseYearValue(cashFlowStatement?.calendarYear) ??
+      parseYearValue(balanceSheet?.fiscalYear) ??
+      parseYearValue(balanceSheet?.calendarYear) ??
       undefined;
+
+    const eps = pickNumber([
+      { record: incomeStatement, fields: ["eps"] },
+      { record: ratios, fields: ["netIncomePerShare"] },
+    ]);
+
+    const peRatioFromProvider = pickNumber([
+      { record: ratios, fields: ["priceToEarningsRatio", "priceEarningsRatio"] },
+      { record: keyMetrics, fields: ["peRatio"] },
+    ]);
+
+    const quotePrice = pickNumber([{ record: quote, fields: ["price"] }]);
+    const peRatioFallback =
+      eps !== undefined && eps > 0 ? safeDivide(quotePrice, eps) : undefined;
+
+    const dividendYieldRaw = pickNumber([
+      { record: ratios, fields: ["dividendYield"] },
+      { record: keyMetrics, fields: ["dividendYield"] },
+    ]);
+
+    const dividendYieldPercentageRaw =
+      dividendYieldRaw === undefined
+        ? pickNumber([{ record: ratios, fields: ["dividendYieldPercentage"] }])
+        : undefined;
+
+    const normalizedDividendYield =
+      dividendYieldRaw !== undefined
+        ? normalizePercentLike(dividendYieldRaw)
+        : dividendYieldPercentageRaw !== undefined
+          ? normalizePercentLike(dividendYieldPercentageRaw / 100)
+          : null;
+
+    const debtToEquityFallback = safeDivide(
+      pickNumber([{ record: balanceSheet, fields: ["totalDebt"] }]),
+      pickNumber([
+        {
+          record: balanceSheet,
+          fields: ["totalStockholdersEquity", "totalShareholderEquity"],
+        },
+      ]),
+    );
+
+    const revenueGrowthFromProvider = normalizePercentLike(
+      pickNumber([{ record: financialGrowth, fields: ["revenueGrowth"] }]),
+    );
+
+    const revenueGrowthFallback = normalizePercentLike(
+      calculateRevenueGrowthFromIncomeStatements(incomeStatementRecords),
+    );
 
     const fundamentals: ProviderFundamentalSnapshot = {
       ticker: normalizedTicker,
@@ -282,15 +426,13 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
         { record: keyMetrics, fields: ["marketCap"] },
         { record: profile, fields: ["marketCap", "mktCap"] },
       ]),
-      peRatio: pickNumber([
-        { record: ratios, fields: ["priceEarningsRatio"] },
-        { record: keyMetrics, fields: ["peRatio"] },
-      ]),
+      peRatio: peRatioFromProvider ?? peRatioFallback,
       forwardPeRatio: pickNumber([
-        { record: ratios, fields: ["forwardPERatio"] },
+        { record: ratios, fields: ["forwardPERatio", "forwardPeRatio"] },
+        { record: keyMetrics, fields: ["forwardPERatio", "forwardPeRatio"] },
       ]),
       pegRatio: pickNumber([
-        { record: ratios, fields: ["pegRatio"] },
+        { record: ratios, fields: ["priceToEarningsGrowthRatio", "pegRatio"] },
       ]),
       priceToSales: pickNumber([
         { record: ratios, fields: ["priceToSalesRatio"] },
@@ -301,15 +443,11 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
         { record: keyMetrics, fields: ["pbRatio"] },
       ]),
       evToEbitda: pickNumber([
-        { record: keyMetrics, fields: ["enterpriseValueOverEBITDA"] },
+        { record: keyMetrics, fields: ["evToEBITDA", "enterpriseValueOverEBITDA"] },
+        { record: ratios, fields: ["enterpriseValueMultiple"] },
       ]),
-      eps: pickNumber([
-        { record: incomeStatement, fields: ["eps"] },
-      ]),
-      revenueGrowth:
-        normalizePercentLike(
-          pickNumber([{ record: financialGrowth, fields: ["revenueGrowth"] }]),
-        ) ?? undefined,
+      eps,
+      revenueGrowth: revenueGrowthFromProvider ?? revenueGrowthFallback ?? undefined,
       grossMargin:
         normalizePercentLike(
           pickNumber([{ record: ratios, fields: ["grossProfitMargin"] }]),
@@ -322,10 +460,11 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
         normalizePercentLike(
           pickNumber([{ record: ratios, fields: ["netProfitMargin"] }]),
         ) ?? undefined,
-      debtToEquity: pickNumber([
-        { record: ratios, fields: ["debtEquityRatio"] },
-        { record: keyMetrics, fields: ["debtToEquity"] },
-      ]),
+      debtToEquity:
+        pickNumber([
+          { record: ratios, fields: ["debtToEquityRatio", "debtEquityRatio"] },
+          { record: keyMetrics, fields: ["debtToEquity"] },
+        ]) ?? debtToEquityFallback,
       currentRatio: pickNumber([
         { record: ratios, fields: ["currentRatio"] },
         { record: keyMetrics, fields: ["currentRatio"] },
@@ -333,13 +472,7 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
       freeCashFlow: pickNumber([
         { record: cashFlowStatement, fields: ["freeCashFlow"] },
       ]),
-      dividendYield:
-        normalizePercentLike(
-          pickNumber([
-            { record: ratios, fields: ["dividendYield"] },
-            { record: keyMetrics, fields: ["dividendYield"] },
-          ]),
-        ) ?? undefined,
+      dividendYield: normalizedDividendYield ?? undefined,
       analystConsensus: pickString([
         { record: profile, fields: ["analystRating", "consensus", "recommendation"] },
       ]),
@@ -349,28 +482,60 @@ export class FmpFundamentalsProvider implements FundamentalsProvider {
     return hasUsefulFundamentals(fundamentals) ? fundamentals : null;
   }
 
-  private async fetchLatestEndpointRecord(
+  private async fetchEndpointRecords(
     endpoint: string,
     ticker: string,
-  ): Promise<Record<string, unknown> | null> {
+  ): Promise<Record<string, unknown>[]> {
     try {
       const payload = await this.client.getJson<unknown>(endpoint, {
         symbol: ticker,
       });
 
-      return latestRecord(extractRecordArray(payload));
+      return extractRecordArray(payload);
     } catch (error) {
-      return this.handleEndpointFailure(error, endpoint);
+      this.handleEndpointFailure(error, endpoint);
+      return [];
     }
+  }
+
+  private async fetchEndpointRecordsWithFallback(
+    endpoints: string[],
+    ticker: string,
+  ): Promise<Record<string, unknown>[]> {
+    for (const endpoint of endpoints) {
+      try {
+        const payload = await this.client.getJson<unknown>(endpoint, {
+          symbol: ticker,
+        });
+
+        return extractRecordArray(payload);
+      } catch (error) {
+        if (error instanceof ProviderRequestError && error.statusCode === 404) {
+          continue;
+        }
+
+        this.handleEndpointFailure(error, endpoint);
+      }
+    }
+
+    return [];
+  }
+
+  private async fetchLatestEndpointRecord(
+    endpoint: string,
+    ticker: string,
+  ): Promise<Record<string, unknown> | null> {
+    const records = await this.fetchEndpointRecords(endpoint, ticker);
+    return latestRecord(records);
   }
 
   private handleEndpointFailure(
     error: unknown,
     endpoint: string,
-  ): null {
+  ): void {
     if (error instanceof ProviderRequestError) {
       if (error.statusCode === 404) {
-        return null;
+        return;
       }
 
       if (error.statusCode === 401 || error.statusCode === 403) {
