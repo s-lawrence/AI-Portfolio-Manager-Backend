@@ -61,6 +61,16 @@ const purgeTickerParamsSchema = z.object({
 });
 
 export async function devRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/routes", async (_request, reply) => {
+    return reply.send(
+      ok({
+        nodeEnv: process.env.NODE_ENV ?? "development",
+        cwd: process.cwd(),
+        routes: app.printRoutes(),
+      }),
+    );
+  });
+
   app.get("/demo-context", async (_request, reply) => {
     const user = await runService(() => getUserByEmail(DEMO_EMAIL));
     if (!user) {

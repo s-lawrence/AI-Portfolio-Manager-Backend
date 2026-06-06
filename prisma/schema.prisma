@@ -60,6 +60,28 @@ enum PredictionDirection {
   FLAT
 }
 
+enum WatchlistItemStatus {
+  WATCHING
+  RESEARCHING
+  CANDIDATE
+  REJECTED
+  CONVERTED_TO_HOLDING
+  ARCHIVED
+}
+
+enum WatchlistItemPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum WatchlistItemSource {
+  USER
+  SCREENER
+  AGENT
+  REPORT
+}
+
 model User {
   id         String          @id @default(cuid())
   email      String          @unique
@@ -69,6 +91,7 @@ model User {
   preference UserPreference?
   portfolios Portfolio[]
   alerts     Alert[]
+  watchlists Watchlist[]
 }
 
 model UserPreference {
@@ -121,10 +144,56 @@ model Holding {
   stock            Stock          @relation(fields: [stockId], references: [id], onDelete: Cascade)
   aiReports        AIReport[]
   predictions      Prediction[]
+  convertedWatchlistItems WatchlistItem[] @relation("WatchlistItemConvertedHolding")
 
   @@unique([portfolioId, stockId])
   @@index([portfolioId])
   @@index([stockId])
+}
+
+model Watchlist {
+  id          String          @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  isDefault   Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items       WatchlistItem[]
+
+  @@index([userId])
+  @@unique([userId, name])
+}
+
+model WatchlistItem {
+  id                String                @id @default(cuid())
+  watchlistId       String
+  stockId           String
+  status            WatchlistItemStatus   @default(WATCHING)
+  priority          WatchlistItemPriority @default(MEDIUM)
+  thesis            String?
+  riskNotes         String?
+  targetEntryPrice  Float?
+  targetExitPrice   Float?
+  targetAllocation  Float?
+  tags              String[]
+  source            WatchlistItemSource   @default(USER)
+  addedReason       String?
+  rejectionReason   String?
+  convertedHoldingId String?
+  lastReviewedAt    DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  watchlist         Watchlist             @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  stock             Stock                 @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  convertedHolding  Holding?              @relation("WatchlistItemConvertedHolding", fields: [convertedHoldingId], references: [id], onDelete: SetNull)
+
+  @@unique([watchlistId, stockId])
+  @@index([watchlistId])
+  @@index([stockId])
+  @@index([status])
+  @@index([priority])
 }
 
 model Stock {
@@ -148,6 +217,7 @@ model Stock {
   aiReports          AIReport[]
   predictions        Prediction[]
   alerts             Alert[]
+  watchlistItems     WatchlistItem[]
 
   @@index([ticker])
   @@index([sector])

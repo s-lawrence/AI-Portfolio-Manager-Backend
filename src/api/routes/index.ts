@@ -15,6 +15,7 @@ import { portfoliosRoutes } from "./portfolios.routes";
 import { predictionsRoutes } from "./predictions.routes";
 import { reportsRoutes } from "./reports.routes";
 import { stocksRoutes } from "./stocks.routes";
+import { watchlistsRoutes } from "./watchlists.routes";
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(healthRoutes, { prefix: "/health" });
@@ -33,6 +34,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   await app.register(predictionsRoutes, { prefix: "/api/predictions" });
   await app.register(alertsRoutes, { prefix: "/api/alerts" });
+  await app.register(watchlistsRoutes, { prefix: "/api/watchlists" });
 
   if (process.env.NODE_ENV !== "production") {
     await app.register(devRoutes, { prefix: "/api/dev" });

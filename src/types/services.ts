@@ -5,6 +5,11 @@ import type {
   FundamentalSnapshot,
   Holding,
   HoldingStatus,
+  Watchlist,
+  WatchlistItem,
+  WatchlistItemPriority,
+  WatchlistItemSource,
+  WatchlistItemStatus,
   NewsArticle,
   Portfolio,
   Prediction,
@@ -146,6 +151,59 @@ export interface TickerDashboardSummary {
   recentNews: NewsArticle[];
   nextEarningsEvent: EarningsEvent | null;
   latestAIReport: AIReport | null;
+}
+
+export interface WatchlistDetailItem extends WatchlistItem {
+  stock: Stock;
+}
+
+export interface WatchlistDetail {
+  watchlist: Watchlist;
+  items: WatchlistDetailItem[];
+}
+
+export interface WatchlistResearchItemSummary {
+  itemId: string;
+  watchlistId: string;
+  stockId: string;
+  ticker: string;
+  companyName: string | null;
+  exchange: string | null;
+  sector: string | null;
+  industry: string | null;
+  country: string | null;
+  currency: string | null;
+  status: WatchlistItemStatus;
+  priority: WatchlistItemPriority;
+  source: WatchlistItemSource;
+  thesis: string | null;
+  riskNotes: string | null;
+  tags: string[];
+  addedReason: string | null;
+  rejectionReason: string | null;
+  targetEntryPrice: number | null;
+  targetExitPrice: number | null;
+  targetAllocation: number | null;
+  lastReviewedAt: Date | string | null;
+  latestPriceSnapshot: PriceSnapshot | null;
+  latestTechnicalSnapshot: TechnicalSnapshot | null;
+  latestFundamentalSnapshot: FundamentalSnapshot | null;
+  latestAIReport: AIReport | null;
+  nextEarningsEvent: EarningsEvent | null;
+  topHeadlines: NewsArticle[];
+  sentimentCounts: {
+    bullish: number;
+    neutral: number;
+    bearish: number;
+    mixed: number;
+    unknown: number;
+  };
+}
+
+export interface WatchlistResearchBundle {
+  watchlist: Watchlist;
+  itemCount: number;
+  items: WatchlistResearchItemSummary[];
 }
 
 export interface DailyTickerReportInput {

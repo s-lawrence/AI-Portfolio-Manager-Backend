@@ -28,6 +28,17 @@ async function start(): Promise<void> {
       host: env.HOST,
       port: env.PORT,
     });
+
+    if (env.NODE_ENV !== "production") {
+      app.log.info(
+        {
+          cwd: process.cwd(),
+          nodeEnv: env.NODE_ENV,
+        },
+        "server runtime context",
+      );
+      app.log.info({ routes: app.printRoutes() }, "registered routes");
+    }
   } catch (error) {
     app.log.error(error, "failed to start server");
     process.exit(1);

@@ -6,6 +6,9 @@ import {
   Recommendation,
   RiskLevel,
   Sentiment,
+  WatchlistItemPriority,
+  WatchlistItemSource,
+  WatchlistItemStatus,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -64,6 +67,9 @@ export const riskLevelSchema = z.nativeEnum(RiskLevel);
 export const alertSeveritySchema = z.nativeEnum(AlertSeverity);
 export const predictionHorizonSchema = z.nativeEnum(PredictionHorizon);
 export const predictionDirectionSchema = z.nativeEnum(PredictionDirection);
+export const watchlistItemStatusSchema = z.nativeEnum(WatchlistItemStatus);
+export const watchlistItemPrioritySchema = z.nativeEnum(WatchlistItemPriority);
+export const watchlistItemSourceSchema = z.nativeEnum(WatchlistItemSource);
 
 export const idParamSchema = z.object({
   id: cuidSchema,
