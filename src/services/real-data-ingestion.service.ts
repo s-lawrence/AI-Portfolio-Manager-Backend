@@ -58,6 +58,7 @@ import {
 import { runPortfolioAnalysis } from "./portfolio-analysis.service";
 import { ingestFmpEconomicsDefaultSet } from "./fmp-economics-ingestion.service";
 import { ingestDefaultMacroAndFx } from "./macro-ingestion.service";
+import { ingestPortfolioAnalystData } from "./analyst-ingestion.service";
 import { getPortfolioOverview } from "./portfolios.service";
 import {
   StockMetadataInput,
@@ -1058,6 +1059,7 @@ export async function ingestPortfolioFmpFullRefresh(
   const startedAtDate = new Date();
 
   const refreshMode = options.refreshMode ?? "quick";
+  const includeAnalystData = options.includeAnalystData === true;
   const includeEconomics = options.includeEconomics === true;
   const includeBankOfCanada = options.includeBankOfCanada === true;
   const includeFred = options.includeFred === true;
@@ -1149,6 +1151,48 @@ export async function ingestPortfolioFmpFullRefresh(
     tickersProcessed: news.tickersProcessed,
     tickersFailed: news.tickersFailed,
   });
+
+  let analystData: PortfolioFmpFullRefreshResult["analystData"];
+  if (includeAnalystData) {
+    const analystStartedAt = new Date();
+
+    try {
+      analystData = addDurationMetadata(
+        await ingestPortfolioAnalystData(normalizedPortfolioId),
+        analystStartedAt,
+        new Date(),
+      );
+    } catch (error) {
+      analystData = addDurationMetadata(
+        {
+          portfolioId: normalizedPortfolioId,
+          startedAt: analystStartedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+          tickersProcessed: 0,
+          tickersFailed: 0,
+          snapshotsCreated: 0,
+          snapshotsUpdated: 0,
+          actionsCreated: 0,
+          actionsUpdated: 0,
+          results: [],
+          failedTickers: [],
+          warnings: [toErrorReason(error)],
+        },
+        analystStartedAt,
+        new Date(),
+      );
+    }
+
+    logSlowSection("analystData", analystData.durationMs ?? 0, {
+      tickersProcessed: analystData.tickersProcessed,
+      tickersFailed: analystData.tickersFailed,
+      snapshotsCreated: analystData.snapshotsCreated,
+      snapshotsUpdated: analystData.snapshotsUpdated,
+      actionsCreated: analystData.actionsCreated,
+      actionsUpdated: analystData.actionsUpdated,
+      warnings: analystData.warnings.length,
+    });
+  }
 
   let economics: PortfolioFmpFullRefreshResult["economics"];
   if (includeEconomics) {
@@ -1370,6 +1414,18 @@ export async function ingestPortfolioFmpFullRefresh(
     warnings.push(`News ingestion had ${news.tickersFailed} ticker failure(s).`);
   }
 
+  if (analystData && analystData.tickersFailed > 0) {
+    warnings.push(
+      `Analyst-data ingestion had ${analystData.tickersFailed} ticker failure(s).`,
+    );
+  }
+
+  if (analystData && analystData.warnings.length > 0) {
+    warnings.push(
+      `Analyst-data ingestion completed with ${analystData.warnings.length} warning(s).`,
+    );
+  }
+
   if (economics && economics.warnings.length > 0) {
     warnings.push(
       `Economics ingestion completed with ${economics.warnings.length} warning(s).`,
@@ -1404,6 +1460,7 @@ export async function ingestPortfolioFmpFullRefresh(
     fundamentals,
     earnings,
     news,
+    analystData,
     economics,
     bankOfCanada,
     fred,

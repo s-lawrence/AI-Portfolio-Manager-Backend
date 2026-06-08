@@ -1,5 +1,7 @@
 import type {
   AIReport,
+  AnalystActionEvent,
+  AnalystSnapshot,
   AlertSeverity,
   EarningsEvent,
   FundamentalSnapshot,
@@ -20,6 +22,7 @@ import type {
   RiskLevel,
   Sentiment,
   Stock,
+  MarketDiscoverySnapshot,
   TechnicalSnapshot,
   TrendDirection,
   Prisma,
@@ -148,6 +151,8 @@ export interface TickerDashboardSummary {
   latestPriceSnapshot: PriceSnapshot | null;
   latestTechnicalSnapshot: TechnicalSnapshot | null;
   latestFundamentalSnapshot: FundamentalSnapshot | null;
+  latestAnalystSnapshot: AnalystSnapshot | null;
+  recentAnalystActions: AnalystActionEvent[];
   recentNews: NewsArticle[];
   nextEarningsEvent: EarningsEvent | null;
   latestAIReport: AIReport | null;
@@ -188,6 +193,12 @@ export interface WatchlistResearchItemSummary {
   latestPriceSnapshot: PriceSnapshot | null;
   latestTechnicalSnapshot: TechnicalSnapshot | null;
   latestFundamentalSnapshot: FundamentalSnapshot | null;
+  latestAnalystSnapshot: AnalystSnapshot | null;
+  recentAnalystActions: AnalystActionEvent[];
+  discoveryContext: {
+    category: string | null;
+    source: string | null;
+  } | null;
   latestAIReport: AIReport | null;
   nextEarningsEvent: EarningsEvent | null;
   topHeadlines: NewsArticle[];
@@ -536,6 +547,73 @@ export interface IngestPortfolioNewsResult {
   failedTickers: IngestPortfolioTickerFailure[];
 }
 
+export interface IngestTickerAnalystDataResult {
+  ticker: string;
+  snapshotsCreated: number;
+  snapshotsUpdated: number;
+  actionsCreated: number;
+  actionsUpdated: number;
+  warnings: string[];
+}
+
+export interface IngestPortfolioAnalystDataResult {
+  portfolioId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  tickersProcessed: number;
+  tickersFailed: number;
+  snapshotsCreated: number;
+  snapshotsUpdated: number;
+  actionsCreated: number;
+  actionsUpdated: number;
+  results: IngestTickerAnalystDataResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+  warnings: string[];
+}
+
+export interface IngestWatchlistAnalystDataResult {
+  watchlistId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  tickersProcessed: number;
+  tickersFailed: number;
+  snapshotsCreated: number;
+  snapshotsUpdated: number;
+  actionsCreated: number;
+  actionsUpdated: number;
+  results: IngestTickerAnalystDataResult[];
+  failedTickers: IngestPortfolioTickerFailure[];
+  warnings: string[];
+}
+
+export interface IngestMarketDiscoveryResult {
+  category: string;
+  capturedAt: string;
+  recordsCreated: number;
+  warnings: string[];
+}
+
+export interface IngestDefaultMarketDiscoverySetResult {
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  categories: IngestMarketDiscoveryResult[];
+  warnings: string[];
+}
+
+export interface ListDiscoveryCandidatesOptions {
+  limit?: number;
+  from?: Date;
+  to?: Date;
+}
+
+export interface DiscoveryCandidatesResult {
+  category: string;
+  items: MarketDiscoverySnapshot[];
+}
+
 export interface FmpEconomicsIngestionSectionResult {
   recordsCreated: number;
   recordsUpdated: number;
@@ -656,6 +734,7 @@ export interface IngestPortfolioFullBasicResult {
 export interface PortfolioFmpFullRefreshOptions {
   historicalLimit?: number;
   newsLimitPerTicker?: number;
+  includeAnalystData?: boolean;
   includeEconomics?: boolean;
   includeBankOfCanada?: boolean;
   includeFred?: boolean;
@@ -677,6 +756,7 @@ export interface PortfolioFmpFullRefreshResult {
   fundamentals: IngestPortfolioFundamentalsResult;
   earnings: PortfolioEarningsIngestionResult;
   news: IngestPortfolioNewsResult;
+  analystData?: IngestPortfolioAnalystDataResult;
   economics?: IngestFmpEconomicsDefaultSetResult;
   bankOfCanada?: MacroIngestionSectionResult;
   fred?: MacroIngestionSectionResult;

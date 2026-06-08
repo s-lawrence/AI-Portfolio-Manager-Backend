@@ -243,3 +243,90 @@ export interface FmpMarketRiskPremiumItem {
   totalRiskPremium?: number | string;
   source?: string;
 }
+
+export interface FmpPriceTargetSummaryItem {
+  symbol?: string;
+  date?: string;
+  asOfDate?: string;
+  targetHigh?: number | string;
+  targetLow?: number | string;
+  targetMean?: number | string;
+  targetMedian?: number | string;
+  targetConsensus?: number | string;
+  lastPrice?: number | string;
+  upsidePercent?: number | string;
+  upside?: number | string;
+  analystCount?: number | string;
+  numberOfAnalysts?: number | string;
+  allAnalystCount?: number | string;
+  consensus?: string;
+  ratingConsensus?: string;
+}
+
+export interface FmpPriceTargetConsensusItem {
+  symbol?: string;
+  date?: string;
+  asOfDate?: string;
+  targetConsensus?: number | string;
+  targetMean?: number | string;
+  targetMedian?: number | string;
+  analystCount?: number | string;
+  numberOfAnalysts?: number | string;
+  consensus?: string;
+  ratingConsensus?: string;
+}
+
+export interface FmpAnalystRatingItem {
+  symbol?: string;
+  date?: string;
+  asOfDate?: string;
+  rating?: string;
+  recommendation?: string;
+  ratingConsensus?: string;
+  consensus?: string;
+  analystCount?: number | string;
+  strongBuy?: number | string;
+  buy?: number | string;
+  hold?: number | string;
+  sell?: number | string;
+  strongSell?: number | string;
+}
+
+export interface FmpUpgradeDowngradeItem {
+  symbol?: string;
+  date?: string;
+  publishedDate?: string;
+  action?: string;
+  actionType?: string;
+  gradingCompany?: string;
+  firm?: string;
+  analyst?: string;
+  analystName?: string;
+  previousGrade?: string;
+  previousRating?: string;
+  newGrade?: string;
+  newRating?: string;
+  previousTargetPrice?: number | string;
+  previousPriceTarget?: number | string;
+  newTargetPrice?: number | string;
+  newPriceTarget?: number | string;
+  title?: string;
+  headline?: string;
+  newsTitle?: string;
+  newsURL?: string;
+  url?: string;
+  source?: string;
+}
+
+export interface FmpMarketMoverItem {
+  symbol?: string;
+  ticker?: string;
+  name?: string;
+  companyName?: string;
+  price?: number | string;
+  changesPercentage?: number | string;
+  changePercent?: number | string;
+  volume?: number | string;
+  marketCap?: number | string;
+  source?: string;
+}

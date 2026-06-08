@@ -161,6 +161,7 @@ export async function ingestionRoutes(app: FastifyInstance): Promise<void> {
       ingestPortfolioFmpFullRefresh(params.portfolioId, {
         historicalLimit: body.historicalLimit,
         newsLimitPerTicker: body.newsLimitPerTicker,
+        includeAnalystData: body.includeAnalystData,
         includeEconomics: body.includeEconomics,
         includeBankOfCanada: body.includeBankOfCanada,
         includeFred: body.includeFred,

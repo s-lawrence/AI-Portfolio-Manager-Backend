@@ -133,6 +133,54 @@ export interface ProviderFxRate {
   source?: string | null;
 }
 
+export interface ProviderAnalystSnapshot {
+  ticker: string;
+  capturedAt: Date;
+  source?: string;
+  priceTargetAverage?: number;
+  priceTargetHigh?: number;
+  priceTargetLow?: number;
+  priceTargetConsensus?: number;
+  analystCount?: number;
+  ratingConsensus?: string;
+  strongBuyCount?: number;
+  buyCount?: number;
+  holdCount?: number;
+  sellCount?: number;
+  strongSellCount?: number;
+  upsidePercent?: number;
+  raw?: unknown;
+}
+
+export interface ProviderAnalystActionEvent {
+  ticker: string;
+  source?: string;
+  actionType: string;
+  firm?: string;
+  analystName?: string;
+  previousRating?: string;
+  newRating?: string;
+  previousPriceTarget?: number;
+  newPriceTarget?: number;
+  eventDate: Date;
+  headline?: string;
+  url?: string;
+  raw?: unknown;
+}
+
+export interface ProviderMarketDiscoveryItem {
+  ticker: string;
+  companyName?: string;
+  price?: number;
+  changePercent?: number;
+  volume?: number;
+  marketCap?: number;
+  category: string;
+  capturedAt: Date;
+  source?: string;
+  raw?: unknown;
+}
+
 export interface ProviderIngestionSectionResult {
   recordsCreated: number;
   recordsUpdated: number;
@@ -257,6 +305,26 @@ export interface FxRateProvider {
   getUsdCadRate(
     options?: ProviderDateRangeOptions,
   ): Promise<ProviderFxRate[]>;
+}
+
+export interface AnalystProvider {
+  getPriceTargetSummary(
+    ticker: string,
+  ): Promise<ProviderAnalystSnapshot | null>;
+  getPriceTargetConsensus(
+    ticker: string,
+  ): Promise<Partial<ProviderAnalystSnapshot> | null>;
+  getAnalystRatings(
+    ticker: string,
+  ): Promise<Partial<ProviderAnalystSnapshot> | null>;
+  getUpgradesDowngrades(
+    ticker: string,
+    options?: ProviderDateRangeOptions,
+  ): Promise<ProviderAnalystActionEvent[]>;
+  getMarketMovers(
+    category: string,
+    options?: ProviderLimitOptions,
+  ): Promise<ProviderMarketDiscoveryItem[]>;
 }
 
 export interface GeopoliticalProvider {

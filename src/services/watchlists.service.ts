@@ -25,8 +25,11 @@ import {
   updateWatchlistItem,
 } from "../repositories/watchlist-items.repository";
 import { getLatestAIReportByStockId } from "../repositories/ai-reports.repository";
+import { listAnalystActionsByStock } from "../repositories/analyst-action-events.repository";
+import { getLatestAnalystSnapshot } from "../repositories/analyst-snapshots.repository";
 import { getNextEarningsEvent } from "../repositories/earnings-events.repository";
 import { getLatestFundamentalSnapshot } from "../repositories/fundamental-snapshots.repository";
+import { listRecentDiscovery } from "../repositories/market-discovery-snapshots.repository";
 import { listNewsByStockId } from "../repositories/news-articles.repository";
 import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getLatestTechnicalSnapshot } from "../repositories/technical-snapshots.repository";
@@ -337,6 +340,9 @@ export async function getWatchlistResearchBundle(
         latestPriceSnapshot,
         latestTechnicalSnapshot,
         latestFundamentalSnapshot,
+        latestAnalystSnapshot,
+        recentAnalystActions,
+        recentDiscovery,
         latestAIReport,
         recentNews,
         nextEarningsEvent,
@@ -344,6 +350,11 @@ export async function getWatchlistResearchBundle(
         getLatestMarketSnapshotForStock(item.stockId),
         getLatestTechnicalSnapshot(item.stockId),
         getLatestFundamentalSnapshot(item.stockId),
+        getLatestAnalystSnapshot(item.stockId),
+        listAnalystActionsByStock(item.stockId, 3),
+        item.source === WatchlistItemSource.SCREENER || item.source === WatchlistItemSource.AGENT
+          ? listRecentDiscovery(1, { ticker: item.stock.ticker })
+          : Promise.resolve([]),
         getLatestAIReportByStockId(item.stockId),
         listNewsByStockId(item.stockId, 20),
         getNextEarningsEvent(item.stockId),
@@ -377,6 +388,15 @@ export async function getWatchlistResearchBundle(
         latestPriceSnapshot,
         latestTechnicalSnapshot,
         latestFundamentalSnapshot,
+        latestAnalystSnapshot,
+        recentAnalystActions,
+        discoveryContext:
+          recentDiscovery[0] != null
+            ? {
+                category: recentDiscovery[0].category,
+                source: recentDiscovery[0].source,
+              }
+            : null,
         latestAIReport,
         nextEarningsEvent,
         topHeadlines,

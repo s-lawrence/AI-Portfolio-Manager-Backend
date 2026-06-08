@@ -1,4 +1,4 @@
-# Backend Context (Latest v19)
+# Backend Context (Latest v18)
 
 ## Handoff Snapshot
 
@@ -309,81 +309,24 @@ New docs:
     - refreshWatchlistAnalystData
     - getDiscoveryCandidates
 
-## Validation and Execution Results (Post-DB Validation)
+## Validation and Execution Results
 
-Environment confirmation:
-- .env exists
-- DATABASE_URL present
-- TEST_DATABASE_URL not set; tests intentionally fallback to DATABASE_URL in src/test/test-db.ts
-- Local PostgreSQL container running (ai-portfolio-db, localhost:5432)
+Successful:
+- npm run -s typecheck (pass)
+- final workspace diagnostics via get_errors (no errors)
+- provider-only targeted test pass:
+  - tests/unit/fmp-analyst-provider.test.ts (5/5)
 
-Prisma and migration:
-- npx prisma migrate status initially reported one unapplied migration:
-  - 20260608110931_add_analyst_discovery_data
-- npx prisma migrate dev --name add_analyst_discovery_data succeeded
-- npx prisma generate succeeded
-- Database is now in sync with prisma/schema.prisma
+Attempted but blocked:
+- DB-backed tests require PostgreSQL at localhost:5432
+- In this environment, test setup failed on DB connection (PrismaClientInitializationError)
+- Full npm test run also showed prolonged afterAll spinner output before termination during debugging attempts
 
-Targeted DB-backed validation (all pass):
-- npx vitest tests/unit/analyst-ingestion.service.test.ts --run
-  - 1 file, 4 tests passed
-- npx vitest tests/unit/market-discovery.service.test.ts --run
-  - 1 file, 3 tests passed
-- npx vitest tests/integration/api-ingestion.integration.test.ts --run
-  - 1 file, 19 tests passed
-- npx vitest tests/integration/api-watchlists-runtime.integration.test.ts --run
-  - 1 file, 3 tests passed
-
-Full validation (all pass):
-- npm run -s typecheck: PASS
-- npx vitest --run: PASS
-  - Test Files: 40 passed
-  - Tests: 241 passed
-- npm run build: PASS
-
-Route registration runtime check:
-- Started fresh dev server
-- Called GET /api/dev/routes
-- Confirmed route signatures present for:
-  - POST /api/ingestion/fmp/ticker/:ticker/analyst
-  - POST /api/ingestion/fmp/portfolio/:portfolioId/analyst
-  - POST /api/ingestion/fmp/watchlist/:watchlistId/analyst
-  - GET /api/analyst/:ticker/latest
-  - GET /api/analyst/:ticker/actions
-  - POST /api/discovery/fmp/:category/refresh
-  - POST /api/discovery/fmp/default-set
-  - GET /api/discovery/:category
-
-Manual smoke results (runtime):
-- POST /api/ingestion/fmp/ticker/AAPL/analyst
-  - 200, success envelope true, warnings returned (no action events)
-- GET /api/analyst/AAPL/latest
-  - 200, success envelope true
-- GET /api/analyst/AAPL/actions
-  - 200, success envelope true
-- POST /api/discovery/fmp/default-set
-  - 200, success envelope true, warnings returned for empty categories
-- GET /api/discovery/GAINERS
-  - 200, success envelope true
-- GET /api/stocks/AAPL/research-bundle
-  - 200, success envelope true
-- GET /api/watchlists/<generatedWatchlistId>/research-bundle
-  - 200, success envelope true
-
-Observed warning semantics (expected non-blocking behavior):
-- Analyst warning example:
-  - No analyst action events returned for ticker AAPL.
-- Discovery warning examples:
-  - ANALYST_UPGRADES: No discovery results returned for category ANALYST_UPGRADES.
-  - ANALYST_DOWNGRADES: No discovery results returned for category ANALYST_DOWNGRADES.
-
-Known limitations:
-- TEST_DATABASE_URL remains unset in current local setup (tests still pass via fallback behavior).
-- Prisma warns that package.json prisma config is deprecated (future Prisma 7 cleanup item).
+Database/migration status:
+- Migration SQL for analyst/discovery exists but was not applied in this session due DB connectivity limitations
 
 ## Files Added
 
-- CONTEXT_LATEST_V19.md
 - CONTEXT_LATEST_V18.md
 - docs/agent/backend-tool-contracts.md
 - prisma/migrations/20260608110931_add_analyst_discovery_data/migration.sql
@@ -403,7 +346,6 @@ Known limitations:
 
 ## Files Updated (Primary)
 
-- CONTEXT_LATEST.md
 - docs/api.md
 - docs/providers.md
 - prisma/schema.prisma
@@ -428,14 +370,14 @@ Known limitations:
 
 ## Resume Checklist
 
-1. Optional hardening:
-  - Set TEST_DATABASE_URL explicitly to isolate test DB from dev DB.
-2. Optional config maintenance:
-  - Migrate Prisma configuration from package.json to prisma config file before Prisma 7.
-3. For repeat validation:
+1. Start/verify local PostgreSQL and apply migrations.
+2. Run:
    - npm run prisma:generate
    - npm run typecheck
    - npm test
    - npm run build
-4. Commit strategy:
-  - Group by layer (schema/provider/services/api/tests/docs/context) or squash as one feature commit per team preference.
+3. If DB-backed tests fail, triage new analyst/discovery tests first:
+   - tests/unit/analyst-ingestion.service.test.ts
+   - tests/unit/market-discovery.service.test.ts
+   - tests/integration/api-ingestion.integration.test.ts
+4. Commit grouped changes by layer (schema/provider/services/api/tests/docs) or as one feature commit according to team preference.

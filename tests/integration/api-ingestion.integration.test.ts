@@ -12,6 +12,7 @@ import {
   fmpEconomicsProvider,
   fmpEarningsProvider,
   fmpFundamentalsProvider,
+  fmpAnalystProvider,
   fmpMarketDataProvider,
   fmpNewsProvider,
   fmpProfileProvider,
@@ -232,6 +233,52 @@ describe("API ingestion routes", () => {
       ],
     );
 
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockImplementation(async (symbol) => ({
+      ticker: symbol,
+      capturedAt: new Date("2026-06-10T00:00:00.000Z"),
+      source: "FMP",
+      priceTargetAverage: 330,
+      priceTargetHigh: 360,
+      priceTargetLow: 290,
+      priceTargetConsensus: 335,
+      analystCount: 20,
+      ratingConsensus: "BUY",
+      upsidePercent: 8,
+      raw: { symbol },
+    }));
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue({
+      source: "FMP",
+      priceTargetConsensus: 335,
+      analystCount: 20,
+      ratingConsensus: "BUY",
+      raw: { source: "consensus" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+      source: "FMP",
+      analystCount: 20,
+      ratingConsensus: "BUY",
+      strongBuyCount: 8,
+      buyCount: 9,
+      holdCount: 3,
+      sellCount: 0,
+      strongSellCount: 0,
+      raw: { source: "ratings" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockImplementation(async (symbol) => [
+      {
+        ticker: symbol,
+        source: "FMP",
+        actionType: "UPGRADE",
+        firm: "Firm Alpha",
+        eventDate: new Date("2026-06-11T00:00:00.000Z"),
+        newPriceTarget: 345,
+        raw: { symbol },
+      },
+    ]);
+
     const app = buildApp();
 
     const user = await createUser({
@@ -276,6 +323,14 @@ describe("API ingestion routes", () => {
 
     expect(ingestionResponse.statusCode).toBe(200);
 
+    const analystIngestionResponse = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/ticker/${ticker}/analyst`,
+      payload: {},
+    });
+
+    expect(analystIngestionResponse.statusCode).toBe(200);
+
     const latestResponse = await app.inject({
       method: "GET",
       url: `/api/market-data/${ticker}/latest`,
@@ -289,6 +344,9 @@ describe("API ingestion routes", () => {
     });
     expect(researchResponse.statusCode).toBe(200);
     expect(researchResponse.json().data.latestPriceSnapshot.price).toBe(310);
+    expect(researchResponse.json().data.latestAnalystSnapshot).toBeDefined();
+    expect(Array.isArray(researchResponse.json().data.recentAnalystActions)).toBe(true);
+    expect(researchResponse.json().data.recentAnalystActions.length).toBeGreaterThan(0);
 
     const portfolioResponse = await app.inject({
       method: "GET",
@@ -1346,6 +1404,354 @@ describe("API ingestion routes", () => {
     expect(body.data.bankOfCanada.recordsCreated).toBeGreaterThan(0);
     expect(body.data.fred).toBeDefined();
     expect(body.data.warnings.some((warning: string) => warning.includes("FRED"))).toBe(true);
+
+    await app.close();
+  });
+
+  it("returns success envelopes for analyst ingestion and analyst read endpoints", async () => {
+    env.FMP_API_KEY = "test-fmp-key";
+
+    const ticker = "TSTANAPI1";
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockResolvedValue({
+      ticker,
+      capturedAt: new Date("2026-06-10T00:00:00.000Z"),
+      source: "FMP",
+      priceTargetAverage: 120,
+      priceTargetHigh: 130,
+      priceTargetLow: 100,
+      priceTargetConsensus: 125,
+      analystCount: 12,
+      ratingConsensus: "BUY",
+      raw: { ticker },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue({
+      source: "FMP",
+      priceTargetConsensus: 125,
+      analystCount: 12,
+      ratingConsensus: "BUY",
+      raw: { source: "consensus" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+      source: "FMP",
+      analystCount: 12,
+      ratingConsensus: "BUY",
+      strongBuyCount: 4,
+      buyCount: 6,
+      holdCount: 2,
+      sellCount: 0,
+      strongSellCount: 0,
+      raw: { source: "ratings" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([
+      {
+        ticker,
+        source: "FMP",
+        actionType: "UPGRADE",
+        firm: "Firm A",
+        eventDate: new Date("2026-06-11T00:00:00.000Z"),
+        newPriceTarget: 132,
+        raw: { ticker },
+      },
+    ]);
+
+    const app = buildApp();
+
+    const user = await createUser({
+      email: `test+api-analyst-${Date.now()}@example.com`,
+      name: "[TEST] API Analyst User",
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Analyst Portfolio",
+        baseCurrency: "USD",
+      },
+    });
+
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker,
+        status: "OWNED",
+        shares: 3,
+      },
+    });
+
+    const createWatchlistResponse = await app.inject({
+      method: "POST",
+      url: "/api/watchlists",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Analyst Watchlist",
+      },
+    });
+
+    const watchlistId = createWatchlistResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: `/api/watchlists/${watchlistId}/items`,
+      payload: {
+        ticker,
+      },
+    });
+
+    const tickerIngestion = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/ticker/${ticker}/analyst`,
+      payload: {},
+    });
+
+    expect(tickerIngestion.statusCode).toBe(200);
+    expect(tickerIngestion.json().success).toBe(true);
+
+    const portfolioIngestion = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/portfolio/${portfolioId}/analyst`,
+      payload: {},
+    });
+
+    expect(portfolioIngestion.statusCode).toBe(200);
+    expect(portfolioIngestion.json().success).toBe(true);
+
+    const watchlistIngestion = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/watchlist/${watchlistId}/analyst`,
+      payload: {},
+    });
+
+    expect(watchlistIngestion.statusCode).toBe(200);
+    expect(watchlistIngestion.json().success).toBe(true);
+
+    const latestResponse = await app.inject({
+      method: "GET",
+      url: `/api/analyst/${ticker}/latest`,
+    });
+
+    expect(latestResponse.statusCode).toBe(200);
+    expect(latestResponse.json().success).toBe(true);
+    expect(latestResponse.json().data.priceTargetConsensus).toBe(125);
+
+    const actionsResponse = await app.inject({
+      method: "GET",
+      url: `/api/analyst/${ticker}/actions?limit=5`,
+    });
+
+    expect(actionsResponse.statusCode).toBe(200);
+    expect(actionsResponse.json().success).toBe(true);
+    expect(Array.isArray(actionsResponse.json().data)).toBe(true);
+    expect(actionsResponse.json().data.length).toBeGreaterThan(0);
+
+    await app.close();
+  });
+
+  it("returns success envelopes for discovery refresh/list/default-set endpoints", async () => {
+    vi.spyOn(fmpAnalystProvider, "getMarketMovers").mockImplementation(async (category) => {
+      return [
+        {
+          ticker: `TST${category}`.slice(0, 10),
+          companyName: `${category} Co.`,
+          price: 101,
+          changePercent: 2.5,
+          volume: 20_000,
+          marketCap: 1_500_000_000,
+          category: category as
+            | "GAINERS"
+            | "LOSERS"
+            | "ACTIVE"
+            | "ANALYST_UPGRADES"
+            | "ANALYST_DOWNGRADES",
+          capturedAt: new Date("2026-06-12T00:00:00.000Z"),
+          source: "FMP",
+          raw: { category },
+        },
+      ];
+    });
+
+    const app = buildApp();
+
+    const refreshResponse = await app.inject({
+      method: "POST",
+      url: "/api/discovery/fmp/GAINERS/refresh",
+      payload: {
+        limit: 5,
+      },
+    });
+
+    expect(refreshResponse.statusCode).toBe(200);
+    expect(refreshResponse.json().success).toBe(true);
+    expect(refreshResponse.json().data.category).toBe("GAINERS");
+
+    const listResponse = await app.inject({
+      method: "GET",
+      url: "/api/discovery/GAINERS?limit=5",
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json().success).toBe(true);
+    expect(listResponse.json().data.category).toBe("GAINERS");
+    expect(Array.isArray(listResponse.json().data.items)).toBe(true);
+
+    const defaultSetResponse = await app.inject({
+      method: "POST",
+      url: "/api/discovery/fmp/default-set",
+      payload: {
+        limit: 3,
+      },
+    });
+
+    expect(defaultSetResponse.statusCode).toBe(200);
+    expect(defaultSetResponse.json().success).toBe(true);
+    expect(Array.isArray(defaultSetResponse.json().data.categories)).toBe(true);
+    expect(defaultSetResponse.json().data.categories.length).toBe(5);
+
+    await app.close();
+  });
+
+  it("includes analystData section in full-refresh when includeAnalystData=true", async () => {
+    env.FMP_API_KEY = "test-fmp-key";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockImplementation(async (ticker) => ({
+      ticker,
+      companyName: `${ticker} Company`,
+      exchange: "NASDAQ",
+      sector: "Technology",
+      industry: "Software",
+      country: "US",
+      currency: "USD",
+      assetType: "EQUITY",
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockImplementation(async (ticker) => ({
+      ticker,
+      price: 130,
+      previousClose: 128,
+      close: 130,
+      volume: 8_000,
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockImplementation(
+      async (ticker) => buildHistoricalSeries(ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockImplementation(
+      async (ticker) => ({
+        ticker,
+        marketCap: 3_000_000_000,
+        peRatio: 21,
+        source: "FMP",
+      }),
+    );
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockResolvedValue({
+      ticker: "TSTFRANA",
+      capturedAt: new Date("2026-06-10T00:00:00.000Z"),
+      source: "FMP",
+      priceTargetAverage: 140,
+      priceTargetHigh: 150,
+      priceTargetLow: 120,
+      priceTargetConsensus: 138,
+      analystCount: 9,
+      ratingConsensus: "BUY",
+      raw: { source: "summary" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue({
+      source: "FMP",
+      priceTargetConsensus: 138,
+      analystCount: 9,
+      ratingConsensus: "BUY",
+      raw: { source: "consensus" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+      source: "FMP",
+      analystCount: 9,
+      ratingConsensus: "BUY",
+      strongBuyCount: 3,
+      buyCount: 4,
+      holdCount: 2,
+      sellCount: 0,
+      strongSellCount: 0,
+      raw: { source: "ratings" },
+    });
+
+    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([
+      {
+        ticker: "TSTFRANA",
+        source: "FMP",
+        actionType: "UPGRADE",
+        firm: "Firm Analyst",
+        eventDate: new Date("2026-06-11T00:00:00.000Z"),
+        newPriceTarget: 145,
+        raw: { source: "actions" },
+      },
+    ]);
+
+    const app = buildApp();
+
+    const user = await createUser({
+      email: `test+api-full-refresh-analyst-${Date.now()}@example.com`,
+      name: "[TEST] API Full Refresh Analyst User",
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Full Refresh Analyst Portfolio",
+        baseCurrency: "USD",
+      },
+    });
+
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker: "TSTFRANA",
+        status: "OWNED",
+        shares: 5,
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/portfolio/${portfolioId}/full-refresh`,
+      payload: {
+        includeAnalystData: true,
+        includeEconomics: false,
+        includeBankOfCanada: false,
+        includeFred: false,
+        runAnalysis: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.analystData).toBeDefined();
+    expect(body.data.analystData.tickersProcessed).toBeGreaterThan(0);
+    expect(body.data.analystData.snapshotsCreated + body.data.analystData.snapshotsUpdated).toBeGreaterThan(0);
 
     await app.close();
   });

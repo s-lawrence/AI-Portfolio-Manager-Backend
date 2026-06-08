@@ -43,6 +43,9 @@ npm start
 - `/api/portfolio-summaries`
 - `/api/predictions`
 - `/api/alerts`
+- `/api/watchlists`
+- `/api/analyst`
+- `/api/discovery`
 
 ## Development Helpers
 
@@ -270,6 +273,16 @@ Research bundle technical snapshot fields:
 - Value format is a decimal fraction (for example `0.22` means 22%).
 - Canonical backend field for RSI remains `rsi14`.
 
+Research bundle analyst fields:
+
+- `GET /api/stocks/<TICKER>/research-bundle` also returns:
+  - `latestAnalystSnapshot`
+  - `recentAnalystActions`
+- `GET /api/watchlists/<WATCHLIST_CUID>/research-bundle` includes per-item analyst fields:
+  - `latestAnalystSnapshot`
+  - `recentAnalystActions`
+  - `discoveryContext` (when available for screener/agent-origin items)
+
 Prediction list payloads:
 
 - `GET /api/predictions/open`
@@ -362,6 +375,58 @@ curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/
   }'
 ```
 
+Ingest analyst data for one ticker from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/ticker/AAPL/analyst \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Ingest analyst data for all holdings in a portfolio from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/analyst \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Ingest analyst data for all items in a watchlist from FMP:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/fmp/watchlist/<WATCHLIST_CUID>/analyst \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Read latest analyst context:
+
+```bash
+curl http://localhost:4000/api/analyst/AAPL/latest
+```
+
+```bash
+curl "http://localhost:4000/api/analyst/AAPL/actions?limit=20"
+```
+
+Refresh and read discovery candidates:
+
+```bash
+curl -X POST http://localhost:4000/api/discovery/fmp/GAINERS/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 50}'
+```
+
+```bash
+curl -X POST http://localhost:4000/api/discovery/fmp/default-set \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 25}'
+```
+
+```bash
+curl "http://localhost:4000/api/discovery/GAINERS?limit=25"
+```
+
 Earnings ingestion responses include:
 
 - `eventsCreated` count of inserted earnings events.
@@ -404,6 +469,7 @@ curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/
     "refreshMode": "quick",
     "historicalLimit": 120,
     "newsLimitPerTicker": 12,
+    "includeAnalystData": true,
     "includeEconomics": false,
     "includeBankOfCanada": false,
     "includeFred": false,
@@ -419,6 +485,7 @@ curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/
 Full-refresh request options:
 
 - `refreshMode`: optional, one of `quick` or `full` (default `quick`).
+- `includeAnalystData`: optional boolean (default `false`).
 - `includeEconomics`: optional boolean (default `false`).
 - `includeBankOfCanada`: optional boolean (default `false`).
 - `includeFred`: optional boolean (default `false`).
@@ -431,6 +498,7 @@ Full-refresh request options:
 Include-flag semantics:
 
 - `includeEconomics=false` skips FMP economics and omits `economics` from response.
+- `includeAnalystData=false` skips analyst ingestion and omits `analystData` from response.
 - `includeBankOfCanada=false` skips BoC macro/FX and omits `bankOfCanada` from response.
 - `includeFred=false` skips FRED macro and omits `fred` from response.
 - If all macro flags are `false`, macro ingestion is skipped and `macro` is omitted.
@@ -442,6 +510,7 @@ Full-refresh response includes:
 - `fundamentals` category result (including per-ticker failures).
 - `earnings` category result (including per-ticker failures).
 - `news` category result (including per-ticker failures).
+- optional `analystData` when `includeAnalystData=true`.
 - optional `analysis` when `runAnalysis=true`.
 - optional `economics` when `includeEconomics=true`.
 - optional `bankOfCanada`, `fred`, and `macro` when macro flags are enabled.

@@ -89,6 +89,13 @@ Notes:
 - /earnings?symbol={symbol}
 - /earnings-calendar?from={YYYY-MM-DD}&to={YYYY-MM-DD}&page={n}
 - /news/stock?symbols={symbol}
+- /stable/price-target-summary?symbol={symbol} (fallback /price-target-summary)
+- /stable/price-target-consensus?symbol={symbol} (fallback /price-target-consensus)
+- /stable/analyst-ratings?symbol={symbol} (fallback /analyst-ratings, /stable/recommendation-trends, /recommendation-trends)
+- /stable/upgrades-downgrades?symbol={symbol} (fallback /upgrades-downgrades, /stable/upgrades-downgrades-consensus, /upgrades-downgrades-consensus)
+- /stable/biggest-gainers (fallback /biggest-gainers, /stable/market-biggest-gainers, /market-biggest-gainers)
+- /stable/biggest-losers (fallback /biggest-losers, /stable/market-biggest-losers, /market-biggest-losers)
+- /stable/most-actives (fallback /most-actives, /stable/market-most-active, /market-most-active)
 - /treasury-rates
 - /economic-indicators
 - /economic-calendar (fallback /economics-calendar)
@@ -148,7 +155,14 @@ U.S. examples:
 - News ingestion reads company news from FMP and upserts by unique article URL for idempotency.
 - If provider sentiment/materiality is missing, deterministic local fallback classification is applied.
 - Demo-marked local fake news is explicitly identified so reports can prefer real company headlines.
-- Combined portfolio full-refresh orchestration runs market-data, fundamentals, earnings, and news ingestion in sequence before optional portfolio analysis.
+- Analyst ingestion reads price-target summary/consensus, analyst ratings, and upgrades-downgrades endpoints.
+- Discovery ingestion reads gainers/losers/most-active plus analyst-upgrades/downgrades categories.
+- Analyst/discovery endpoint fallback behavior: 404 responses try the next candidate endpoint automatically.
+- Analyst/discovery no-data behavior: empty payloads are treated as soft no-data warnings (not hard failures).
+- Analyst/discovery entitlement behavior: 402 responses are surfaced as provider configuration errors indicating plan limits.
+- Analyst/discovery auth behavior: 401/403 responses are surfaced as API-key configuration errors.
+- Analyst/discovery throttle behavior: 429 responses are surfaced as provider rate-limit errors.
+- Combined portfolio full-refresh orchestration runs market-data, fundamentals, earnings, news, and optional analyst ingestion in sequence before optional portfolio analysis.
 
 ### Snapshot Source Conventions
 

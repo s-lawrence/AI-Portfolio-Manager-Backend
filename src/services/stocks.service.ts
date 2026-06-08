@@ -5,6 +5,12 @@ import {
   getNextEarningsEvent,
   listEarningsEventsByStockId,
 } from "../repositories/earnings-events.repository";
+import {
+  getLatestAnalystSnapshot,
+} from "../repositories/analyst-snapshots.repository";
+import {
+  listAnalystActionsByStock,
+} from "../repositories/analyst-action-events.repository";
 import { getLatestFundamentalSnapshot } from "../repositories/fundamental-snapshots.repository";
 import { listRecentNewsByTicker } from "../repositories/news-articles.repository";
 import {
@@ -185,6 +191,8 @@ export async function getStockResearchBundle(
     latestPriceSnapshot,
     latestTechnicalSnapshot,
     latestFundamentalSnapshot,
+    latestAnalystSnapshot,
+    recentAnalystActions,
     recentNews,
     nextEarningsEventRaw,
     earningsEvents,
@@ -194,6 +202,8 @@ export async function getStockResearchBundle(
     getLatestMarketSnapshotForStock(stock.id),
     getLatestTechnicalSnapshot(stock.id),
     getLatestFundamentalSnapshot(stock.id),
+    getLatestAnalystSnapshot(stock.id),
+    listAnalystActionsByStock(stock.id, 20),
     listRecentNewsByTicker(stock.ticker, 20),
     getNextEarningsEvent(stock.id),
     listEarningsEventsByStockId(stock.id),
@@ -237,6 +247,8 @@ export async function getStockResearchBundle(
     latestPriceSnapshot,
     latestTechnicalSnapshot: technicalSnapshot,
     latestFundamentalSnapshot,
+    latestAnalystSnapshot,
+    recentAnalystActions,
     recentNews,
     nextEarningsEvent,
     latestAIReport,

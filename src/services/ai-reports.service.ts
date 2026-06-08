@@ -114,6 +114,96 @@ function buildEarningsSummary(nextEarningsEvent: {
   return `${details.join(". ")}.`;
 }
 
+function buildAnalystSummary(args: {
+  currentPrice: number;
+  snapshot: {
+    priceTargetAverage: number | null;
+    priceTargetHigh: number | null;
+    priceTargetLow: number | null;
+    priceTargetConsensus: number | null;
+    upsidePercent: number | null;
+    ratingConsensus: string | null;
+    analystCount: number | null;
+    strongBuyCount: number | null;
+    buyCount: number | null;
+    holdCount: number | null;
+    sellCount: number | null;
+    strongSellCount: number | null;
+  } | null;
+  actions: Array<{
+    actionType: string;
+    firm: string | null;
+    eventDate: Date;
+  }>;
+}): string {
+  const parts: string[] = [];
+  const snapshot = args.snapshot;
+
+  if (snapshot) {
+    const targetAverage = snapshot.priceTargetAverage;
+    const targetHigh = snapshot.priceTargetHigh;
+    const targetLow = snapshot.priceTargetLow;
+    const targetConsensus = snapshot.priceTargetConsensus;
+
+    if (
+      targetAverage != null ||
+      targetHigh != null ||
+      targetLow != null ||
+      targetConsensus != null
+    ) {
+      parts.push(
+        `Targets avg ${targetAverage != null ? targetAverage.toFixed(2) : "n/a"}, high ${targetHigh != null ? targetHigh.toFixed(2) : "n/a"}, low ${targetLow != null ? targetLow.toFixed(2) : "n/a"}, consensus ${targetConsensus != null ? targetConsensus.toFixed(2) : "n/a"}.`,
+      );
+    }
+
+    if (snapshot.ratingConsensus) {
+      parts.push(`Rating consensus: ${snapshot.ratingConsensus}.`);
+    }
+
+    if (snapshot.analystCount != null) {
+      parts.push(`Analyst count: ${snapshot.analystCount}.`);
+    }
+
+    if (
+      snapshot.strongBuyCount != null ||
+      snapshot.buyCount != null ||
+      snapshot.holdCount != null ||
+      snapshot.sellCount != null ||
+      snapshot.strongSellCount != null
+    ) {
+      parts.push(
+        `Rating mix SB/B/H/S/SS: ${snapshot.strongBuyCount ?? 0}/${snapshot.buyCount ?? 0}/${snapshot.holdCount ?? 0}/${snapshot.sellCount ?? 0}/${snapshot.strongSellCount ?? 0}.`,
+      );
+    }
+
+    const impliedUpside =
+      snapshot.upsidePercent ??
+      (targetConsensus != null && args.currentPrice > 0
+        ? ((targetConsensus - args.currentPrice) / args.currentPrice) * 100
+        : null);
+
+    if (impliedUpside != null) {
+      parts.push(`Implied upside/downside: ${impliedUpside.toFixed(1)}%.`);
+    }
+  }
+
+  if (args.actions.length > 0) {
+    const recent = args.actions.slice(0, 3).map((action) => {
+      const date = action.eventDate.toISOString().slice(0, 10);
+      const firm = action.firm ?? "Unknown firm";
+      return `${action.actionType} by ${firm} (${date})`;
+    });
+
+    parts.push(`Recent analyst actions: ${recent.join("; ")}.`);
+  }
+
+  if (parts.length === 0) {
+    return "Analyst context unavailable.";
+  }
+
+  return parts.join(" ");
+}
+
 function quoteHeadline(headline: string): string {
   return `"${headline.trim()}"`;
 }
@@ -972,6 +1062,76 @@ export async function generateMockTickerReport(
     }
   }
 
+  const analystSummary = buildAnalystSummary({
+    currentPrice,
+    snapshot: bundle.latestAnalystSnapshot,
+    actions: bundle.recentAnalystActions,
+  });
+
+  if (bundle.latestAnalystSnapshot || bundle.recentAnalystActions.length > 0) {
+    evidenceCount += 1;
+
+    const targetConsensus =
+      bundle.latestAnalystSnapshot?.priceTargetConsensus ??
+      bundle.latestAnalystSnapshot?.priceTargetAverage;
+    const impliedUpside =
+      bundle.latestAnalystSnapshot?.upsidePercent ??
+      (targetConsensus != null && currentPrice > 0
+        ? ((targetConsensus - currentPrice) / currentPrice) * 100
+        : null);
+
+    if (impliedUpside != null) {
+      if (impliedUpside >= 10) {
+        score += 1;
+        bullishFactors.push("Analyst price targets imply meaningful upside.");
+      } else if (impliedUpside <= -10) {
+        score -= 1;
+        bearishFactors.push("Analyst price targets imply downside risk.");
+      }
+    }
+
+    const ratingConsensus = bundle.latestAnalystSnapshot?.ratingConsensus?.toLowerCase() ?? "";
+    if (
+      ratingConsensus.includes("strong buy") ||
+      ratingConsensus.includes("buy") ||
+      ratingConsensus.includes("outperform") ||
+      ratingConsensus.includes("overweight")
+    ) {
+      score += 1;
+      bullishFactors.push("Analyst rating consensus is constructive.");
+    } else if (
+      ratingConsensus.includes("strong sell") ||
+      ratingConsensus.includes("sell") ||
+      ratingConsensus.includes("underperform") ||
+      ratingConsensus.includes("underweight")
+    ) {
+      score -= 1;
+      bearishFactors.push("Analyst rating consensus is cautious.");
+    }
+
+    if (bundle.recentAnalystActions.length > 0) {
+      const recentAnalystActions = bundle.recentAnalystActions.slice(0, 10);
+      const upgrades = recentAnalystActions.filter((action) =>
+        action.actionType.toUpperCase().includes("UPGRADE"),
+      ).length;
+      const downgrades = recentAnalystActions.filter((action) =>
+        action.actionType.toUpperCase().includes("DOWNGRADE"),
+      ).length;
+
+      if (upgrades > downgrades) {
+        score += 1;
+        bullishFactors.push("Recent analyst actions tilt toward upgrades.");
+      } else if (downgrades > upgrades) {
+        score -= 1;
+        bearishFactors.push("Recent analyst actions tilt toward downgrades.");
+      }
+    }
+  } else {
+    dataWarnings.push("No analyst snapshot/actions available.");
+  }
+
+  fundamentalSummary = `${fundamentalSummary} Analyst context: ${analystSummary}`;
+
   const sparseData = evidenceCount < 3;
   if (sparseData) {
     bearishFactors.push("Limited data coverage lowers conviction.");
@@ -1128,6 +1288,7 @@ export async function generateMockTickerReport(
       score,
       evidenceCount,
       dataWarnings,
+      analystSummary,
       newsSummary: newsSummaryJson,
     },
   });

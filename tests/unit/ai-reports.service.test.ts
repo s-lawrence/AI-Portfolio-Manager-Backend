@@ -12,6 +12,8 @@ import {
 } from "../../src/services/ai-reports.service";
 import { recordEarningsEvent } from "../../src/services/earnings.service";
 import { listAIReportsByStockId } from "../../src/repositories/ai-reports.repository";
+import { upsertAnalystActionEvent } from "../../src/repositories/analyst-action-events.repository";
+import { upsertAnalystSnapshot } from "../../src/repositories/analyst-snapshots.repository";
 import { upsertMacroEventByProviderIdentity } from "../../src/repositories/macro-events.repository";
 import { upsertMacroSeriesObservation } from "../../src/repositories/macro-series-observations.repository";
 import { listPredictionsByStockId } from "../../src/repositories/predictions.repository";
@@ -190,6 +192,42 @@ async function seedTechnicalRichData(ticker: string): Promise<void> {
   ]);
 }
 
+async function seedAnalystContextData(ticker: string): Promise<void> {
+  const stock = await getStockProfile(ticker);
+  if (!stock) {
+    throw new Error("Stock must exist before seeding analyst context.");
+  }
+
+  await upsertAnalystSnapshot({
+    stockId: stock.id,
+    source: "FMP",
+    capturedAt: new Date("2026-05-04T00:05:00.000Z"),
+    priceTargetAverage: 165,
+    priceTargetHigh: 180,
+    priceTargetLow: 150,
+    priceTargetConsensus: 170,
+    analystCount: 12,
+    ratingConsensus: "BUY",
+    strongBuyCount: 5,
+    buyCount: 4,
+    holdCount: 3,
+    sellCount: 0,
+    strongSellCount: 0,
+    upsidePercent: 13,
+    raw: { source: "test-analyst" },
+  });
+
+  await upsertAnalystActionEvent({
+    stockId: stock.id,
+    source: "FMP",
+    actionType: "UPGRADE",
+    firm: "Firm Analyst",
+    eventDate: new Date("2026-05-04T00:06:00.000Z"),
+    newPriceTarget: 175,
+    raw: { source: "test-analyst-action" },
+  });
+}
+
 describe("ai-reports.service", () => {
   it("creates an AI report and three predictions for day/week/month horizons", async () => {
     const ticker = nextTicker();
@@ -307,6 +345,23 @@ describe("ai-reports.service", () => {
           false,
       ).toBe(false);
     }
+  });
+
+  it("includes analyst context in summary and model output when analyst data exists", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+    await seedAnalystContextData(ticker);
+
+    const result = await generateMockTickerReport(ticker);
+
+    expect(result.report.fundamentalSummary).toContain("Analyst context:");
+
+    const rawModelOutput = result.report.rawModelOutput as { analystSummary?: string } | null;
+    expect(rawModelOutput?.analystSummary).toBeDefined();
+    expect(rawModelOutput?.analystSummary?.toLowerCase()).toContain("analyst");
+
+    const allFactors = [...result.report.bullishFactors, ...result.report.bearishFactors];
+    expect(allFactors.some((factor) => factor.toLowerCase().includes("analyst"))).toBe(true);
   });
 
   it("stores deterministic/mock wording in report metadata", async () => {

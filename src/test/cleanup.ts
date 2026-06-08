@@ -215,6 +215,48 @@ export async function cleanupTestData(): Promise<void> {
     },
   });
 
+  await testPrisma.analystActionEvent.deleteMany({
+    where: {
+      OR: [
+        {
+          stockId: {
+            in: ids.stockIds,
+          },
+        },
+        {
+          headline: {
+            contains: TEST_TEXT_MARKER,
+          },
+        },
+      ],
+    },
+  });
+
+  await testPrisma.analystSnapshot.deleteMany({
+    where: {
+      stockId: {
+        in: ids.stockIds,
+      },
+    },
+  });
+
+  await testPrisma.marketDiscoverySnapshot.deleteMany({
+    where: {
+      OR: [
+        {
+          stockId: {
+            in: ids.stockIds,
+          },
+        },
+        ...TEST_TICKER_PREFIXES.map((prefix) => ({
+          ticker: {
+            startsWith: prefix,
+          },
+        })),
+      ],
+    },
+  });
+
   await testPrisma.macroSeriesObservation.deleteMany({
     where: {
       OR: [

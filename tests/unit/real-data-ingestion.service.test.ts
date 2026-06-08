@@ -32,6 +32,7 @@ import {
 } from "../../src/services/real-data-ingestion.service";
 import * as fmpEconomicsIngestionService from "../../src/services/fmp-economics-ingestion.service";
 import * as macroIngestionService from "../../src/services/macro-ingestion.service";
+import * as analystIngestionService from "../../src/services/analyst-ingestion.service";
 import * as portfolioAnalysisService from "../../src/services/portfolio-analysis.service";
 import { getLatestFundamentals } from "../../src/services/fundamentals.service";
 import { getStockProfile, getStockResearchBundle } from "../../src/services/stocks.service";
@@ -1242,6 +1243,74 @@ describe("real-data-ingestion.service", () => {
     expect(result.bankOfCanada).toBeUndefined();
     expect(result.fred).toBeUndefined();
     expect(result.macro).toBeUndefined();
+  });
+
+  it("full-refresh includes analyst data when includeAnalystData=true", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRAN1");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const analystSpy = vi
+      .spyOn(analystIngestionService, "ingestPortfolioAnalystData")
+      .mockResolvedValue({
+        portfolioId: portfolio.id,
+        startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+        finishedAt: new Date("2026-06-20T00:00:01.000Z").toISOString(),
+        durationMs: 1000,
+        tickersProcessed: 1,
+        tickersFailed: 0,
+        snapshotsCreated: 1,
+        snapshotsUpdated: 0,
+        actionsCreated: 1,
+        actionsUpdated: 0,
+        results: [
+          {
+            ticker: stock.ticker,
+            snapshotsCreated: 1,
+            snapshotsUpdated: 0,
+            actionsCreated: 1,
+            actionsUpdated: 0,
+            warnings: [],
+          },
+        ],
+        failedTickers: [],
+        warnings: [],
+      });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeAnalystData: true,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(analystSpy).toHaveBeenCalledWith(portfolio.id);
+    expect(result.analystData).toBeDefined();
+    expect(result.analystData?.snapshotsCreated).toBe(1);
+  });
+
+  it("full-refresh omits analyst data and skips analyst ingestion when includeAnalystData=false", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRAN0");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const analystSpy = vi.spyOn(analystIngestionService, "ingestPortfolioAnalystData");
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeAnalystData: false,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(analystSpy).not.toHaveBeenCalled();
+    expect(result.analystData).toBeUndefined();
   });
 
   it("full-refresh omits economics and does not call economics ingestion when includeEconomics=false", async () => {

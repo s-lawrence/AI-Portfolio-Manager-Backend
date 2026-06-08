@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 
+import { analystIngestionRoutes } from "./analyst-ingestion.routes";
 import { alertsRoutes } from "./alerts.routes";
 import { devRoutes } from "./dev.routes";
+import { discoveryRoutes } from "./discovery.routes";
 import { economicsIngestionRoutes } from "./economics-ingestion.routes";
 import { earningsRoutes } from "./earnings.routes";
 import { healthRoutes } from "./health.routes";
@@ -35,6 +37,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(predictionsRoutes, { prefix: "/api/predictions" });
   await app.register(alertsRoutes, { prefix: "/api/alerts" });
   await app.register(watchlistsRoutes, { prefix: "/api/watchlists" });
+  await app.register(discoveryRoutes, { prefix: "/api/discovery" });
+  await app.register(analystIngestionRoutes, { prefix: "/api" });
 
   if (process.env.NODE_ENV !== "production") {
     await app.register(devRoutes, { prefix: "/api/dev" });

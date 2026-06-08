@@ -212,6 +212,9 @@ model Stock {
   priceSnapshots     PriceSnapshot[]
   technicalSnapshots TechnicalSnapshot[]
   fundamentalSnapshots FundamentalSnapshot[]
+  analystSnapshots   AnalystSnapshot[]
+  analystActionEvents AnalystActionEvent[]
+  marketDiscoverySnapshots MarketDiscoverySnapshot[]
   newsArticles       NewsArticle[]
   earningsEvents     EarningsEvent[]
   aiReports          AIReport[]
@@ -299,6 +302,80 @@ model FundamentalSnapshot {
 
   @@unique([stockId, capturedAt])
   @@index([stockId])
+  @@index([capturedAt])
+}
+
+model AnalystSnapshot {
+  id                   String   @id @default(cuid())
+  stockId              String
+  source               String?
+  capturedAt           DateTime
+  priceTargetAverage   Float?
+  priceTargetHigh      Float?
+  priceTargetLow       Float?
+  priceTargetConsensus Float?
+  analystCount         Int?
+  ratingConsensus      String?
+  strongBuyCount       Int?
+  buyCount             Int?
+  holdCount            Int?
+  sellCount            Int?
+  strongSellCount      Int?
+  upsidePercent        Float?
+  raw                  Json?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  stock                Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId])
+  @@index([capturedAt])
+  @@unique([stockId, capturedAt])
+}
+
+model AnalystActionEvent {
+  id                  String   @id @default(cuid())
+  stockId             String
+  source              String?
+  actionType          String
+  firm                String?
+  analystName         String?
+  previousRating      String?
+  newRating           String?
+  previousPriceTarget Float?
+  newPriceTarget      Float?
+  eventDate           DateTime
+  headline            String?
+  url                 String?
+  raw                 Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  stock               Stock    @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId])
+  @@index([eventDate])
+  @@index([actionType])
+  @@unique([stockId, eventDate, firm, actionType])
+}
+
+model MarketDiscoverySnapshot {
+  id            String   @id @default(cuid())
+  source        String?
+  category      String
+  ticker        String
+  stockId       String?
+  companyName   String?
+  price         Float?
+  changePercent Float?
+  volume        BigInt?
+  marketCap     BigInt?
+  capturedAt    DateTime
+  raw           Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  stock         Stock?   @relation(fields: [stockId], references: [id], onDelete: SetNull)
+
+  @@index([category])
+  @@index([ticker])
   @@index([capturedAt])
 }
 
