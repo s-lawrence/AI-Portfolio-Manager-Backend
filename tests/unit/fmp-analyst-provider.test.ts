@@ -201,6 +201,60 @@ describe("fmp-analyst.provider", () => {
     expect(movers[0]?.volume).toBe(1_000_000);
   });
 
+  it("maps recommendation-trends rows using latest count fields", async () => {
+    const provider = new FmpAnalystProvider(
+      createMockClient((path) => {
+        if (path === "/stable/analyst-ratings") {
+          return [];
+        }
+
+        if (path === "/analyst-ratings") {
+          return [];
+        }
+
+        if (path === "/stable/recommendation-trends") {
+          return [
+            {
+              date: "2026-06-01",
+              recommendationTrends: [
+                {
+                  date: "2026-05-01",
+                  strongBuyCount: 1,
+                  buyCount: 2,
+                  holdCount: 3,
+                  sellCount: 4,
+                  strongSellCount: 5,
+                  totalAnalysts: 15,
+                },
+                {
+                  date: "2026-06-01",
+                  strongBuyCount: 2,
+                  buyCount: 4,
+                  holdCount: 1,
+                  sellCount: 0,
+                  strongSellCount: 1,
+                  totalAnalysts: 8,
+                },
+              ],
+            },
+          ];
+        }
+
+        return [];
+      }),
+    );
+
+    const ratings = await provider.getAnalystRatings("AAPL");
+
+    expect(ratings).not.toBeNull();
+    expect(ratings?.analystCount).toBe(8);
+    expect(ratings?.strongBuyCount).toBe(2);
+    expect(ratings?.buyCount).toBe(4);
+    expect(ratings?.holdCount).toBe(1);
+    expect(ratings?.sellCount).toBe(0);
+    expect(ratings?.strongSellCount).toBe(1);
+  });
+
   it("filters analyst discovery items by upgrades/downgrades category", async () => {
     const provider = new FmpAnalystProvider(
       createMockClient((path) => {

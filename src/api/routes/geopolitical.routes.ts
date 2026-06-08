@@ -37,7 +37,7 @@ export async function geopoliticalRoutes(app: FastifyInstance): Promise<void> {
       typeof request.body === "object" && request.body != null ? request.body : {},
     );
 
-    const mergedQueries = body.includeDefaults === false ? body.queries : body.queries;
+    const mergedQueries = body.includeDefaults === false ? (body.queries ?? []) : body.queries;
 
     const result = await runService(() =>
       ingestDefaultGdeltRiskSet({
@@ -45,6 +45,7 @@ export async function geopoliticalRoutes(app: FastifyInstance): Promise<void> {
         to: body.to,
         maxRecordsPerQuery: body.maxRecordsPerQuery,
         maxRecords: body.maxRecords,
+        mode: body.mode,
         queries: mergedQueries,
       }),
     );

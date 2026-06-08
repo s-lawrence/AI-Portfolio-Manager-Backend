@@ -91,6 +91,14 @@ describe("analyst-ingestion.service", () => {
     expect(result.ticker).toBe(stock.ticker);
     expect(result.snapshotsCreated + result.snapshotsUpdated).toBe(1);
     expect(result.actionsCreated + result.actionsUpdated).toBe(1);
+    expect(result.priceTargetSummaryStatus).toBe("SUCCESS");
+    expect(result.priceTargetConsensusStatus).toBe("SUCCESS");
+    expect(result.analystRatingsStatus).toBe("SUCCESS");
+    expect(result.analystActionsStatus).toBe("SUCCESS");
+    expect(result.subsourceWarnings.priceTargetSummary).toEqual([]);
+    expect(result.subsourceWarnings.priceTargetConsensus).toEqual([]);
+    expect(result.subsourceWarnings.analystRatings).toEqual([]);
+    expect(result.subsourceWarnings.analystActions).toEqual([]);
 
     const latestSnapshot = await getLatestAnalystSnapshot(stock.id);
     expect(latestSnapshot).not.toBeNull();
@@ -278,5 +286,31 @@ describe("analyst-ingestion.service", () => {
     expect(latestSnapshot).toBeNull();
     expect(snapshots).toEqual([]);
     expect(actions).toEqual([]);
+  });
+
+  it("marks EMPTY statuses when ratings/actions return no usable records", async () => {
+    const stock = await createTestStock("TSTANLEMPT");
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockResolvedValue({
+      ticker: stock.ticker,
+      capturedAt: new Date("2026-06-10T00:00:00.000Z"),
+      source: "FMP",
+      priceTargetAverage: 101,
+      priceTargetConsensus: 105,
+      raw: { source: "summary" },
+    });
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([]);
+
+    const result = await ingestTickerAnalystData(stock.ticker);
+
+    expect(result.priceTargetSummaryStatus).toBe("SUCCESS");
+    expect(result.priceTargetConsensusStatus).toBe("EMPTY");
+    expect(result.analystRatingsStatus).toBe("EMPTY");
+    expect(result.analystActionsStatus).toBe("EMPTY");
+    expect(result.subsourceWarnings.priceTargetConsensus.length).toBeGreaterThan(0);
+    expect(result.subsourceWarnings.analystRatings.length).toBeGreaterThan(0);
+    expect(result.subsourceWarnings.analystActions.length).toBeGreaterThan(0);
   });
 });

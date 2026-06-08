@@ -248,11 +248,17 @@ export interface FmpPriceTargetSummaryItem {
   symbol?: string;
   date?: string;
   asOfDate?: string;
+  targetAvg?: number | string;
+  targetAverage?: number | string;
   targetHigh?: number | string;
+  priceTargetHigh?: number | string;
   targetLow?: number | string;
+  priceTargetLow?: number | string;
   targetMean?: number | string;
   targetMedian?: number | string;
   targetConsensus?: number | string;
+  target_consensus?: number | string;
+  priceTargetConsensus?: number | string;
   lastPrice?: number | string;
   upsidePercent?: number | string;
   upside?: number | string;
@@ -268,12 +274,21 @@ export interface FmpPriceTargetConsensusItem {
   date?: string;
   asOfDate?: string;
   targetConsensus?: number | string;
+  target_consensus?: number | string;
+  priceTargetConsensus?: number | string;
   targetMean?: number | string;
+  targetAverage?: number | string;
   targetMedian?: number | string;
+  targetHigh?: number | string;
+  targetLow?: number | string;
+  priceTargetHigh?: number | string;
+  priceTargetLow?: number | string;
   analystCount?: number | string;
   numberOfAnalysts?: number | string;
+  totalAnalysts?: number | string;
   consensus?: string;
   ratingConsensus?: string;
+  recommendation?: string;
 }
 
 export interface FmpAnalystRatingItem {
@@ -285,11 +300,21 @@ export interface FmpAnalystRatingItem {
   ratingConsensus?: string;
   consensus?: string;
   analystCount?: number | string;
+  numberOfAnalysts?: number | string;
+  totalAnalysts?: number | string;
   strongBuy?: number | string;
+  strongBuyCount?: number | string;
+  strong_buy?: number | string;
   buy?: number | string;
+  buyCount?: number | string;
   hold?: number | string;
+  holdCount?: number | string;
   sell?: number | string;
+  sellCount?: number | string;
   strongSell?: number | string;
+  strongSellCount?: number | string;
+  strong_sell?: number | string;
+  recommendationTrends?: Array<Record<string, unknown>>;
 }
 
 export interface FmpUpgradeDowngradeItem {

@@ -22,6 +22,9 @@ const DEFAULT_DISCOVERY_CATEGORIES = [
   "ANALYST_DOWNGRADES",
 ] as const;
 
+const DEFAULT_DISCOVERY_MIN_PRICE = 5;
+const DEFAULT_DISCOVERY_MAX_CHANGE_PERCENT = 300;
+
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -49,6 +52,118 @@ function toBigIntOrNull(value: number | undefined): bigint | null {
   }
 
   return BigInt(Math.trunc(value));
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  return null;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function extractExchange(raw: unknown): string | null {
+  const record = toRecord(raw);
+  if (!record) {
+    return null;
+  }
+
+  const exchangeCandidate = record.exchange ?? record.exchangeShortName ?? record.market;
+  return typeof exchangeCandidate === "string" && exchangeCandidate.trim().length > 0
+    ? exchangeCandidate.trim().toUpperCase()
+    : null;
+}
+
+function inferIsOtc(ticker: string, exchange: string | null): boolean {
+  const normalizedTicker = ticker.trim().toUpperCase();
+  const normalizedExchange = exchange?.trim().toUpperCase() ?? "";
+
+  if (normalizedExchange.includes("OTC")) {
+    return true;
+  }
+
+  return normalizedTicker.endsWith(".OTC") || normalizedTicker.endsWith(".PK");
+}
+
+function normalizeQualityFilters(options: ListDiscoveryCandidatesOptions): Required<Pick<
+  ListDiscoveryCandidatesOptions,
+  "excludeLowPrice" | "excludeOtc"
+>> &
+  Pick<
+    ListDiscoveryCandidatesOptions,
+    "minPrice" | "minVolume" | "minMarketCap" | "maxChangePercent" | "exchanges"
+  > {
+  return {
+    minPrice: options.minPrice ?? DEFAULT_DISCOVERY_MIN_PRICE,
+    minVolume: options.minVolume,
+    minMarketCap: options.minMarketCap,
+    maxChangePercent: options.maxChangePercent ?? DEFAULT_DISCOVERY_MAX_CHANGE_PERCENT,
+    exchanges: options.exchanges,
+    excludeOtc: options.excludeOtc ?? true,
+    excludeLowPrice: options.excludeLowPrice ?? true,
+  };
+}
+
+function passesDiscoveryQualityFilters(
+  item: DiscoveryCandidatesResult["items"][number],
+  options: ListDiscoveryCandidatesOptions,
+): boolean {
+  const filters = normalizeQualityFilters(options);
+  const price = toNumberOrNull(item.price);
+  const volume = toNumberOrNull(item.volume);
+  const marketCap = toNumberOrNull(item.marketCap);
+  const changePercent = toNumberOrNull(item.changePercent);
+  const exchange = extractExchange(item.raw);
+  const isOtc = inferIsOtc(item.ticker, exchange);
+
+  if (filters.excludeLowPrice && filters.minPrice != null) {
+    if (price == null || price < filters.minPrice) {
+      return false;
+    }
+  }
+
+  if (filters.minVolume != null) {
+    if (volume == null || volume < filters.minVolume) {
+      return false;
+    }
+  }
+
+  if (filters.minMarketCap != null) {
+    if (marketCap == null || marketCap < filters.minMarketCap) {
+      return false;
+    }
+  }
+
+  if (filters.maxChangePercent != null && changePercent != null) {
+    if (Math.abs(changePercent) > filters.maxChangePercent) {
+      return false;
+    }
+  }
+
+  if (filters.excludeOtc && isOtc) {
+    return false;
+  }
+
+  if (filters.exchanges && filters.exchanges.length > 0) {
+    if (!exchange) {
+      return false;
+    }
+
+    const allowed = new Set(filters.exchanges.map((value) => value.trim().toUpperCase()));
+    if (!allowed.has(exchange)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export async function ingestMarketDiscovery(
@@ -145,10 +260,13 @@ export async function listDiscoveryCandidates(
 ): Promise<DiscoveryCandidatesResult> {
   const normalizedCategory = assertNonBlank(category, "category").toUpperCase();
 
-  const items = await listLatestDiscoveryByCategory(
+  const latestBatch = await listLatestDiscoveryByCategory(
     normalizedCategory,
-    normalizeListLimit(options.limit),
+    normalizeListLimit(options.limit, 1000),
   );
+
+  const filteredItems = latestBatch.filter((item) => passesDiscoveryQualityFilters(item, options));
+  const items = filteredItems.slice(0, normalizeListLimit(options.limit));
 
   return {
     category: normalizedCategory,

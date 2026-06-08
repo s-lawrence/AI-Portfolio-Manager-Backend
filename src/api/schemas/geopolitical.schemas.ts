@@ -14,6 +14,7 @@ export const geopoliticalDefaultRiskBodySchema = z.object({
   to: z.coerce.date().optional(),
   maxRecordsPerQuery: optionalLimitSchema,
   maxRecords: optionalLimitSchema,
+  mode: z.enum(["quick", "full"]).optional(),
   queries: z.array(z.string().trim().min(1)).optional(),
   includeDefaults: booleanQuerySchema.optional(),
 });

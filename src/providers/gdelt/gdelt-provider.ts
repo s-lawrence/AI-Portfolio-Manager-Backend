@@ -3,22 +3,38 @@ import {
   ProviderGeopoliticalEvent,
   ProviderGeopoliticalSearchOptions,
 } from "../types";
-import { GdeltJsonClient, GDELT_PROVIDER_NAME, GdeltClient } from "./gdelt-client";
+import { GdeltClient, GdeltJsonClient, GDELT_PROVIDER_NAME } from "./gdelt-client";
 import { GdeltDocArticle, GdeltDocResponse } from "./gdelt.types";
 
-const DEFAULT_QUERY_LIMIT = 25;
+const DEFAULT_QUERY_LIMIT = 10;
 const MAX_QUERY_LIMIT = 100;
 
-const DEFAULT_GLOBAL_RISK_QUERIES = [
+const DEFAULT_GLOBAL_RISK_QUERIES_FULL = [
   "geopolitical risk",
-  "war OR conflict OR sanctions",
+  "sanctions OR trade war OR tariffs",
+  "war OR conflict",
   "oil supply disruption OR energy crisis",
-  "central bank OR inflation OR recession",
-  "trade war OR tariffs",
-  "cyber attack OR critical infrastructure",
+  "Federal Reserve OR inflation OR recession",
   "Canada economy OR Canadian dollar",
-  "United States economy OR Federal Reserve",
 ] as const;
+
+const DEFAULT_GLOBAL_RISK_QUERIES_QUICK = [
+  "geopolitical risk OR sanctions OR conflict",
+  "Federal Reserve OR inflation OR oil prices",
+] as const;
+
+export interface GdeltDocQueryAuditResult {
+  query: string;
+  url: string;
+  statusCode: number;
+  elapsedMs: number;
+  rawTopLevelKeys: string[];
+  articleCount: number;
+  firstArticleKeys: string[];
+  mappedEventCount: number;
+  retryAttempted: boolean;
+  warnings: string[];
+}
 
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
@@ -238,6 +254,86 @@ function mapDocArticle(
 export class GdeltProvider implements GeopoliticalProvider {
   constructor(private readonly client: GdeltJsonClient = new GdeltClient()) {}
 
+  getDefaultQueries(mode: "quick" | "full" = "full"): string[] {
+    return mode === "quick"
+      ? [...DEFAULT_GLOBAL_RISK_QUERIES_QUICK]
+      : [...DEFAULT_GLOBAL_RISK_QUERIES_FULL];
+  }
+
+  buildDocQueryParams(options: ProviderGeopoliticalSearchOptions): {
+    to: Date;
+    from: Date;
+    perQueryLimit: number;
+  } {
+    const to = options.to ?? new Date();
+    const from = options.from ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
+    const perQueryLimit = normalizeLimit(
+      options.maxRecordsPerQuery ?? options.maxRecords,
+      DEFAULT_QUERY_LIMIT,
+    );
+
+    return { to, from, perQueryLimit };
+  }
+
+  async auditDocQuery(
+    options: ProviderGeopoliticalSearchOptions,
+  ): Promise<GdeltDocQueryAuditResult> {
+    const query = assertNonBlank(options.query ?? "", "query");
+    const { to, from, perQueryLimit } = this.buildDocQueryParams(options);
+    const queryParams = {
+      query,
+      mode: "ArtList",
+      format: "json",
+      maxrecords: perQueryLimit,
+      startdatetime: formatGdeltDate(from),
+      enddatetime: formatGdeltDate(to),
+      sort: "HybridRel",
+    };
+
+    if (!(this.client instanceof GdeltClient)) {
+      const payload = await this.client.getJson<GdeltDocResponse>("/doc/doc", queryParams);
+      const articles = Array.isArray(payload.articles) ? payload.articles : [];
+      const mappedEventCount = articles
+        .map((article) => mapDocArticle(query, article))
+        .filter((item): item is ProviderGeopoliticalEvent => item !== null)
+        .length;
+
+      return {
+        query,
+        url: "",
+        statusCode: 200,
+        elapsedMs: 0,
+        rawTopLevelKeys: typeof payload === "object" && payload !== null ? Object.keys(payload).sort() : [],
+        articleCount: articles.length,
+        firstArticleKeys: articles[0] ? Object.keys(articles[0]).sort() : [],
+        mappedEventCount,
+        retryAttempted: false,
+        warnings: articles.length === 0 ? ["No articles returned for query."] : [],
+      };
+    }
+
+    const response = await this.client.getJsonWithMeta<GdeltDocResponse>("/doc/doc", queryParams);
+    const payload = response.data;
+    const articles = Array.isArray(payload.articles) ? payload.articles : [];
+    const mappedEventCount = articles
+      .map((article) => mapDocArticle(query, article))
+      .filter((item): item is ProviderGeopoliticalEvent => item !== null)
+      .length;
+
+    return {
+      query,
+      url: response.url,
+      statusCode: response.statusCode,
+      elapsedMs: response.elapsedMs,
+      rawTopLevelKeys: typeof payload === "object" && payload !== null ? Object.keys(payload).sort() : [],
+      articleCount: articles.length,
+      firstArticleKeys: articles[0] ? Object.keys(articles[0]).sort() : [],
+      mappedEventCount,
+      retryAttempted: response.retryAttempted,
+      warnings: articles.length === 0 ? ["No articles returned for query."] : [],
+    };
+  }
+
   async searchDocArticles(
     options: ProviderGeopoliticalSearchOptions,
   ): Promise<ProviderGeopoliticalEvent[]> {
@@ -246,12 +342,7 @@ export class GdeltProvider implements GeopoliticalProvider {
       throw new Error("At least one GDELT query is required.");
     }
 
-    const to = options.to ?? new Date();
-    const from = options.from ?? new Date(to.getTime() - 24 * 60 * 60 * 1000);
-    const perQueryLimit = normalizeLimit(
-      options.maxRecordsPerQuery ?? options.maxRecords,
-      DEFAULT_QUERY_LIMIT,
-    );
+    const { to, from, perQueryLimit } = this.buildDocQueryParams(options);
 
     const all: ProviderGeopoliticalEvent[] = [];
 
@@ -298,9 +389,11 @@ export class GdeltProvider implements GeopoliticalProvider {
   async getDefaultGlobalRiskEvents(
     options: Omit<ProviderGeopoliticalSearchOptions, "query" | "queries"> = {},
   ): Promise<ProviderGeopoliticalEvent[]> {
+    const mode = options.mode ?? "full";
+
     const events = await this.searchDocArticles({
       ...options,
-      queries: [...DEFAULT_GLOBAL_RISK_QUERIES],
+      queries: this.getDefaultQueries(mode),
       maxRecordsPerQuery: normalizeLimit(options.maxRecordsPerQuery, DEFAULT_QUERY_LIMIT),
     });
 
@@ -309,4 +402,8 @@ export class GdeltProvider implements GeopoliticalProvider {
   }
 }
 
-export { DEFAULT_GLOBAL_RISK_QUERIES, GDELT_PROVIDER_NAME };
+export {
+  DEFAULT_GLOBAL_RISK_QUERIES_FULL,
+  DEFAULT_GLOBAL_RISK_QUERIES_QUICK,
+  GDELT_PROVIDER_NAME,
+};

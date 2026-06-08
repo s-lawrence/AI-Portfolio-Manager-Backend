@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import { fmpAnalystProvider } from "../providers/fmp";
+import { ProviderConfigurationError } from "../providers/errors";
 import {
   ProviderAnalystSnapshot,
   normalizeProviderTickerOrThrow,
@@ -20,6 +21,7 @@ import {
   IngestTickerAnalystDataResult,
   IngestWatchlistAnalystDataResult,
 } from "../types/services";
+import { FmpAnalystTickerAuditResult } from "../providers/fmp/fmp-analyst.provider";
 import { normalizeListLimit } from "../types/common";
 import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getPortfolioOverview } from "./portfolios.service";
@@ -197,15 +199,51 @@ function mergeSnapshotParts(
 }
 
 async function safeOptionalCall<T>(
-  warnings: string[],
   label: string,
   callback: () => Promise<T>,
-): Promise<T | null> {
+): Promise<{
+  value: T | null;
+  status: IngestTickerAnalystDataResult["priceTargetSummaryStatus"];
+  warnings: string[];
+}> {
   try {
-    return await callback();
+    const value = await callback();
+
+    if (value == null) {
+      return {
+        value: null,
+        status: "EMPTY",
+        warnings: [`${label} returned no data.`],
+      };
+    }
+
+    if (Array.isArray(value) && value.length === 0) {
+      return {
+        value,
+        status: "EMPTY",
+        warnings: [`${label} returned no records.`],
+      };
+    }
+
+    return {
+      value,
+      status: "SUCCESS",
+      warnings: [],
+    };
   } catch (error) {
-    warnings.push(`${label} unavailable: ${toErrorReason(error)}`);
-    return null;
+    if (error instanceof ProviderConfigurationError) {
+      return {
+        value: null,
+        status: "ENTITLEMENT",
+        warnings: [`${label} entitlement/configuration issue: ${toErrorReason(error)}`],
+      };
+    }
+
+    return {
+      value: null,
+      status: "ERROR",
+      warnings: [`${label} unavailable: ${toErrorReason(error)}`],
+    };
   }
 }
 
@@ -213,7 +251,12 @@ export async function ingestTickerAnalystData(
   ticker: string,
 ): Promise<IngestTickerAnalystDataResult> {
   const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
-  const warnings: string[] = [];
+  const subsourceWarnings: IngestTickerAnalystDataResult["subsourceWarnings"] = {
+    priceTargetSummary: [],
+    priceTargetConsensus: [],
+    analystRatings: [],
+    analystActions: [],
+  };
 
   await ensureStockExists(normalizedTicker);
 
@@ -225,21 +268,25 @@ export async function ingestTickerAnalystData(
   const latestPriceSnapshot = await getLatestMarketSnapshotForStock(stock.id);
   const latestPrice = latestPriceSnapshot?.price ?? null;
 
-  const summary = await safeOptionalCall(warnings, "Price-target summary", () =>
+  const summaryCall = await safeOptionalCall("Price-target summary", () =>
     fmpAnalystProvider.getPriceTargetSummary(normalizedTicker),
   );
-  const consensus = await safeOptionalCall(warnings, "Price-target consensus", () =>
+  const consensusCall = await safeOptionalCall("Price-target consensus", () =>
     fmpAnalystProvider.getPriceTargetConsensus(normalizedTicker),
   );
-  const ratings = await safeOptionalCall(warnings, "Analyst ratings", () =>
+  const ratingsCall = await safeOptionalCall("Analyst ratings", () =>
     fmpAnalystProvider.getAnalystRatings(normalizedTicker),
   );
 
+  subsourceWarnings.priceTargetSummary.push(...summaryCall.warnings);
+  subsourceWarnings.priceTargetConsensus.push(...consensusCall.warnings);
+  subsourceWarnings.analystRatings.push(...ratingsCall.warnings);
+
   const mergedSnapshot = mergeSnapshotParts(
     normalizedTicker,
-    summary,
-    consensus,
-    ratings,
+    summaryCall.value,
+    consensusCall.value,
+    ratingsCall.value,
     latestPrice,
   );
 
@@ -271,18 +318,27 @@ export async function ingestTickerAnalystData(
     snapshotsCreated = snapshotResult.created ? 1 : 0;
     snapshotsUpdated = snapshotResult.updated ? 1 : 0;
   } else {
-    warnings.push(`No analyst snapshot data returned for ticker ${normalizedTicker}.`);
+    if (
+      summaryCall.status === "EMPTY" &&
+      consensusCall.status === "EMPTY" &&
+      ratingsCall.status === "EMPTY"
+    ) {
+      subsourceWarnings.priceTargetSummary.push(
+        `No analyst snapshot data returned for ticker ${normalizedTicker}.`,
+      );
+    }
   }
 
-  const actions = await safeOptionalCall(warnings, "Upgrades/downgrades", () =>
+  const actionsCall = await safeOptionalCall("Upgrades/downgrades", () =>
     fmpAnalystProvider.getUpgradesDowngrades(normalizedTicker, { limit: 100 }),
   );
+  subsourceWarnings.analystActions.push(...actionsCall.warnings);
 
   let actionsCreated = 0;
   let actionsUpdated = 0;
 
-  if (actions && actions.length > 0) {
-    for (const action of actions) {
+  if (actionsCall.value && actionsCall.value.length > 0) {
+    for (const action of actionsCall.value) {
       const eventResult = await upsertAnalystActionEvent({
         stockId: stock.id,
         source: action.source ?? "FMP",
@@ -307,9 +363,18 @@ export async function ingestTickerAnalystData(
         actionsUpdated += 1;
       }
     }
-  } else {
-    warnings.push(`No analyst action events returned for ticker ${normalizedTicker}.`);
+  } else if (actionsCall.status === "SUCCESS") {
+    subsourceWarnings.analystActions.push(
+      `No analyst action events returned for ticker ${normalizedTicker}.`,
+    );
   }
+
+  const warnings = [
+    ...subsourceWarnings.priceTargetSummary,
+    ...subsourceWarnings.priceTargetConsensus,
+    ...subsourceWarnings.analystRatings,
+    ...subsourceWarnings.analystActions,
+  ];
 
   return {
     ticker: normalizedTicker,
@@ -317,8 +382,23 @@ export async function ingestTickerAnalystData(
     snapshotsUpdated,
     actionsCreated,
     actionsUpdated,
+    priceTargetSummaryStatus: summaryCall.status,
+    priceTargetConsensusStatus: consensusCall.status,
+    analystRatingsStatus: ratingsCall.status,
+    analystActionsStatus:
+      actionsCall.status === "SUCCESS" && actionsCreated + actionsUpdated === 0
+        ? "EMPTY"
+        : actionsCall.status,
+    subsourceWarnings,
     warnings,
   };
+}
+
+export async function getFmpAnalystAudit(
+  ticker: string,
+): Promise<FmpAnalystTickerAuditResult> {
+  const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
+  return fmpAnalystProvider.auditTicker(normalizedTicker);
 }
 
 export async function ingestPortfolioAnalystData(

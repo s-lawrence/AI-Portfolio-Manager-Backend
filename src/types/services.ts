@@ -578,6 +578,16 @@ export interface IngestTickerAnalystDataResult {
   snapshotsUpdated: number;
   actionsCreated: number;
   actionsUpdated: number;
+  priceTargetSummaryStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  priceTargetConsensusStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  analystRatingsStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  analystActionsStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  subsourceWarnings: {
+    priceTargetSummary: string[];
+    priceTargetConsensus: string[];
+    analystRatings: string[];
+    analystActions: string[];
+  };
   warnings: string[];
 }
 
@@ -632,6 +642,13 @@ export interface ListDiscoveryCandidatesOptions {
   limit?: number;
   from?: Date;
   to?: Date;
+  minPrice?: number;
+  minVolume?: number;
+  minMarketCap?: number;
+  maxChangePercent?: number;
+  exchanges?: string[];
+  excludeOtc?: boolean;
+  excludeLowPrice?: boolean;
 }
 
 export interface GdeltIngestionOptions {
@@ -646,6 +663,14 @@ export interface GdeltDefaultRiskIngestionOptions {
   maxRecords?: number;
   maxRecordsPerQuery?: number;
   queries?: string[];
+  mode?: "quick" | "full";
+}
+
+export interface GdeltQueryFailureDetail {
+  query: string;
+  reason: string;
+  statusCode?: number;
+  retryAttempted?: boolean;
 }
 
 export interface IngestGeopoliticalQueryResult {
@@ -666,8 +691,21 @@ export interface IngestDefaultGdeltRiskSetResult {
   eventsUpdated: number;
   eventsSkipped: number;
   warnings: string[];
-  failedQueries: Array<{ query: string; reason: string }>;
+  failedQueries: GdeltQueryFailureDetail[];
   results: IngestGeopoliticalQueryResult[];
+}
+
+export interface GdeltQueryAuditResult {
+  query: string;
+  url: string;
+  statusCode: number;
+  elapsedMs: number;
+  rawTopLevelKeys: string[];
+  articleCount: number;
+  firstArticleKeys: string[];
+  mappedEventCount: number;
+  retryAttempted: boolean;
+  warnings: string[];
 }
 
 export interface LatestGeopoliticalContextResult {

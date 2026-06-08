@@ -15,11 +15,16 @@ function createMockClient(
 
 describe("gdelt.provider", () => {
   it("maps GDELT DOC articles and sentiment from tone", async () => {
+    let capturedStartDatetime: unknown;
+    let capturedEndDatetime: unknown;
+
     const provider = new GdeltProvider(
       createMockClient((path, query) => {
         expect(path).toBe("/doc/doc");
         expect(query?.mode).toBe("ArtList");
         expect(query?.format).toBe("json");
+        capturedStartDatetime = query?.startdatetime;
+        capturedEndDatetime = query?.enddatetime;
 
         return {
           articles: [
@@ -64,6 +69,8 @@ describe("gdelt.provider", () => {
     expect(events[0]?.sentiment).toBe("NEUTRAL");
     expect(events[1]?.sentiment).toBe("NEGATIVE");
     expect(events[2]?.sentiment).toBe("POSITIVE");
+    expect(String(capturedStartDatetime)).toMatch(/^\d{14}$/);
+    expect(String(capturedEndDatetime)).toMatch(/^\d{14}$/);
   });
 
   it("skips items missing title/date and dedupes by URL", async () => {
@@ -133,5 +140,33 @@ describe("gdelt.provider", () => {
 
     expect(calledQueries.length).toBeGreaterThan(3);
     expect(events.length).toBeGreaterThan(0);
+  });
+
+  it("uses reduced quick-mode query set for default global risk events", async () => {
+    const calledQueries: string[] = [];
+
+    const provider = new GdeltProvider(
+      createMockClient((_path, query) => {
+        calledQueries.push(String(query?.query ?? ""));
+
+        return {
+          articles: [
+            {
+              title: `Headline for ${query?.query}`,
+              url: `https://example.com/${encodeURIComponent(String(query?.query ?? ""))}`,
+              seendate: "20260608103000",
+            },
+          ],
+        };
+      }),
+    );
+
+    await provider.getDefaultGlobalRiskEvents({
+      mode: "quick",
+      maxRecordsPerQuery: 3,
+      maxRecords: 10,
+    });
+
+    expect(calledQueries).toHaveLength(2);
   });
 });

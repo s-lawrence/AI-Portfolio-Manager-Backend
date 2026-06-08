@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../../src/app";
+import { fmpAnalystProvider } from "../../src/providers/fmp";
+import { gdeltProvider } from "../../src/providers/gdelt";
 import { recordPriceSnapshot } from "../../src/services/market-data.service";
 import { getUserByEmail, updateUser } from "../../src/repositories/users.repository";
 import { createTestStock } from "../../src/test/factories";
@@ -175,6 +177,91 @@ describe("API dev demo-context route", () => {
     });
 
     expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("returns FMP analyst audit payload in non-production", async () => {
+    process.env.NODE_ENV = "test";
+
+    vi.spyOn(fmpAnalystProvider, "auditTicker").mockResolvedValue({
+      ticker: "AAPL",
+      priceTargetSummary: {
+        endpointAttempted: ["/stable/price-target-summary"],
+        selectedEndpoint: "/stable/price-target-summary",
+        status: "SUCCESS",
+        itemCount: 1,
+        firstItemKeys: ["symbol", "targetConsensus"],
+        mappedFieldSummary: { hasTargetConsensus: true },
+      },
+      priceTargetConsensus: {
+        endpointAttempted: ["/stable/price-target-consensus"],
+        selectedEndpoint: "/stable/price-target-consensus",
+        status: "SUCCESS",
+        itemCount: 1,
+        firstItemKeys: ["symbol", "targetConsensus"],
+        mappedFieldSummary: { hasTargetConsensus: true },
+      },
+      analystRatings: {
+        endpointAttempted: ["/stable/recommendation-trends"],
+        selectedEndpoint: "/stable/recommendation-trends",
+        status: "EMPTY",
+        itemCount: 0,
+        firstItemKeys: [],
+        mappedFieldSummary: { mapped: false },
+      },
+      analystActions: {
+        endpointAttempted: ["/stable/upgrades-downgrades"],
+        selectedEndpoint: "/stable/upgrades-downgrades",
+        status: "EMPTY",
+        itemCount: 0,
+        firstItemKeys: [],
+        mappedFieldSummary: { mappedActionCount: 0 },
+      },
+    });
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/dev/fmp/analyst-audit/AAPL",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.ticker).toBe("AAPL");
+    expect(body.data.priceTargetSummary.status).toBe("SUCCESS");
+
+    await app.close();
+  });
+
+  it("returns GDELT query audit payload in non-production", async () => {
+    process.env.NODE_ENV = "test";
+
+    vi.spyOn(gdeltProvider, "auditDocQuery").mockResolvedValue({
+      query: "geopolitical risk",
+      url: "https://api.gdeltproject.org/api/v2/doc/doc?query=geopolitical%20risk",
+      statusCode: 200,
+      elapsedMs: 75,
+      rawTopLevelKeys: ["articles", "status"],
+      articleCount: 4,
+      firstArticleKeys: ["domain", "seendate", "title", "url"],
+      mappedEventCount: 3,
+      retryAttempted: false,
+      warnings: [],
+    });
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/dev/gdelt/query-audit?query=geopolitical%20risk&maxRecords=5",
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.query).toBe("geopolitical risk");
+    expect(body.data.articleCount).toBe(4);
+
     await app.close();
   });
 });

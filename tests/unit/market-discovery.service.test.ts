@@ -125,4 +125,77 @@ describe("market-discovery.service", () => {
     expect(result.items[0]?.ticker).toBe("TSTACT02");
     expect(result.items[0]?.capturedAt.toISOString()).toContain("2026-06-10");
   });
+
+  it("filters out candidates below minPrice", async () => {
+    vi.spyOn(fmpAnalystProvider, "getMarketMovers").mockResolvedValue([
+      {
+        ticker: "TSTDPRC1",
+        companyName: "Low Price Candidate",
+        price: 1.25,
+        changePercent: 8,
+        volume: 600_000,
+        marketCap: 400_000_000,
+        category: "GAINERS",
+        capturedAt: new Date("2026-06-10T12:00:00.000Z"),
+        source: "FMP",
+        raw: { exchange: "NASDAQ" },
+      },
+      {
+        ticker: "TSTDPRC2",
+        companyName: "Higher Price Candidate",
+        price: 18,
+        changePercent: 5,
+        volume: 900_000,
+        marketCap: 1_400_000_000,
+        category: "GAINERS",
+        capturedAt: new Date("2026-06-10T12:00:00.000Z"),
+        source: "FMP",
+        raw: { exchange: "NASDAQ" },
+      },
+    ]);
+
+    await ingestMarketDiscovery("GAINERS", { limit: 10 });
+    const result = await listDiscoveryCandidates("GAINERS", { minPrice: 5, limit: 10 });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.ticker).toBe("TSTDPRC2");
+  });
+
+  it("filters out extreme change percent candidates", async () => {
+    vi.spyOn(fmpAnalystProvider, "getMarketMovers").mockResolvedValue([
+      {
+        ticker: "TSTDCHG1",
+        companyName: "Extreme Move",
+        price: 12,
+        changePercent: 680,
+        volume: 800_000,
+        marketCap: 2_000_000_000,
+        category: "GAINERS",
+        capturedAt: new Date("2026-06-10T12:00:00.000Z"),
+        source: "FMP",
+        raw: { exchange: "NASDAQ" },
+      },
+      {
+        ticker: "TSTDCHG2",
+        companyName: "Reasonable Move",
+        price: 22,
+        changePercent: 24,
+        volume: 1_200_000,
+        marketCap: 3_500_000_000,
+        category: "GAINERS",
+        capturedAt: new Date("2026-06-10T12:00:00.000Z"),
+        source: "FMP",
+        raw: { exchange: "NASDAQ" },
+      },
+    ]);
+
+    await ingestMarketDiscovery("GAINERS", { limit: 10 });
+    const result = await listDiscoveryCandidates("GAINERS", {
+      maxChangePercent: 300,
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.ticker).toBe("TSTDCHG2");
+  });
 });

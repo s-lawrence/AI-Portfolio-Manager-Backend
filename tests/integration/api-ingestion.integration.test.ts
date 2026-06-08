@@ -1782,22 +1782,7 @@ describe("API ingestion routes", () => {
       ];
     });
 
-    vi.spyOn(gdeltProvider, "getDefaultGlobalRiskEvents").mockResolvedValue([
-      {
-        provider: "GDELT",
-        title: "Default global risk headline",
-        url: "https://example.com/default-risk-headline",
-        domain: "example.com",
-        sourceCountry: "CA",
-        language: "English",
-        publishedAt: new Date("2026-06-12T01:00:00.000Z"),
-        category: "GEOPOLITICAL",
-        theme: "GLOBAL_RISK",
-        tone: -1.2,
-        sentiment: "NEGATIVE",
-        raw: { source: "default" },
-      },
-    ]);
+    vi.spyOn(gdeltProvider, "getDefaultQueries").mockReturnValue(["geopolitical risk"]);
 
     const app = buildApp();
 
@@ -1886,20 +1871,25 @@ describe("API ingestion routes", () => {
     vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
     vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
 
-    vi.spyOn(gdeltProvider, "getDefaultGlobalRiskEvents").mockResolvedValue([
+    vi.spyOn(gdeltProvider, "getDefaultQueries").mockReturnValue([
+      "geopolitical risk OR sanctions OR conflict",
+    ]);
+
+    vi.spyOn(gdeltProvider, "searchDocArticles").mockResolvedValue([
       {
         provider: "GDELT",
-        title: "Sanctions pressure energy markets",
-        url: "https://example.com/sanctions-energy-markets",
+        title: "Geopolitical signal",
+        url: "https://example.com/geopolitical-signal",
         domain: "example.com",
         sourceCountry: "US",
         language: "English",
-        publishedAt: new Date("2026-06-12T03:00:00.000Z"),
+        publishedAt: new Date("2026-06-12T00:00:00.000Z"),
+        query: "geopolitical risk OR sanctions OR conflict",
         category: "GEOPOLITICAL",
         theme: "GLOBAL_RISK",
-        tone: -1.1,
-        sentiment: "NEGATIVE",
-        raw: { source: "default" },
+        tone: -0.2,
+        sentiment: "NEUTRAL",
+        raw: { sample: true },
       },
     ]);
 

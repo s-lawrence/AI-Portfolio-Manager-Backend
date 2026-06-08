@@ -1349,6 +1349,7 @@ describe("real-data-ingestion.service", () => {
 
     expect(geopoliticalSpy).toHaveBeenCalledWith(
       expect.objectContaining({
+        mode: "quick",
         maxRecordsPerQuery: 20,
       }),
     );

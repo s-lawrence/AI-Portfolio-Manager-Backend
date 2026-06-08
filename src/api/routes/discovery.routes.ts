@@ -24,6 +24,13 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
     const result = await runService(() =>
       ingestMarketDiscovery(params.category, {
         limit: body.limit,
+        minPrice: body.minPrice,
+        minVolume: body.minVolume,
+        minMarketCap: body.minMarketCap,
+        maxChangePercent: body.maxChangePercent,
+        exchanges: body.exchanges,
+        excludeOtc: body.excludeOtc,
+        excludeLowPrice: body.excludeLowPrice,
       }),
     );
 
@@ -38,6 +45,13 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
     const result = await runService(() =>
       ingestDefaultMarketDiscoverySet({
         limit: body.limit,
+        minPrice: body.minPrice,
+        minVolume: body.minVolume,
+        minMarketCap: body.minMarketCap,
+        maxChangePercent: body.maxChangePercent,
+        exchanges: body.exchanges,
+        excludeOtc: body.excludeOtc,
+        excludeLowPrice: body.excludeLowPrice,
       }),
     );
 
@@ -51,6 +65,13 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
     const result = await runService(() =>
       listDiscoveryCandidates(params.category, {
         limit: query.limit,
+        minPrice: query.minPrice,
+        minVolume: query.minVolume,
+        minMarketCap: query.minMarketCap,
+        maxChangePercent: query.maxChangePercent,
+        exchanges: query.exchanges,
+        excludeOtc: query.excludeOtc,
+        excludeLowPrice: query.excludeLowPrice,
       }),
     );
 

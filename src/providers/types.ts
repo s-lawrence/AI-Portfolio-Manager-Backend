@@ -171,6 +171,8 @@ export interface ProviderAnalystActionEvent {
 export interface ProviderMarketDiscoveryItem {
   ticker: string;
   companyName?: string;
+  exchange?: string;
+  isOtc?: boolean;
   price?: number;
   changePercent?: number;
   volume?: number;
@@ -218,6 +220,7 @@ export interface ProviderGeopoliticalSearchOptions {
   to?: Date;
   maxRecords?: number;
   maxRecordsPerQuery?: number;
+  mode?: "quick" | "full";
 }
 
 export interface ProviderTreasuryRate {

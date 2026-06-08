@@ -1,17 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { gdeltProvider } from "../../src/providers/gdelt";
+import { ProviderRequestError } from "../../src/providers/errors";
 import {
   getGeopoliticalSummary,
   getLatestGeopoliticalContext,
   ingestDefaultGdeltRiskSet,
   ingestGdeltQuery,
+  runGdeltQueryAudit,
 } from "../../src/services/geopolitical-ingestion.service";
+import { env } from "../../src/config/env";
 
 describe("geopolitical-ingestion.service", () => {
+  const originalDelayMs = env.GDELT_QUERY_DELAY_MS;
+
   afterEach(() => {
+    env.GDELT_QUERY_DELAY_MS = originalDelayMs;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
 
   it("ingests a single query and upserts events", async () => {
     vi.spyOn(gdeltProvider, "searchDocArticles").mockResolvedValue([
@@ -44,6 +52,8 @@ describe("geopolitical-ingestion.service", () => {
   });
 
   it("continues default risk set when one query fails", async () => {
+    env.GDELT_QUERY_DELAY_MS = 0;
+
     vi.spyOn(gdeltProvider, "searchDocArticles").mockImplementation(async (options) => {
       if (options.query?.includes("sanctions")) {
         throw new Error("query failed");
@@ -75,6 +85,8 @@ describe("geopolitical-ingestion.service", () => {
   });
 
   it("returns latest context and bounded summary", async () => {
+    env.GDELT_QUERY_DELAY_MS = 0;
+
     vi.spyOn(gdeltProvider, "searchDocArticles").mockResolvedValue([
       {
         provider: "GDELT",
@@ -116,5 +128,94 @@ describe("geopolitical-ingestion.service", () => {
     expect(summary.totalEvents).toBeGreaterThanOrEqual(2);
     expect(summary.topHeadlines.length).toBeGreaterThan(0);
     expect(summary.countsByCategory.length).toBeGreaterThan(0);
+  });
+
+  it("runs default-set queries sequentially with configured delay", async () => {
+    env.GDELT_QUERY_DELAY_MS = 1;
+    const originalDelay = env.GDELT_QUERY_DELAY_MS;
+
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    vi.spyOn(gdeltProvider, "searchDocArticles").mockResolvedValue([
+      {
+        provider: "GDELT",
+        title: "Sequential query result",
+        url: "https://example.com/sequential-query-result",
+        publishedAt: new Date("2026-06-08T12:00:00.000Z"),
+      },
+    ]);
+
+    const runPromise = ingestDefaultGdeltRiskSet({
+      queries: ["geopolitical risk", "Federal Reserve OR inflation"],
+      maxRecordsPerQuery: 5,
+    });
+
+    await runPromise;
+
+    expect(timeoutSpy).toHaveBeenCalled();
+    expect(gdeltProvider.searchDocArticles).toHaveBeenCalledTimes(2);
+    expect(gdeltProvider.searchDocArticles).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ query: "geopolitical risk" }),
+    );
+    expect(gdeltProvider.searchDocArticles).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ query: "Federal Reserve OR inflation" }),
+    );
+
+    env.GDELT_QUERY_DELAY_MS = originalDelay;
+  });
+
+  it("captures structured failed query details for 429 failures", async () => {
+    env.GDELT_QUERY_DELAY_MS = 0;
+
+    vi.spyOn(gdeltProvider, "searchDocArticles").mockImplementation(async (options) => {
+      if (String(options.query).includes("geopolitical")) {
+        throw new ProviderRequestError("GDELT 2.0", "GDELT 2.0 request failed with status 429.", {
+          endpoint: "/doc/doc",
+          statusCode: 429,
+          cause: {
+            retryAttempted: true,
+          },
+        });
+      }
+
+      return [];
+    });
+
+    const result = await ingestDefaultGdeltRiskSet({
+      queries: ["geopolitical risk", "inflation"],
+      maxRecordsPerQuery: 5,
+    });
+
+    expect(result.queriesFailed).toBe(1);
+    expect(result.failedQueries[0]).toMatchObject({
+      query: "geopolitical risk",
+      statusCode: 429,
+      retryAttempted: true,
+    });
+  });
+
+  it("returns mapped GDELT query audit details", async () => {
+    vi.spyOn(gdeltProvider, "auditDocQuery").mockResolvedValue({
+      query: "geopolitical risk",
+      url: "https://api.gdeltproject.org/api/v2/doc/doc?query=geopolitical%20risk",
+      statusCode: 200,
+      elapsedMs: 112,
+      rawTopLevelKeys: ["articles", "status"],
+      articleCount: 3,
+      firstArticleKeys: ["domain", "seendate", "title", "url"],
+      mappedEventCount: 2,
+      retryAttempted: false,
+      warnings: [],
+    });
+
+    const audit = await runGdeltQueryAudit("geopolitical risk", { maxRecords: 5 });
+
+    expect(audit.query).toBe("geopolitical risk");
+    expect(audit.statusCode).toBe(200);
+    expect(audit.articleCount).toBe(3);
+    expect(audit.mappedEventCount).toBe(2);
+    expect(audit.rawTopLevelKeys).toContain("articles");
   });
 });

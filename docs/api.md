@@ -54,6 +54,8 @@ npm start
 - `POST /api/dev/seed-demo-market-data`
 - `POST /api/dev/seed-demo-market-data?runAnalysis=true`
 - `GET /api/dev/market-data-audit/<TICKER>`
+- `GET /api/dev/fmp/analyst-audit/<TICKER>`
+- `GET /api/dev/gdelt/query-audit?query=<TEXT>&maxRecords=<N>`
 - `POST /api/dev/purge-demo-analytical-data`
 - `POST /api/dev/purge-demo-analytical-data/portfolio/<PORTFOLIO_CUID>`
 - `POST /api/dev/purge-demo-analytical-data/ticker/<TICKER>`
@@ -63,6 +65,8 @@ Purpose:
 - Seeds deterministic local fake market/news/fundamental/earnings data for demo holdings.
 - Optionally runs portfolio analysis immediately when `runAnalysis=true`.
 - Returns a market-data audit payload to diagnose latest-price selection issues for a ticker.
+- Returns an analyst provider audit payload showing endpoint attempts, selected source, and mapping diagnostics.
+- Returns a GDELT query audit payload with raw-shape diagnostics and mapped-count summary.
 - Purges demo/local analytical rows while preserving users, portfolios, holdings, stocks, and preferences.
 
 Availability:
@@ -85,6 +89,14 @@ curl -X POST "http://localhost:4000/api/dev/seed-demo-market-data?runAnalysis=tr
 
 ```bash
 curl http://localhost:4000/api/dev/market-data-audit/AAPL
+```
+
+```bash
+curl http://localhost:4000/api/dev/fmp/analyst-audit/AAPL
+```
+
+```bash
+curl "http://localhost:4000/api/dev/gdelt/query-audit?query=geopolitical%20risk&maxRecords=5"
 ```
 
 ```bash
@@ -410,6 +422,16 @@ curl http://localhost:4000/api/analyst/AAPL/latest
 curl "http://localhost:4000/api/analyst/AAPL/actions?limit=20"
 ```
 
+Analyst ingestion/read responses include subsource diagnostics when available:
+
+- `priceTargetSummaryStatus`
+- `priceTargetConsensusStatus`
+- `analystRatingsStatus`
+- `analystActionsStatus`
+- `subsourceWarnings`
+
+Status values are `SUCCESS`, `EMPTY`, or `FAILED`.
+
 Refresh and read discovery candidates:
 
 ```bash
@@ -427,6 +449,26 @@ curl -X POST http://localhost:4000/api/discovery/fmp/default-set \
 ```bash
 curl "http://localhost:4000/api/discovery/GAINERS?limit=25"
 ```
+
+```bash
+curl "http://localhost:4000/api/discovery/GAINERS?minPrice=5&maxChangePercent=300&excludeOtc=true"
+```
+
+Discovery list filtering parameters:
+
+- `minPrice`
+- `minVolume`
+- `minMarketCap`
+- `maxChangePercent` (applies to absolute percentage change)
+- `exchanges` (CSV or repeated query usage)
+- `excludeOtc`
+- `excludeLowPrice`
+
+Default list guards when omitted:
+
+- `minPrice=5`
+- `maxChangePercent=300`
+- `excludeOtc=true`
 
 Ingest geopolitical/news-event context for one query from GDELT:
 
@@ -447,9 +489,15 @@ Ingest geopolitical/news-event context using the default global-risk query set:
 curl -X POST http://localhost:4000/api/ingestion/gdelt/default-risk-set \
   -H "Content-Type: application/json" \
   -d '{
-    "maxRecordsPerQuery": 25
+    "maxRecordsPerQuery": 25,
+    "mode": "quick"
   }'
 ```
+
+`mode` options:
+
+- `quick`: smaller default query subset intended for routine refreshes.
+- `full`: full default global-risk query set.
 
 Read latest geopolitical events and summary:
 
@@ -540,6 +588,7 @@ Include-flag semantics:
 - `includeEconomics=false` skips FMP economics and omits `economics` from response.
 - `includeAnalystData=false` skips analyst ingestion and omits `analystData` from response.
 - `includeGdelt=false` skips GDELT ingestion and omits `geopolitical` from response.
+- When `includeGdelt=true`, full-refresh uses `mode=quick` for default GDELT query ingestion.
 - `includeBankOfCanada=false` skips BoC macro/FX and omits `bankOfCanada` from response.
 - `includeFred=false` skips FRED macro and omits `fred` from response.
 - If all macro flags are `false`, macro ingestion is skipped and `macro` is omitted.

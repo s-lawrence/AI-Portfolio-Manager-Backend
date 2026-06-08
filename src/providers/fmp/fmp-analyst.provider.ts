@@ -49,6 +49,50 @@ const DISCOVERY_CATEGORY_ENDPOINTS: Record<"GAINERS" | "LOSERS" | "ACTIVE", stri
   ],
 };
 
+const PRICE_TARGET_SUMMARY_ENDPOINTS = [
+  "/stable/price-target-summary",
+  "/price-target-summary",
+] as const;
+
+const PRICE_TARGET_CONSENSUS_ENDPOINTS = [
+  "/stable/price-target-consensus",
+  "/price-target-consensus",
+] as const;
+
+const ANALYST_RATINGS_ENDPOINTS = [
+  "/stable/analyst-ratings",
+  "/analyst-ratings",
+  "/stable/recommendation-trends",
+  "/recommendation-trends",
+] as const;
+
+const UPGRADES_DOWNGRADES_ENDPOINTS = [
+  "/stable/upgrades-downgrades",
+  "/upgrades-downgrades",
+  "/stable/upgrades-downgrades-consensus",
+  "/upgrades-downgrades-consensus",
+] as const;
+
+export type AnalystAuditStatus = "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR";
+
+export interface FmpAnalystSourceAuditResult {
+  endpointAttempted: string[];
+  selectedEndpoint?: string;
+  status: AnalystAuditStatus;
+  itemCount: number;
+  firstItemKeys: string[];
+  mappedFieldSummary: Record<string, unknown>;
+  warning?: string;
+}
+
+export interface FmpAnalystTickerAuditResult {
+  ticker: string;
+  priceTargetSummary: FmpAnalystSourceAuditResult;
+  priceTargetConsensus: FmpAnalystSourceAuditResult;
+  analystRatings: FmpAnalystSourceAuditResult;
+  analystActions: FmpAnalystSourceAuditResult;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -145,6 +189,96 @@ function normalizeLimit(limit?: number): number | undefined {
   return Math.min(normalized, 1000);
 }
 
+function pickFirstFiniteNumber(values: unknown[]): number | undefined {
+  for (const value of values) {
+    const numeric = toFiniteNumber(value);
+    if (numeric !== undefined) {
+      return numeric;
+    }
+  }
+
+  return undefined;
+}
+
+function pickFirstInteger(values: unknown[]): number | undefined {
+  for (const value of values) {
+    const numeric = toInteger(value);
+    if (numeric !== undefined) {
+      return numeric;
+    }
+  }
+
+  return undefined;
+}
+
+function extractTopLevelKeys(item: unknown): string[] {
+  if (!isRecord(item)) {
+    return [];
+  }
+
+  return Object.keys(item).sort();
+}
+
+function mapRecommendationTrendCounts(item: FmpAnalystRatingItem): Partial<ProviderAnalystSnapshot> {
+  const trends = Array.isArray(item.recommendationTrends) ? item.recommendationTrends : undefined;
+  if (!trends || trends.length === 0) {
+    return {};
+  }
+
+  const latest = trends
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .sort((left, right) => {
+      const leftDate = parseDateValue(left.date ?? left.asOfDate)?.getTime() ?? Number.NEGATIVE_INFINITY;
+      const rightDate = parseDateValue(right.date ?? right.asOfDate)?.getTime() ?? Number.NEGATIVE_INFINITY;
+      return rightDate - leftDate;
+    })[0];
+
+  if (!latest) {
+    return {};
+  }
+
+  return {
+    analystCount: pickFirstInteger([
+      latest.analystCount,
+      latest.numberOfAnalysts,
+      latest.totalAnalysts,
+      latest.total,
+    ]),
+    strongBuyCount: pickFirstInteger([
+      latest.strongBuy,
+      latest.strongBuyCount,
+      latest.strong_buy,
+      latest.ratingStrongBuy,
+    ]),
+    buyCount: pickFirstInteger([latest.buy, latest.buyCount, latest.ratingBuy]),
+    holdCount: pickFirstInteger([latest.hold, latest.holdCount, latest.ratingHold]),
+    sellCount: pickFirstInteger([latest.sell, latest.sellCount, latest.ratingSell]),
+    strongSellCount: pickFirstInteger([
+      latest.strongSell,
+      latest.strongSellCount,
+      latest.strong_sell,
+      latest.ratingStrongSell,
+    ]),
+  };
+}
+
+function inferIsOtc(exchange: string | undefined, ticker: string): boolean {
+  const normalizedExchange = exchange?.trim().toUpperCase();
+  const normalizedTicker = ticker.trim().toUpperCase();
+
+  if (!normalizedExchange) {
+    return normalizedTicker.endsWith(".PK") || normalizedTicker.endsWith(".OTC");
+  }
+
+  return (
+    normalizedExchange.includes("OTC") ||
+    normalizedExchange === "PINK" ||
+    normalizedExchange === "OTCPK" ||
+    normalizedExchange === "OTCQB" ||
+    normalizedExchange === "OTCQX"
+  );
+}
+
 function hasAnalystSnapshotData(snapshot: Partial<ProviderAnalystSnapshot>): boolean {
   return (
     snapshot.priceTargetAverage !== undefined ||
@@ -236,15 +370,24 @@ function mapPriceTargetSummaryRecord(
     ticker,
     capturedAt: parseDateValue(item.date ?? item.asOfDate) ?? new Date(),
     source: "FMP",
-    priceTargetAverage: toFiniteNumber(item.targetMean),
-    priceTargetHigh: toFiniteNumber(item.targetHigh),
-    priceTargetLow: toFiniteNumber(item.targetLow),
-    priceTargetConsensus:
-      toFiniteNumber(item.targetConsensus) ?? toFiniteNumber(item.targetMedian),
-    analystCount:
-      toInteger(item.analystCount) ??
-      toInteger(item.numberOfAnalysts) ??
-      toInteger(item.allAnalystCount),
+    priceTargetAverage: pickFirstFiniteNumber([
+      item.targetAvg,
+      item.targetAverage,
+      item.targetMean,
+    ]),
+    priceTargetHigh: pickFirstFiniteNumber([item.targetHigh, item.priceTargetHigh]),
+    priceTargetLow: pickFirstFiniteNumber([item.targetLow, item.priceTargetLow]),
+    priceTargetConsensus: pickFirstFiniteNumber([
+      item.targetConsensus,
+      item.target_consensus,
+      item.priceTargetConsensus,
+      item.targetMedian,
+    ]),
+    analystCount: pickFirstInteger([
+      item.analystCount,
+      item.numberOfAnalysts,
+      item.allAnalystCount,
+    ]),
     ratingConsensus:
       toStringOrUndefined(item.ratingConsensus) ?? toStringOrUndefined(item.consensus),
     upsidePercent: toFiniteNumber(item.upsidePercent) ?? toFiniteNumber(item.upside),
@@ -259,14 +402,25 @@ function mapPriceTargetConsensusRecord(
 ): Partial<ProviderAnalystSnapshot> | null {
   const snapshot: Partial<ProviderAnalystSnapshot> = {
     source: "FMP",
-    priceTargetConsensus:
-      toFiniteNumber(item.targetConsensus) ??
-      toFiniteNumber(item.targetMedian) ??
-      toFiniteNumber(item.targetMean),
-    analystCount:
-      toInteger(item.analystCount) ?? toInteger(item.numberOfAnalysts),
+    priceTargetConsensus: pickFirstFiniteNumber([
+      item.targetConsensus,
+      item.target_consensus,
+      item.priceTargetConsensus,
+      item.targetMedian,
+      item.targetMean,
+      item.targetAverage,
+    ]),
+    priceTargetHigh: pickFirstFiniteNumber([item.targetHigh, item.priceTargetHigh]),
+    priceTargetLow: pickFirstFiniteNumber([item.targetLow, item.priceTargetLow]),
+    analystCount: pickFirstInteger([
+      item.analystCount,
+      item.numberOfAnalysts,
+      item.totalAnalysts,
+    ]),
     ratingConsensus:
-      toStringOrUndefined(item.ratingConsensus) ?? toStringOrUndefined(item.consensus),
+      toStringOrUndefined(item.ratingConsensus) ??
+      toStringOrUndefined(item.consensus) ??
+      toStringOrUndefined(item.recommendation),
     raw: item,
   };
 
@@ -276,19 +430,36 @@ function mapPriceTargetConsensusRecord(
 function mapAnalystRatingsRecord(
   item: FmpAnalystRatingItem,
 ): Partial<ProviderAnalystSnapshot> | null {
+  const trendCounts = mapRecommendationTrendCounts(item);
+
   const snapshot: Partial<ProviderAnalystSnapshot> = {
     source: "FMP",
-    analystCount: toInteger(item.analystCount),
+    analystCount: pickFirstInteger([
+      item.analystCount,
+      item.numberOfAnalysts,
+      item.totalAnalysts,
+      trendCounts.analystCount,
+    ]),
     ratingConsensus:
       toStringOrUndefined(item.ratingConsensus) ??
       toStringOrUndefined(item.recommendation) ??
       toStringOrUndefined(item.consensus) ??
       toStringOrUndefined(item.rating),
-    strongBuyCount: toInteger(item.strongBuy),
-    buyCount: toInteger(item.buy),
-    holdCount: toInteger(item.hold),
-    sellCount: toInteger(item.sell),
-    strongSellCount: toInteger(item.strongSell),
+    strongBuyCount: pickFirstInteger([
+      item.strongBuy,
+      item.strongBuyCount,
+      item.strong_buy,
+      trendCounts.strongBuyCount,
+    ]),
+    buyCount: pickFirstInteger([item.buy, item.buyCount, trendCounts.buyCount]),
+    holdCount: pickFirstInteger([item.hold, item.holdCount, trendCounts.holdCount]),
+    sellCount: pickFirstInteger([item.sell, item.sellCount, trendCounts.sellCount]),
+    strongSellCount: pickFirstInteger([
+      item.strongSell,
+      item.strongSellCount,
+      item.strong_sell,
+      trendCounts.strongSellCount,
+    ]),
     raw: item,
   };
 
@@ -344,6 +515,11 @@ function mapMarketMoverRecord(
   return {
     ticker: normalizeProviderTickerOrThrow(ticker),
     companyName: toStringOrUndefined(item.companyName ?? item.name),
+    exchange: toStringOrUndefined((item as Record<string, unknown>).exchange),
+    isOtc: inferIsOtc(
+      toStringOrUndefined((item as Record<string, unknown>).exchange),
+      ticker,
+    ),
     price: toFiniteNumber(item.price),
     changePercent:
       toFiniteNumber(item.changePercent) ?? toFiniteNumber(item.changesPercentage),
@@ -359,13 +535,114 @@ function mapMarketMoverRecord(
 export class FmpAnalystProvider implements AnalystProvider {
   constructor(private readonly client: FmpJsonClient = new FmpClient()) {}
 
+  async auditTicker(ticker: string): Promise<FmpAnalystTickerAuditResult> {
+    const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
+
+    const summaryAudit = await this.fetchEndpointItemsWithDiagnostics<FmpPriceTargetSummaryItem>(
+      [...PRICE_TARGET_SUMMARY_ENDPOINTS],
+      { symbol: normalizedTicker },
+    );
+    const summaryMapped = summaryAudit.items[0]
+      ? mapPriceTargetSummaryRecord(normalizedTicker, summaryAudit.items[0])
+      : null;
+
+    const consensusAudit = await this.fetchEndpointItemsWithDiagnostics<FmpPriceTargetConsensusItem>(
+      [...PRICE_TARGET_CONSENSUS_ENDPOINTS],
+      { symbol: normalizedTicker },
+    );
+    const consensusMapped = consensusAudit.items[0]
+      ? mapPriceTargetConsensusRecord(consensusAudit.items[0])
+      : null;
+
+    const ratingsAudit = await this.fetchEndpointItemsWithDiagnostics<FmpAnalystRatingItem>(
+      [...ANALYST_RATINGS_ENDPOINTS],
+      { symbol: normalizedTicker },
+    );
+    const ratingsMapped = ratingsAudit.items[0]
+      ? mapAnalystRatingsRecord(ratingsAudit.items[0])
+      : null;
+
+    const actionsAudit = await this.fetchEndpointItemsWithDiagnostics<FmpUpgradeDowngradeItem>(
+      [...UPGRADES_DOWNGRADES_ENDPOINTS],
+      { symbol: normalizedTicker, limit: 10 },
+    );
+    const mappedActionsCount = actionsAudit.items
+      .map((item) => mapUpgradeDowngradeRecord(normalizedTicker, item))
+      .filter((item): item is ProviderAnalystActionEvent => item !== null)
+      .length;
+
+    return {
+      ticker: normalizedTicker,
+      priceTargetSummary: {
+        endpointAttempted: summaryAudit.endpointAttempted,
+        selectedEndpoint: summaryAudit.selectedEndpoint,
+        status: summaryAudit.status,
+        itemCount: summaryAudit.items.length,
+        firstItemKeys: extractTopLevelKeys(summaryAudit.items[0]),
+        mappedFieldSummary: {
+          mapped: summaryMapped !== null,
+          hasTargetConsensus: summaryMapped?.priceTargetConsensus != null,
+          hasTargetAverage: summaryMapped?.priceTargetAverage != null,
+          hasAnalystCount: summaryMapped?.analystCount != null,
+          hasRatingConsensus: !!summaryMapped?.ratingConsensus,
+        },
+        warning: summaryAudit.warning,
+      },
+      priceTargetConsensus: {
+        endpointAttempted: consensusAudit.endpointAttempted,
+        selectedEndpoint: consensusAudit.selectedEndpoint,
+        status: consensusAudit.status,
+        itemCount: consensusAudit.items.length,
+        firstItemKeys: extractTopLevelKeys(consensusAudit.items[0]),
+        mappedFieldSummary: {
+          mapped: consensusMapped !== null,
+          hasTargetConsensus: consensusMapped?.priceTargetConsensus != null,
+          hasTargetHigh: consensusMapped?.priceTargetHigh != null,
+          hasTargetLow: consensusMapped?.priceTargetLow != null,
+          hasAnalystCount: consensusMapped?.analystCount != null,
+          hasRatingConsensus: !!consensusMapped?.ratingConsensus,
+        },
+        warning: consensusAudit.warning,
+      },
+      analystRatings: {
+        endpointAttempted: ratingsAudit.endpointAttempted,
+        selectedEndpoint: ratingsAudit.selectedEndpoint,
+        status: ratingsAudit.status,
+        itemCount: ratingsAudit.items.length,
+        firstItemKeys: extractTopLevelKeys(ratingsAudit.items[0]),
+        mappedFieldSummary: {
+          mapped: ratingsMapped !== null,
+          hasAnalystCount: ratingsMapped?.analystCount != null,
+          hasRatingConsensus: !!ratingsMapped?.ratingConsensus,
+          hasStrongBuyCount: ratingsMapped?.strongBuyCount != null,
+          hasBuyCount: ratingsMapped?.buyCount != null,
+          hasHoldCount: ratingsMapped?.holdCount != null,
+          hasSellCount: ratingsMapped?.sellCount != null,
+          hasStrongSellCount: ratingsMapped?.strongSellCount != null,
+        },
+        warning: ratingsAudit.warning,
+      },
+      analystActions: {
+        endpointAttempted: actionsAudit.endpointAttempted,
+        selectedEndpoint: actionsAudit.selectedEndpoint,
+        status: actionsAudit.status,
+        itemCount: actionsAudit.items.length,
+        firstItemKeys: extractTopLevelKeys(actionsAudit.items[0]),
+        mappedFieldSummary: {
+          mappedActionCount: mappedActionsCount,
+        },
+        warning: actionsAudit.warning,
+      },
+    };
+  }
+
   async getPriceTargetSummary(
     ticker: string,
   ): Promise<ProviderAnalystSnapshot | null> {
     const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
 
     const item = await this.fetchLatestRecordWithFallback<FmpPriceTargetSummaryItem>(
-      ["/stable/price-target-summary", "/price-target-summary"],
+      [...PRICE_TARGET_SUMMARY_ENDPOINTS],
       {
         symbol: normalizedTicker,
       },
@@ -384,7 +661,7 @@ export class FmpAnalystProvider implements AnalystProvider {
     const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
 
     const item = await this.fetchLatestRecordWithFallback<FmpPriceTargetConsensusItem>(
-      ["/stable/price-target-consensus", "/price-target-consensus"],
+      [...PRICE_TARGET_CONSENSUS_ENDPOINTS],
       {
         symbol: normalizedTicker,
       },
@@ -403,12 +680,7 @@ export class FmpAnalystProvider implements AnalystProvider {
     const normalizedTicker = normalizeProviderTickerOrThrow(ticker);
 
     const item = await this.fetchLatestRecordWithFallback<FmpAnalystRatingItem>(
-      [
-        "/stable/analyst-ratings",
-        "/analyst-ratings",
-        "/stable/recommendation-trends",
-        "/recommendation-trends",
-      ],
+      [...ANALYST_RATINGS_ENDPOINTS],
       {
         symbol: normalizedTicker,
       },
@@ -445,12 +717,7 @@ export class FmpAnalystProvider implements AnalystProvider {
     }
 
     const items = await this.fetchEndpointItemsWithFallback<FmpUpgradeDowngradeItem>(
-      [
-        "/stable/upgrades-downgrades",
-        "/upgrades-downgrades",
-        "/stable/upgrades-downgrades-consensus",
-        "/upgrades-downgrades-consensus",
-      ],
+      [...UPGRADES_DOWNGRADES_ENDPOINTS],
       query,
     );
 
@@ -480,12 +747,7 @@ export class FmpAnalystProvider implements AnalystProvider {
       }
 
       const items = await this.fetchEndpointItemsWithFallback<FmpUpgradeDowngradeItem>(
-        [
-          "/stable/upgrades-downgrades",
-          "/upgrades-downgrades",
-          "/stable/upgrades-downgrades-consensus",
-          "/upgrades-downgrades-consensus",
-        ],
+        [...UPGRADES_DOWNGRADES_ENDPOINTS],
         query,
       );
 
@@ -582,7 +844,12 @@ export class FmpAnalystProvider implements AnalystProvider {
     for (const endpoint of endpoints) {
       try {
         const payload = await this.client.getJson<unknown>(endpoint, query);
-        return extractRecordArray<T>(payload);
+        const items = extractRecordArray<T>(payload);
+        if (items.length === 0) {
+          continue;
+        }
+
+        return items;
       } catch (error) {
         if (error instanceof ProviderRequestError && error.statusCode === 404) {
           continue;
@@ -593,6 +860,69 @@ export class FmpAnalystProvider implements AnalystProvider {
     }
 
     return [];
+  }
+
+  private async fetchEndpointItemsWithDiagnostics<T>(
+    endpoints: string[],
+    query?: Record<string, string | number>,
+  ): Promise<{
+    endpointAttempted: string[];
+    selectedEndpoint?: string;
+    status: AnalystAuditStatus;
+    items: T[];
+    warning?: string;
+  }> {
+    const endpointAttempted: string[] = [];
+
+    for (const endpoint of endpoints) {
+      endpointAttempted.push(endpoint);
+
+      try {
+        const payload = await this.client.getJson<unknown>(endpoint, query);
+        const items = extractRecordArray<T>(payload);
+
+        if (items.length === 0) {
+          continue;
+        }
+
+        return {
+          endpointAttempted,
+          selectedEndpoint: endpoint,
+          status: "SUCCESS",
+          items,
+        };
+      } catch (error) {
+        if (error instanceof ProviderRequestError && error.statusCode === 404) {
+          continue;
+        }
+
+        if (
+          error instanceof ProviderConfigurationError ||
+          (error instanceof ProviderRequestError && [401, 402, 403].includes(error.statusCode ?? 0))
+        ) {
+          return {
+            endpointAttempted,
+            status: "ENTITLEMENT",
+            items: [],
+            warning: error.message,
+          };
+        }
+
+        return {
+          endpointAttempted,
+          status: "ERROR",
+          items: [],
+          warning: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    return {
+      endpointAttempted,
+      status: "EMPTY",
+      items: [],
+      warning: "No endpoint returned records.",
+    };
   }
 
   private handleEndpointFailure(error: unknown, endpoint: string): never {

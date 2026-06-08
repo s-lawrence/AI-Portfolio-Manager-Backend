@@ -100,7 +100,6 @@ Notes:
 - /economic-indicators
 - /economic-calendar (fallback /economics-calendar)
 - /market-risk-premium
-- /doc/doc (GDELT DOC API)
 
 ## GDELT 2.0
 
@@ -111,14 +110,26 @@ Set these values in your local environment file:
 ```bash
 GDELT_BASE_URL="https://api.gdeltproject.org/api/v2"
 GDELT_TIMEOUT_MS="20000"
+GDELT_QUERY_DELAY_MS="250"
+GDELT_MAX_RETRY_429="1"
 ```
 
 Notes:
 - GDELT requires no API key in this integration.
 - If `GDELT_TIMEOUT_MS` is not set, the shared `PROVIDER_HTTP_TIMEOUT_MS` value is used.
+- `GDELT_QUERY_DELAY_MS` adds a short delay between default-set queries to reduce burst rate limits.
+- `GDELT_MAX_RETRY_429` controls retry attempts for HTTP 429 responses, honoring provider `Retry-After` when present.
 - GDELT ingestion is designed as global geopolitical/news-event context, not ticker-specific company news.
 
 ### Default Global Risk Queries
+
+Quick mode (used by full-refresh `includeGdelt=true`):
+
+- `geopolitical risk`
+- `war OR conflict OR sanctions`
+- `oil supply disruption OR energy crisis`
+
+Full mode (used by direct default-risk ingestion unless overridden):
 
 - `geopolitical risk`
 - `war OR conflict OR sanctions`
@@ -150,9 +161,11 @@ Notes:
 ### Non-Blocking Full-Refresh Behavior
 
 - Portfolio full-refresh can optionally include GDELT (`includeGdelt=true`).
+- Full-refresh GDELT uses `mode=quick` to avoid over-aggressive default query bursts.
 - GDELT ingestion runs after macro/economics sections and before portfolio analysis.
 - Query-level failures are captured in warnings and failed-query lists.
 - GDELT failures are non-blocking for the overall full-refresh response.
+- Failed-query diagnostics include query, status code, and whether retry was attempted.
 
 ### Current GDELT Limitations
 
@@ -215,7 +228,11 @@ U.S. examples:
 - If provider sentiment/materiality is missing, deterministic local fallback classification is applied.
 - Demo-marked local fake news is explicitly identified so reports can prefer real company headlines.
 - Analyst ingestion reads price-target summary/consensus, analyst ratings, and upgrades-downgrades endpoints.
+- Analyst ingestion reports subsource diagnostics for summary, consensus, ratings, and actions.
+- Subsource statuses distinguish `SUCCESS`, `EMPTY`, and `FAILED`, with warning details for partial payloads.
+- Analyst mapping tolerates common FMP schema variants (snake_case/camelCase and recommendation-trend count aliases).
 - Discovery ingestion reads gainers/losers/most-active plus analyst-upgrades/downgrades categories.
+- Discovery list reads apply default quality guards when omitted by callers: min price `>= 5`, max absolute change percent `<= 300`, and OTC exclusion.
 - Analyst/discovery endpoint fallback behavior: 404 responses try the next candidate endpoint automatically.
 - Analyst/discovery no-data behavior: empty payloads are treated as soft no-data warnings (not hard failures).
 - Analyst/discovery entitlement behavior: 402 responses are surfaced as provider configuration errors indicating plan limits.

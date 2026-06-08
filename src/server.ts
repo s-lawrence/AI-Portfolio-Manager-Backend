@@ -37,7 +37,10 @@ async function start(): Promise<void> {
         },
         "server runtime context",
       );
-      app.log.info({ routes: app.printRoutes() }, "registered routes");
+
+      if (env.PRINT_ROUTES_ON_STARTUP) {
+        app.log.info({ routes: app.printRoutes() }, "registered routes");
+      }
     }
   } catch (error) {
     app.log.error(error, "failed to start server");

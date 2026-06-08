@@ -21,6 +21,27 @@ function optionalUrlWithDefault(defaultUrl: string) {
   return z.preprocess(blankToUndefined, z.string().url().default(defaultUrl));
 }
 
+const booleanFlag = z.preprocess((value) => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+
+  if (normalized === "false") {
+    return false;
+  }
+
+  return value;
+}, z.boolean());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -36,6 +57,9 @@ const envSchema = z.object({
   BANK_OF_CANADA_USD_CAD_SERIES_ID: z.string().trim().min(1).default("FXUSDCAD"),
   GDELT_BASE_URL: optionalUrlWithDefault("https://api.gdeltproject.org/api/v2"),
   GDELT_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  GDELT_QUERY_DELAY_MS: z.coerce.number().int().min(0).default(250),
+  GDELT_MAX_RETRY_429: z.coerce.number().int().min(0).max(5).default(1),
+  PRINT_ROUTES_ON_STARTUP: booleanFlag.default(false),
 });
 
 const parsed = envSchema.safeParse(process.env);

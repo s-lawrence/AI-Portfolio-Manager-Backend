@@ -1390,6 +1390,7 @@ export async function ingestPortfolioFmpFullRefresh(
           from: new Date(Date.now() - gdeltLookbackDays * DAY_MS),
           to: new Date(),
           maxRecordsPerQuery: options.gdeltMaxRecordsPerQuery,
+          mode: "quick",
         }),
         geopoliticalStartedAt,
         new Date(),

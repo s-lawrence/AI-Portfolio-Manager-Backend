@@ -5,8 +5,10 @@ import { notFound, runService } from "../errors";
 import { ok } from "../response";
 import { booleanQuerySchema } from "../schemas/common.schemas";
 import {
+  getFmpAnalystAudit,
   getMarketDataAudit,
   purgeDemoAnalyticalData,
+  runGdeltQueryAudit,
   seedDemoMarketData,
 } from "../../services";
 import {
@@ -44,6 +46,15 @@ const seedDemoMarketDataQuerySchema = z.object({
 
 const marketDataAuditParamsSchema = z.object({
   ticker: z.string().trim().min(1),
+});
+
+const analystAuditParamsSchema = z.object({
+  ticker: z.string().trim().min(1),
+});
+
+const gdeltQueryAuditQuerySchema = z.object({
+  query: z.string().trim().min(1),
+  maxRecords: z.coerce.number().int().positive().max(100).optional(),
 });
 
 const purgeDemoAnalyticalDataBodySchema = z.object({
@@ -141,6 +152,25 @@ export async function devRoutes(app: FastifyInstance): Promise<void> {
     if (!data) {
       throw notFound(`No stock found for ticker ${params.ticker.toUpperCase()}.`);
     }
+
+    return reply.send(ok(data));
+  });
+
+  app.get("/fmp/analyst-audit/:ticker", async (request, reply) => {
+    const params = analystAuditParamsSchema.parse(request.params ?? {});
+
+    const data = await runService(() => getFmpAnalystAudit(params.ticker));
+    return reply.send(ok(data));
+  });
+
+  app.get("/gdelt/query-audit", async (request, reply) => {
+    const query = gdeltQueryAuditQuerySchema.parse(request.query ?? {});
+
+    const data = await runService(() =>
+      runGdeltQueryAudit(query.query, {
+        maxRecords: query.maxRecords,
+      }),
+    );
 
     return reply.send(ok(data));
   });
