@@ -46,6 +46,7 @@ npm start
 - `/api/watchlists`
 - `/api/analyst`
 - `/api/discovery`
+- `/api/geopolitical`
 
 ## Development Helpers
 
@@ -427,6 +428,39 @@ curl -X POST http://localhost:4000/api/discovery/fmp/default-set \
 curl "http://localhost:4000/api/discovery/GAINERS?limit=25"
 ```
 
+Ingest geopolitical/news-event context for one query from GDELT:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/gdelt/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "war OR sanctions",
+    "from": "2026-06-01T00:00:00.000Z",
+    "to": "2026-06-08T00:00:00.000Z",
+    "maxRecords": 25
+  }'
+```
+
+Ingest geopolitical/news-event context using the default global-risk query set:
+
+```bash
+curl -X POST http://localhost:4000/api/ingestion/gdelt/default-risk-set \
+  -H "Content-Type: application/json" \
+  -d '{
+    "maxRecordsPerQuery": 25
+  }'
+```
+
+Read latest geopolitical events and summary:
+
+```bash
+curl "http://localhost:4000/api/geopolitical/latest?limit=20"
+```
+
+```bash
+curl "http://localhost:4000/api/geopolitical/summary?days=7"
+```
+
 Earnings ingestion responses include:
 
 - `eventsCreated` count of inserted earnings events.
@@ -470,6 +504,9 @@ curl -X POST http://localhost:4000/api/ingestion/fmp/portfolio/<PORTFOLIO_CUID>/
     "historicalLimit": 120,
     "newsLimitPerTicker": 12,
     "includeAnalystData": true,
+    "includeGdelt": true,
+    "gdeltMaxRecordsPerQuery": 25,
+    "gdeltLookbackDays": 7,
     "includeEconomics": false,
     "includeBankOfCanada": false,
     "includeFred": false,
@@ -486,6 +523,9 @@ Full-refresh request options:
 
 - `refreshMode`: optional, one of `quick` or `full` (default `quick`).
 - `includeAnalystData`: optional boolean (default `false`).
+- `includeGdelt`: optional boolean (default `false`).
+- `gdeltMaxRecordsPerQuery`: optional integer limit for each default GDELT query when `includeGdelt=true`.
+- `gdeltLookbackDays`: optional integer lookback window for GDELT ingestion when `includeGdelt=true`.
 - `includeEconomics`: optional boolean (default `false`).
 - `includeBankOfCanada`: optional boolean (default `false`).
 - `includeFred`: optional boolean (default `false`).
@@ -499,6 +539,7 @@ Include-flag semantics:
 
 - `includeEconomics=false` skips FMP economics and omits `economics` from response.
 - `includeAnalystData=false` skips analyst ingestion and omits `analystData` from response.
+- `includeGdelt=false` skips GDELT ingestion and omits `geopolitical` from response.
 - `includeBankOfCanada=false` skips BoC macro/FX and omits `bankOfCanada` from response.
 - `includeFred=false` skips FRED macro and omits `fred` from response.
 - If all macro flags are `false`, macro ingestion is skipped and `macro` is omitted.
@@ -511,6 +552,7 @@ Full-refresh response includes:
 - `earnings` category result (including per-ticker failures).
 - `news` category result (including per-ticker failures).
 - optional `analystData` when `includeAnalystData=true`.
+- optional `geopolitical` when `includeGdelt=true`.
 - optional `analysis` when `runAnalysis=true`.
 - optional `economics` when `includeEconomics=true`.
 - optional `bankOfCanada`, `fred`, and `macro` when macro flags are enabled.

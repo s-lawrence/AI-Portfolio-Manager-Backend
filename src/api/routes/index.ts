@@ -6,6 +6,7 @@ import { devRoutes } from "./dev.routes";
 import { discoveryRoutes } from "./discovery.routes";
 import { economicsIngestionRoutes } from "./economics-ingestion.routes";
 import { earningsRoutes } from "./earnings.routes";
+import { geopoliticalRoutes } from "./geopolitical.routes";
 import { healthRoutes } from "./health.routes";
 import { holdingsRoutes } from "./holdings.routes";
 import { ingestionRoutes } from "./ingestion.routes";
@@ -39,6 +40,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(watchlistsRoutes, { prefix: "/api/watchlists" });
   await app.register(discoveryRoutes, { prefix: "/api/discovery" });
   await app.register(analystIngestionRoutes, { prefix: "/api" });
+  await app.register(geopoliticalRoutes, { prefix: "/api" });
 
   if (process.env.NODE_ENV !== "production") {
     await app.register(devRoutes, { prefix: "/api/dev" });

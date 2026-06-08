@@ -291,6 +291,21 @@ export async function cleanupTestData(): Promise<void> {
     },
   });
 
+  await testPrisma.geopoliticalEvent.deleteMany({
+    where: {
+      OR: [
+        {
+          provider: "GDELT",
+        },
+        {
+          title: {
+            contains: TEST_TEXT_MARKER,
+          },
+        },
+      ],
+    },
+  });
+
   await testPrisma.fxRateSnapshot.deleteMany({
     where: {
       OR: [

@@ -33,6 +33,7 @@ import {
 import * as fmpEconomicsIngestionService from "../../src/services/fmp-economics-ingestion.service";
 import * as macroIngestionService from "../../src/services/macro-ingestion.service";
 import * as analystIngestionService from "../../src/services/analyst-ingestion.service";
+import * as geopoliticalIngestionService from "../../src/services/geopolitical-ingestion.service";
 import * as portfolioAnalysisService from "../../src/services/portfolio-analysis.service";
 import { getLatestFundamentals } from "../../src/services/fundamentals.service";
 import { getStockProfile, getStockResearchBundle } from "../../src/services/stocks.service";
@@ -1311,6 +1312,72 @@ describe("real-data-ingestion.service", () => {
 
     expect(analystSpy).not.toHaveBeenCalled();
     expect(result.analystData).toBeUndefined();
+  });
+
+  it("full-refresh includes geopolitical data when includeGdelt=true", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRGD1");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const geopoliticalSpy = vi
+      .spyOn(geopoliticalIngestionService, "ingestDefaultGdeltRiskSet")
+      .mockResolvedValue({
+        startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+        finishedAt: new Date("2026-06-20T00:00:02.000Z").toISOString(),
+        durationMs: 2000,
+        queriesProcessed: 8,
+        queriesFailed: 0,
+        eventsCreated: 12,
+        eventsUpdated: 2,
+        eventsSkipped: 1,
+        warnings: [],
+        failedQueries: [],
+        results: [],
+      });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeGdelt: true,
+      gdeltLookbackDays: 5,
+      gdeltMaxRecordsPerQuery: 20,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(geopoliticalSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxRecordsPerQuery: 20,
+      }),
+    );
+    expect(result.geopolitical).toBeDefined();
+    expect(result.geopolitical?.eventsCreated).toBe(12);
+  });
+
+  it("full-refresh omits geopolitical data and skips GDELT ingestion when includeGdelt=false", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRGD0");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    const geopoliticalSpy = vi.spyOn(
+      geopoliticalIngestionService,
+      "ingestDefaultGdeltRiskSet",
+    );
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeGdelt: false,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(geopoliticalSpy).not.toHaveBeenCalled();
+    expect(result.geopolitical).toBeUndefined();
   });
 
   it("full-refresh omits economics and does not call economics ingestion when includeEconomics=false", async () => {

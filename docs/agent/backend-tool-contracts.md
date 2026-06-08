@@ -155,3 +155,120 @@ Output:
 Failure behavior:
 - Unsupported category should return backend error envelope.
 - Empty category result is valid and should return `items: []`.
+
+## refreshGdeltRiskContext
+
+Purpose:
+- Trigger GDELT ingestion for either one explicit query or the default global-risk query set.
+
+Recommended backend calls:
+- Single query: `POST /api/ingestion/gdelt/query`
+- Default set: `POST /api/ingestion/gdelt/default-risk-set`
+
+Input (single query):
+
+```json
+{
+  "query": "war OR sanctions",
+  "from": "2026-06-01T00:00:00.000Z",
+  "to": "2026-06-08T00:00:00.000Z",
+  "maxRecords": 25
+}
+```
+
+Input (default risk set):
+
+```json
+{
+  "from": "2026-06-01T00:00:00.000Z",
+  "to": "2026-06-08T00:00:00.000Z",
+  "maxRecordsPerQuery": 25
+}
+```
+
+Output:
+
+```json
+{
+  "queriesProcessed": 8,
+  "queriesFailed": 0,
+  "eventsCreated": 42,
+  "eventsUpdated": 6,
+  "eventsSkipped": 3,
+  "warnings": [],
+  "failedQueries": []
+}
+```
+
+Failure behavior:
+- Query-level failures are captured in `failedQueries` and should not block all results.
+
+## getLatestGeopoliticalContext
+
+Purpose:
+- Retrieve recent stored GDELT geopolitical events for near-term context retrieval.
+
+Recommended backend call:
+- `GET /api/geopolitical/latest?limit=<N>&days=<D>`
+
+Input:
+
+```json
+{
+  "limit": 20,
+  "days": 7
+}
+```
+
+Output:
+
+```json
+{
+  "from": "2026-06-01T00:00:00.000Z",
+  "to": "2026-06-08T00:00:00.000Z",
+  "items": []
+}
+```
+
+Failure behavior:
+- Empty result is valid (`items: []`).
+
+## getGeopoliticalSummary
+
+Purpose:
+- Fetch bounded aggregate geopolitical/global-risk summary for reports and watchlists.
+
+Recommended backend call:
+- `GET /api/geopolitical/summary?days=<D>`
+
+Input:
+
+```json
+{
+  "days": 7
+}
+```
+
+Output:
+
+```json
+{
+  "totalEvents": 100,
+  "countsByCategory": [
+    { "key": "GEOPOLITICAL", "count": 40 }
+  ],
+  "countsByTheme": [
+    { "key": "GLOBAL_RISK", "count": 30 }
+  ],
+  "sentimentMix": {
+    "positive": 12,
+    "neutral": 55,
+    "negative": 28,
+    "unknown": 5
+  },
+  "topHeadlines": []
+}
+```
+
+Failure behavior:
+- If no events exist, return summary with `totalEvents = 0` and empty arrays.

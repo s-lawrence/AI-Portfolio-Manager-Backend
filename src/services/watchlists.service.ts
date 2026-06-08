@@ -42,6 +42,7 @@ import {
   WatchlistResearchItemSummary,
 } from "../types/services";
 import { ensureStockExists } from "./stocks.service";
+import { getGeopoliticalSummary } from "./geopolitical-ingestion.service";
 
 export type CreateWatchlistForUserInput = Pick<
   Prisma.WatchlistUncheckedCreateInput,
@@ -405,9 +406,15 @@ export async function getWatchlistResearchBundle(
     }),
   );
 
+  const geopoliticalSummary = await getGeopoliticalSummary({
+    days: 7,
+    limit: 100,
+  }).catch(() => null);
+
   return {
     watchlist: detail.watchlist,
     itemCount: items.length,
+    geopoliticalSummary: geopoliticalSummary ?? undefined,
     items,
   };
 }

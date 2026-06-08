@@ -13,6 +13,7 @@ export * from "./market-discovery-snapshots.repository";
 export * from "./news-articles.repository";
 export * from "./earnings-events.repository";
 export * from "./macro-events.repository";
+export * from "./geopolitical-events.repository";
 export * from "./macro-series-observations.repository";
 export * from "./fx-rate-snapshots.repository";
 export * from "./ai-reports.repository";

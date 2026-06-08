@@ -44,6 +44,7 @@ import {
   getStockProfile,
   getStockResearchBundle,
 } from "./stocks.service";
+import { getGeopoliticalSummary } from "./geopolitical-ingestion.service";
 
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
@@ -380,6 +381,7 @@ async function buildMacroSummary(): Promise<string> {
     us2y,
     mrpTotalUs,
     upcomingHighImportance,
+    geopoliticalSummary,
   ] = await Promise.all([
     getLatestFxRate("USD", "CAD"),
     getLatestMacroSeriesObservation("FRED", "DGS10"),
@@ -396,6 +398,7 @@ async function buildMacroSummary(): Promise<string> {
       importanceLevels: ["HIGH", "VERY HIGH", "CRITICAL"],
       limit: 3,
     }),
+    getGeopoliticalSummary({ days: 7, limit: 100 }).catch(() => null),
   ]);
 
   const parts: string[] = [];
@@ -459,6 +462,18 @@ async function buildMacroSummary(): Promise<string> {
       parts.push(`Upcoming high-importance macro events: ${list}.`);
     }
 
+    if (geopoliticalSummary && geopoliticalSummary.totalEvents > 0) {
+      const topThemes = geopoliticalSummary.countsByTheme
+        .slice(0, 2)
+        .map((item) => item.key.toLowerCase())
+        .join(" and ");
+      const topHeadline = geopoliticalSummary.topHeadlines[0]?.title;
+
+      parts.push(
+        `Recent global-risk monitoring found elevated coverage around ${topThemes || "global risk"}.${topHeadline ? ` Top headline: ${topHeadline}.` : ""}`,
+      );
+    }
+
     if (parts.length === 0) {
       return "No macro context available from local economics storage in this phase.";
     }
@@ -493,7 +508,29 @@ async function buildMacroSummary(): Promise<string> {
   }
 
   if (parts.length === 0) {
+    if (geopoliticalSummary && geopoliticalSummary.totalEvents > 0) {
+      const topThemes = geopoliticalSummary.countsByTheme
+        .slice(0, 2)
+        .map((item) => item.key.toLowerCase())
+        .join(" and ");
+      const topHeadline = geopoliticalSummary.topHeadlines[0]?.title;
+
+      return `Recent global-risk monitoring found coverage around ${topThemes || "global risk"}.${topHeadline ? ` Top headline: ${topHeadline}.` : ""}`;
+    }
+
     return "No macro context available from local economics storage in this phase.";
+  }
+
+  if (geopoliticalSummary && geopoliticalSummary.totalEvents > 0) {
+    const topThemes = geopoliticalSummary.countsByTheme
+      .slice(0, 2)
+      .map((item) => item.key.toLowerCase())
+      .join(" and ");
+    const topHeadline = geopoliticalSummary.topHeadlines[0]?.title;
+
+    parts.push(
+      `Recent global-risk monitoring found elevated coverage around ${topThemes || "global risk"}.${topHeadline ? ` Top headline: ${topHeadline}.` : ""}`,
+    );
   }
 
   return parts.join(" ");

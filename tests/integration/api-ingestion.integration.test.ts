@@ -17,6 +17,9 @@ import {
   fmpNewsProvider,
   fmpProfileProvider,
 } from "../../src/providers/fmp";
+import {
+  gdeltProvider,
+} from "../../src/providers/gdelt";
 import { ProviderHistoricalPrice } from "../../src/providers/types";
 import { createUser } from "../../src/repositories/users.repository";
 
@@ -1752,6 +1755,204 @@ describe("API ingestion routes", () => {
     expect(body.data.analystData).toBeDefined();
     expect(body.data.analystData.tickersProcessed).toBeGreaterThan(0);
     expect(body.data.analystData.snapshotsCreated + body.data.analystData.snapshotsUpdated).toBeGreaterThan(0);
+
+    await app.close();
+  });
+
+  it("returns success envelopes for GDELT ingestion and geopolitical read endpoints", async () => {
+    vi.spyOn(gdeltProvider, "searchDocArticles").mockImplementation(async (options) => {
+      const query = options.query ?? options.queries?.[0] ?? "global risk";
+
+      return [
+        {
+          provider: "GDELT",
+          title: `Headline for ${query}`,
+          url: `https://example.com/${encodeURIComponent(query)}`,
+          domain: "example.com",
+          sourceCountry: "US",
+          language: "English",
+          publishedAt: new Date("2026-06-12T00:00:00.000Z"),
+          query,
+          category: "GEOPOLITICAL",
+          theme: "GLOBAL_RISK",
+          tone: -0.5,
+          sentiment: "NEUTRAL",
+          raw: { query },
+        },
+      ];
+    });
+
+    vi.spyOn(gdeltProvider, "getDefaultGlobalRiskEvents").mockResolvedValue([
+      {
+        provider: "GDELT",
+        title: "Default global risk headline",
+        url: "https://example.com/default-risk-headline",
+        domain: "example.com",
+        sourceCountry: "CA",
+        language: "English",
+        publishedAt: new Date("2026-06-12T01:00:00.000Z"),
+        category: "GEOPOLITICAL",
+        theme: "GLOBAL_RISK",
+        tone: -1.2,
+        sentiment: "NEGATIVE",
+        raw: { source: "default" },
+      },
+    ]);
+
+    const app = buildApp();
+
+    const ingestQueryResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/gdelt/query",
+      payload: {
+        query: "war OR sanctions",
+        maxRecords: 25,
+      },
+    });
+
+    expect(ingestQueryResponse.statusCode).toBe(200);
+    expect(ingestQueryResponse.json().success).toBe(true);
+    expect(ingestQueryResponse.json().data.query).toBe("war OR sanctions");
+
+    const ingestDefaultResponse = await app.inject({
+      method: "POST",
+      url: "/api/ingestion/gdelt/default-risk-set",
+      payload: {
+        maxRecordsPerQuery: 25,
+      },
+    });
+
+    expect(ingestDefaultResponse.statusCode).toBe(200);
+    expect(ingestDefaultResponse.json().success).toBe(true);
+    expect(ingestDefaultResponse.json().data.queriesProcessed).toBeGreaterThan(0);
+
+    const latestResponse = await app.inject({
+      method: "GET",
+      url: "/api/geopolitical/latest?limit=20",
+    });
+
+    expect(latestResponse.statusCode).toBe(200);
+    expect(latestResponse.json().success).toBe(true);
+    expect(Array.isArray(latestResponse.json().data.items)).toBe(true);
+
+    const summaryResponse = await app.inject({
+      method: "GET",
+      url: "/api/geopolitical/summary?days=7",
+    });
+
+    expect(summaryResponse.statusCode).toBe(200);
+    expect(summaryResponse.json().success).toBe(true);
+    expect(typeof summaryResponse.json().data.totalEvents).toBe("number");
+
+    await app.close();
+  });
+
+  it("includes geopolitical section in full-refresh when includeGdelt=true", async () => {
+    env.FMP_API_KEY = "test-fmp-key";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockImplementation(async (ticker) => ({
+      ticker,
+      companyName: `${ticker} Company`,
+      exchange: "NASDAQ",
+      sector: "Technology",
+      industry: "Software",
+      country: "US",
+      currency: "USD",
+      assetType: "EQUITY",
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockImplementation(async (ticker) => ({
+      ticker,
+      price: 145,
+      previousClose: 142,
+      close: 145,
+      volume: 7_000,
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockImplementation(
+      async (ticker) => buildHistoricalSeries(ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockImplementation(
+      async (ticker) => ({
+        ticker,
+        marketCap: 4_000_000_000,
+        peRatio: 19,
+        source: "FMP",
+      }),
+    );
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    vi.spyOn(gdeltProvider, "getDefaultGlobalRiskEvents").mockResolvedValue([
+      {
+        provider: "GDELT",
+        title: "Sanctions pressure energy markets",
+        url: "https://example.com/sanctions-energy-markets",
+        domain: "example.com",
+        sourceCountry: "US",
+        language: "English",
+        publishedAt: new Date("2026-06-12T03:00:00.000Z"),
+        category: "GEOPOLITICAL",
+        theme: "GLOBAL_RISK",
+        tone: -1.1,
+        sentiment: "NEGATIVE",
+        raw: { source: "default" },
+      },
+    ]);
+
+    const app = buildApp();
+
+    const user = await createUser({
+      email: `test+api-full-refresh-gdelt-${Date.now()}@example.com`,
+      name: "[TEST] API Full Refresh GDELT User",
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Full Refresh GDELT Portfolio",
+        baseCurrency: "USD",
+      },
+    });
+
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker: "TSTFRGDELT",
+        status: "OWNED",
+        shares: 3,
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/portfolio/${portfolioId}/full-refresh`,
+      payload: {
+        includeGdelt: true,
+        gdeltMaxRecordsPerQuery: 25,
+        gdeltLookbackDays: 7,
+        includeEconomics: false,
+        includeBankOfCanada: false,
+        includeFred: false,
+        runAnalysis: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+
+    expect(body.success).toBe(true);
+    expect(body.data.geopolitical).toBeDefined();
+    expect(body.data.geopolitical.queriesProcessed).toBeGreaterThan(0);
 
     await app.close();
   });

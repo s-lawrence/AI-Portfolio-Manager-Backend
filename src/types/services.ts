@@ -22,6 +22,7 @@ import type {
   RiskLevel,
   Sentiment,
   Stock,
+  GeopoliticalEvent,
   MarketDiscoverySnapshot,
   TechnicalSnapshot,
   TrendDirection,
@@ -214,7 +215,31 @@ export interface WatchlistResearchItemSummary {
 export interface WatchlistResearchBundle {
   watchlist: Watchlist;
   itemCount: number;
+  geopoliticalSummary?: GeopoliticalSummaryResult;
   items: WatchlistResearchItemSummary[];
+}
+
+export interface GeopoliticalSummaryResult {
+  from: string;
+  to: string;
+  totalEvents: number;
+  countsByCategory: Array<{ key: string; count: number }>;
+  countsByTheme: Array<{ key: string; count: number }>;
+  sentimentMix: {
+    positive: number;
+    neutral: number;
+    negative: number;
+    unknown: number;
+  };
+  topHeadlines: Array<{
+    title: string;
+    publishedAt: string;
+    source: string | null;
+    domain: string | null;
+    sentiment: string | null;
+  }>;
+  topCountries: Array<{ key: string; count: number }>;
+  topDomains: Array<{ key: string; count: number }>;
 }
 
 export interface DailyTickerReportInput {
@@ -609,6 +634,48 @@ export interface ListDiscoveryCandidatesOptions {
   to?: Date;
 }
 
+export interface GdeltIngestionOptions {
+  from?: Date;
+  to?: Date;
+  maxRecords?: number;
+}
+
+export interface GdeltDefaultRiskIngestionOptions {
+  from?: Date;
+  to?: Date;
+  maxRecords?: number;
+  maxRecordsPerQuery?: number;
+  queries?: string[];
+}
+
+export interface IngestGeopoliticalQueryResult {
+  query: string;
+  eventsCreated: number;
+  eventsUpdated: number;
+  eventsSkipped: number;
+  warnings: string[];
+}
+
+export interface IngestDefaultGdeltRiskSetResult {
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  queriesProcessed: number;
+  queriesFailed: number;
+  eventsCreated: number;
+  eventsUpdated: number;
+  eventsSkipped: number;
+  warnings: string[];
+  failedQueries: Array<{ query: string; reason: string }>;
+  results: IngestGeopoliticalQueryResult[];
+}
+
+export interface LatestGeopoliticalContextResult {
+  from: string;
+  to: string;
+  items: GeopoliticalEvent[];
+}
+
 export interface DiscoveryCandidatesResult {
   category: string;
   items: MarketDiscoverySnapshot[];
@@ -735,6 +802,9 @@ export interface PortfolioFmpFullRefreshOptions {
   historicalLimit?: number;
   newsLimitPerTicker?: number;
   includeAnalystData?: boolean;
+  includeGdelt?: boolean;
+  gdeltMaxRecordsPerQuery?: number;
+  gdeltLookbackDays?: number;
   includeEconomics?: boolean;
   includeBankOfCanada?: boolean;
   includeFred?: boolean;
@@ -757,6 +827,7 @@ export interface PortfolioFmpFullRefreshResult {
   earnings: PortfolioEarningsIngestionResult;
   news: IngestPortfolioNewsResult;
   analystData?: IngestPortfolioAnalystDataResult;
+  geopolitical?: IngestDefaultGdeltRiskSetResult;
   economics?: IngestFmpEconomicsDefaultSetResult;
   bankOfCanada?: MacroIngestionSectionResult;
   fred?: MacroIngestionSectionResult;

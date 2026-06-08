@@ -459,6 +459,38 @@ model MacroEvent {
   @@index([publishedAt])
 }
 
+model GeopoliticalEvent {
+  id             String   @id @default(cuid())
+  provider       String
+  source         String?
+  sourceCountry  String?
+  title          String
+  url            String?  @unique
+  domain         String?
+  language       String?
+  publishedAt    DateTime
+  query          String?
+  theme          String?
+  category       String?
+  tone           Float?
+  sentiment      String?
+  relevanceScore Float?
+  countries      Json?
+  organizations  Json?
+  persons        Json?
+  locations      Json?
+  raw            Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([provider, title, publishedAt])
+  @@index([provider])
+  @@index([publishedAt])
+  @@index([category])
+  @@index([theme])
+  @@index([sentiment])
+}
+
 model MacroSeriesObservation {
   id         String   @id @default(cuid())
   provider   String

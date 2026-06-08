@@ -189,18 +189,35 @@ export interface ProviderIngestionSectionResult {
   failedSeries?: string[];
 }
 
-export interface ProviderGeoEvent {
-  id?: string;
+export interface ProviderGeopoliticalEvent {
+  provider: string;
+  source?: string | null;
+  sourceCountry?: string | null;
+  title: string;
+  url?: string | null;
+  domain?: string | null;
+  language?: string | null;
+  publishedAt: Date;
+  query?: string | null;
+  theme?: string | null;
+  category?: string | null;
+  tone?: number | null;
+  sentiment?: string | null;
+  relevanceScore?: number | null;
+  countries?: unknown;
+  organizations?: unknown;
+  persons?: unknown;
+  locations?: unknown;
+  raw?: unknown;
+}
+
+export interface ProviderGeopoliticalSearchOptions {
   query?: string;
-  title?: string;
-  summary?: string;
-  source?: string;
-  url?: string;
-  publishedAt?: Date;
-  country?: string;
-  region?: string;
-  tone?: number;
-  impactScore?: number;
+  queries?: string[];
+  from?: Date;
+  to?: Date;
+  maxRecords?: number;
+  maxRecordsPerQuery?: number;
 }
 
 export interface ProviderTreasuryRate {
@@ -328,10 +345,12 @@ export interface AnalystProvider {
 }
 
 export interface GeopoliticalProvider {
-  searchEvents(
-    query: string,
-    options?: ProviderDateRangeOptions,
-  ): Promise<ProviderGeoEvent[]>;
+  searchDocArticles(
+    options: ProviderGeopoliticalSearchOptions,
+  ): Promise<ProviderGeopoliticalEvent[]>;
+  getDefaultGlobalRiskEvents(
+    options?: Omit<ProviderGeopoliticalSearchOptions, "query" | "queries">,
+  ): Promise<ProviderGeopoliticalEvent[]>;
 }
 
 export interface EconomicsProvider {

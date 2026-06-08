@@ -35,6 +35,7 @@ const envSchema = z.object({
   BANK_OF_CANADA_BASE_URL: optionalUrlWithDefault("https://www.bankofcanada.ca/valet"),
   BANK_OF_CANADA_USD_CAD_SERIES_ID: z.string().trim().min(1).default("FXUSDCAD"),
   GDELT_BASE_URL: optionalUrlWithDefault("https://api.gdeltproject.org/api/v2"),
+  GDELT_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

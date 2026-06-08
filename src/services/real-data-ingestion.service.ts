@@ -59,6 +59,7 @@ import { runPortfolioAnalysis } from "./portfolio-analysis.service";
 import { ingestFmpEconomicsDefaultSet } from "./fmp-economics-ingestion.service";
 import { ingestDefaultMacroAndFx } from "./macro-ingestion.service";
 import { ingestPortfolioAnalystData } from "./analyst-ingestion.service";
+import { ingestDefaultGdeltRiskSet } from "./geopolitical-ingestion.service";
 import { getPortfolioOverview } from "./portfolios.service";
 import {
   StockMetadataInput,
@@ -82,6 +83,7 @@ const DEFAULT_FRED_OBSERVATION_LIMIT_QUICK = 120;
 const DEFAULT_FRED_OBSERVATION_LIMIT_FULL = 300;
 const DEFAULT_BOC_OBSERVATION_LIMIT_QUICK = 120;
 const DEFAULT_BOC_OBSERVATION_LIMIT_FULL = 300;
+const DEFAULT_GDELT_LOOKBACK_DAYS = 7;
 const SECTION_SLOW_LOG_THRESHOLD_MS = 10_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1060,6 +1062,7 @@ export async function ingestPortfolioFmpFullRefresh(
 
   const refreshMode = options.refreshMode ?? "quick";
   const includeAnalystData = options.includeAnalystData === true;
+  const includeGdelt = options.includeGdelt === true;
   const includeEconomics = options.includeEconomics === true;
   const includeBankOfCanada = options.includeBankOfCanada === true;
   const includeFred = options.includeFred === true;
@@ -1099,6 +1102,10 @@ export async function ingestPortfolioFmpFullRefresh(
       : DEFAULT_BOC_OBSERVATION_LIMIT_QUICK,
   );
   const macroMaxSeries = normalizeOptionalPositiveInteger(options.macroMaxSeries);
+  const gdeltLookbackDays = normalizePositiveInteger(
+    options.gdeltLookbackDays,
+    DEFAULT_GDELT_LOOKBACK_DAYS,
+  );
 
   const marketDataStartedAt = new Date();
   const marketData = addDurationMetadata(
@@ -1373,6 +1380,54 @@ export async function ingestPortfolioFmpFullRefresh(
     }
   }
 
+  let geopolitical: PortfolioFmpFullRefreshResult["geopolitical"];
+  if (includeGdelt) {
+    const geopoliticalStartedAt = new Date();
+
+    try {
+      geopolitical = addDurationMetadata(
+        await ingestDefaultGdeltRiskSet({
+          from: new Date(Date.now() - gdeltLookbackDays * DAY_MS),
+          to: new Date(),
+          maxRecordsPerQuery: options.gdeltMaxRecordsPerQuery,
+        }),
+        geopoliticalStartedAt,
+        new Date(),
+      );
+    } catch (error) {
+      geopolitical = addDurationMetadata(
+        {
+          startedAt: geopoliticalStartedAt.toISOString(),
+          finishedAt: new Date().toISOString(),
+          queriesProcessed: 0,
+          queriesFailed: 1,
+          eventsCreated: 0,
+          eventsUpdated: 0,
+          eventsSkipped: 0,
+          warnings: [toErrorReason(error)],
+          failedQueries: [
+            {
+              query: "DEFAULT_GLOBAL_RISK_SET",
+              reason: toErrorReason(error),
+            },
+          ],
+          results: [],
+        },
+        geopoliticalStartedAt,
+        new Date(),
+      );
+    }
+
+    logSlowSection("geopolitical", geopolitical.durationMs ?? 0, {
+      queriesProcessed: geopolitical.queriesProcessed,
+      queriesFailed: geopolitical.queriesFailed,
+      eventsCreated: geopolitical.eventsCreated,
+      eventsUpdated: geopolitical.eventsUpdated,
+      eventsSkipped: geopolitical.eventsSkipped,
+      warnings: geopolitical.warnings.length,
+    });
+  }
+
   let analysis: PortfolioFmpFullRefreshResult["analysis"];
   if (options.runAnalysis) {
     const analysisStartedAt = new Date();
@@ -1448,6 +1503,12 @@ export async function ingestPortfolioFmpFullRefresh(
     warnings.push(`Macro ingestion completed with ${macro.warnings.length} warning(s).`);
   }
 
+  if (geopolitical && geopolitical.warnings.length > 0) {
+    warnings.push(
+      `GDELT ingestion completed with ${geopolitical.warnings.length} warning(s).`,
+    );
+  }
+
   const finishedAtDate = new Date();
   const durationMs = calculateDurationMs(startedAtDate, finishedAtDate);
 
@@ -1461,6 +1522,7 @@ export async function ingestPortfolioFmpFullRefresh(
     earnings,
     news,
     analystData,
+    geopolitical,
     economics,
     bankOfCanada,
     fred,

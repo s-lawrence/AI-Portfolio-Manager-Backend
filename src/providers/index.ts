@@ -6,6 +6,7 @@ export * from "./types";
 export * from "./fmp";
 export * from "./fred";
 export * from "./bank-of-canada";
+export * from "./gdelt";
 
 export interface ProviderRuntimeConfig {
   provider: string;

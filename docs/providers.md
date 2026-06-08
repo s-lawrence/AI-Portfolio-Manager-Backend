@@ -100,6 +100,65 @@ Notes:
 - /economic-indicators
 - /economic-calendar (fallback /economics-calendar)
 - /market-risk-premium
+- /doc/doc (GDELT DOC API)
+
+## GDELT 2.0
+
+### Environment Configuration
+
+Set these values in your local environment file:
+
+```bash
+GDELT_BASE_URL="https://api.gdeltproject.org/api/v2"
+GDELT_TIMEOUT_MS="20000"
+```
+
+Notes:
+- GDELT requires no API key in this integration.
+- If `GDELT_TIMEOUT_MS` is not set, the shared `PROVIDER_HTTP_TIMEOUT_MS` value is used.
+- GDELT ingestion is designed as global geopolitical/news-event context, not ticker-specific company news.
+
+### Default Global Risk Queries
+
+- `geopolitical risk`
+- `war OR conflict OR sanctions`
+- `oil supply disruption OR energy crisis`
+- `central bank OR inflation OR recession`
+- `trade war OR tariffs`
+- `cyber attack OR critical infrastructure`
+- `Canada economy OR Canadian dollar`
+- `United States economy OR Federal Reserve`
+
+### GDELT Mapping Notes
+
+- Endpoint: `/doc/doc` with `mode=ArtList` and `format=json`.
+- Primary fields mapped from DOC response:
+	- `title -> title`
+	- `url -> url`
+	- `domain -> domain`
+	- `seendate -> publishedAt`
+	- `sourcecountry -> sourceCountry`
+	- `language -> language`
+	- `tone -> tone`
+- Items without title or usable published date are skipped.
+- URL-based dedupe is applied when URL is present.
+- Sentiment mapping from tone:
+	- `tone > 1 => POSITIVE`
+	- `tone < -1 => NEGATIVE`
+	- otherwise `NEUTRAL`
+
+### Non-Blocking Full-Refresh Behavior
+
+- Portfolio full-refresh can optionally include GDELT (`includeGdelt=true`).
+- GDELT ingestion runs after macro/economics sections and before portfolio analysis.
+- Query-level failures are captured in warnings and failed-query lists.
+- GDELT failures are non-blocking for the overall full-refresh response.
+
+### Current GDELT Limitations
+
+- GDELT DOC feed is high-noise and broad; this milestone intentionally keeps categorization simple.
+- Theme/category inference is query-driven and heuristic.
+- Only bounded summary/top-headline context is surfaced for downstream reporting and watchlist views.
 
 ### Ticker Examples
 

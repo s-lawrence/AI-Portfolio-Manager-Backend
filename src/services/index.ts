@@ -21,3 +21,4 @@ export * from "./fx-rates.service";
 export * from "./macro-series.service";
 export * from "./macro-ingestion.service";
 export * from "./watchlists.service";
+export * from "./geopolitical-ingestion.service";
