@@ -314,6 +314,15 @@ model AnalystSnapshot {
   priceTargetHigh      Float?
   priceTargetLow       Float?
   priceTargetConsensus Float?
+  targetMedian         Float?
+  lastMonthPriceTargetAvg   Float?
+  lastMonthPriceTargetCount Int?
+  lastQuarterPriceTargetAvg   Float?
+  lastQuarterPriceTargetCount Int?
+  lastYearPriceTargetAvg   Float?
+  lastYearPriceTargetCount Int?
+  allTimePriceTargetAvg   Float?
+  allTimePriceTargetCount Int?
   analystCount         Int?
   ratingConsensus      String?
   strongBuyCount       Int?

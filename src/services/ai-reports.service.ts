@@ -122,6 +122,7 @@ function buildAnalystSummary(args: {
     priceTargetHigh: number | null;
     priceTargetLow: number | null;
     priceTargetConsensus: number | null;
+    targetMedian: number | null;
     upsidePercent: number | null;
     ratingConsensus: string | null;
     analystCount: number | null;
@@ -134,8 +135,17 @@ function buildAnalystSummary(args: {
   actions: Array<{
     actionType: string;
     firm: string | null;
+    newRating: string | null;
     eventDate: Date;
   }>;
+  latestAnnualEstimate?: {
+    revenueAvg?: number;
+    epsAvg?: number;
+  } | null;
+  latestQuarterEstimate?: {
+    revenueAvg?: number;
+    epsAvg?: number;
+  } | null;
 }): string {
   const parts: string[] = [];
   const snapshot = args.snapshot;
@@ -145,6 +155,7 @@ function buildAnalystSummary(args: {
     const targetHigh = snapshot.priceTargetHigh;
     const targetLow = snapshot.priceTargetLow;
     const targetConsensus = snapshot.priceTargetConsensus;
+    const targetMedian = snapshot.targetMedian;
 
     if (
       targetAverage != null ||
@@ -153,7 +164,7 @@ function buildAnalystSummary(args: {
       targetConsensus != null
     ) {
       parts.push(
-        `Targets avg ${targetAverage != null ? targetAverage.toFixed(2) : "n/a"}, high ${targetHigh != null ? targetHigh.toFixed(2) : "n/a"}, low ${targetLow != null ? targetLow.toFixed(2) : "n/a"}, consensus ${targetConsensus != null ? targetConsensus.toFixed(2) : "n/a"}.`,
+        `Targets avg ${targetAverage != null ? targetAverage.toFixed(2) : "n/a"}, high ${targetHigh != null ? targetHigh.toFixed(2) : "n/a"}, low ${targetLow != null ? targetLow.toFixed(2) : "n/a"}, consensus ${targetConsensus != null ? targetConsensus.toFixed(2) : "n/a"}, median ${targetMedian != null ? targetMedian.toFixed(2) : "n/a"}.`,
       );
     }
 
@@ -189,6 +200,15 @@ function buildAnalystSummary(args: {
   }
 
   if (args.actions.length > 0) {
+    const latestAction = args.actions[0];
+    if (latestAction) {
+      const latestDate = latestAction.eventDate.toISOString().slice(0, 10);
+      const latestFirm = latestAction.firm ?? "Unknown firm";
+      parts.push(
+        `Latest grade action: ${latestAction.actionType} by ${latestFirm}${latestAction.newRating ? ` to ${latestAction.newRating}` : ""} (${latestDate}).`,
+      );
+    }
+
     const recent = args.actions.slice(0, 3).map((action) => {
       const date = action.eventDate.toISOString().slice(0, 10);
       const firm = action.firm ?? "Unknown firm";
@@ -196,6 +216,32 @@ function buildAnalystSummary(args: {
     });
 
     parts.push(`Recent analyst actions: ${recent.join("; ")}.`);
+  }
+
+  if (args.latestAnnualEstimate) {
+    const estimateParts: string[] = [];
+    if (args.latestAnnualEstimate.revenueAvg != null) {
+      estimateParts.push(`revenue avg ${formatEstimatedRevenue(args.latestAnnualEstimate.revenueAvg)}`);
+    }
+    if (args.latestAnnualEstimate.epsAvg != null) {
+      estimateParts.push(`EPS avg ${args.latestAnnualEstimate.epsAvg.toFixed(2)}`);
+    }
+    if (estimateParts.length > 0) {
+      parts.push(`Forward annual estimate: ${estimateParts.join(", ")}.`);
+    }
+  }
+
+  if (args.latestQuarterEstimate) {
+    const estimateParts: string[] = [];
+    if (args.latestQuarterEstimate.revenueAvg != null) {
+      estimateParts.push(`revenue avg ${formatEstimatedRevenue(args.latestQuarterEstimate.revenueAvg)}`);
+    }
+    if (args.latestQuarterEstimate.epsAvg != null) {
+      estimateParts.push(`EPS avg ${args.latestQuarterEstimate.epsAvg.toFixed(2)}`);
+    }
+    if (estimateParts.length > 0) {
+      parts.push(`Forward quarter estimate: ${estimateParts.join(", ")}.`);
+    }
   }
 
   if (parts.length === 0) {
@@ -1103,6 +1149,8 @@ export async function generateMockTickerReport(
     currentPrice,
     snapshot: bundle.latestAnalystSnapshot,
     actions: bundle.recentAnalystActions,
+    latestAnnualEstimate: bundle.latestAnnualAnalystEstimate,
+    latestQuarterEstimate: bundle.latestQuarterAnalystEstimate,
   });
 
   if (bundle.latestAnalystSnapshot || bundle.recentAnalystActions.length > 0) {

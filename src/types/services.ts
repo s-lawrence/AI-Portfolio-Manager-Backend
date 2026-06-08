@@ -154,6 +154,41 @@ export interface TickerDashboardSummary {
   latestFundamentalSnapshot: FundamentalSnapshot | null;
   latestAnalystSnapshot: AnalystSnapshot | null;
   recentAnalystActions: AnalystActionEvent[];
+  latestAnnualAnalystEstimate?: {
+    period: "annual";
+    date: string;
+    revenueLow?: number;
+    revenueHigh?: number;
+    revenueAvg?: number;
+    epsAvg?: number;
+    epsHigh?: number;
+    epsLow?: number;
+    numAnalystsRevenue?: number;
+    numAnalystsEps?: number;
+  } | null;
+  latestQuarterAnalystEstimate?: {
+    period: "quarter";
+    date: string;
+    revenueLow?: number;
+    revenueHigh?: number;
+    revenueAvg?: number;
+    epsAvg?: number;
+    epsHigh?: number;
+    epsLow?: number;
+    numAnalystsRevenue?: number;
+    numAnalystsEps?: number;
+  } | null;
+  fmpFinancialRating?: {
+    rating?: string;
+    overallScore?: number;
+    discountedCashFlowScore?: number;
+    returnOnEquityScore?: number;
+    returnOnAssetsScore?: number;
+    debtToEquityScore?: number;
+    priceToEarningsScore?: number;
+    priceToBookScore?: number;
+    capturedAt?: string;
+  } | null;
   recentNews: NewsArticle[];
   nextEarningsEvent: EarningsEvent | null;
   latestAIReport: AIReport | null;
@@ -196,6 +231,9 @@ export interface WatchlistResearchItemSummary {
   latestFundamentalSnapshot: FundamentalSnapshot | null;
   latestAnalystSnapshot: AnalystSnapshot | null;
   recentAnalystActions: AnalystActionEvent[];
+  latestAnnualAnalystEstimate?: TickerDashboardSummary["latestAnnualAnalystEstimate"];
+  latestQuarterAnalystEstimate?: TickerDashboardSummary["latestQuarterAnalystEstimate"];
+  fmpFinancialRating?: TickerDashboardSummary["fmpFinancialRating"];
   discoveryContext: {
     category: string | null;
     source: string | null;
@@ -580,11 +618,21 @@ export interface IngestTickerAnalystDataResult {
   actionsUpdated: number;
   priceTargetSummaryStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
   priceTargetConsensusStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  gradesConsensusStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  gradesHistoricalStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  gradesStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  analystEstimatesStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
+  ratingsSnapshotStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
   analystRatingsStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
   analystActionsStatus: "SUCCESS" | "EMPTY" | "ENTITLEMENT" | "ERROR" | "SKIPPED";
   subsourceWarnings: {
     priceTargetSummary: string[];
     priceTargetConsensus: string[];
+    gradesConsensus: string[];
+    gradesHistorical: string[];
+    grades: string[];
+    analystEstimates: string[];
+    ratingsSnapshot: string[];
     analystRatings: string[];
     analystActions: string[];
   };

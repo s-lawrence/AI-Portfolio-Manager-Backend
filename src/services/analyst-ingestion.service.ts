@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { fmpAnalystProvider } from "../providers/fmp";
 import { ProviderConfigurationError } from "../providers/errors";
 import {
+  ProviderAnalystEstimateSnapshot,
+  ProviderFinancialRatingSnapshot,
   ProviderAnalystSnapshot,
   normalizeProviderTickerOrThrow,
 } from "../providers/types";
@@ -87,81 +89,123 @@ function mergeSnapshotParts(
   ticker: string,
   summary: ProviderAnalystSnapshot | null,
   consensus: Partial<ProviderAnalystSnapshot> | null,
-  ratings: Partial<ProviderAnalystSnapshot> | null,
+  gradesConsensus: Partial<ProviderAnalystSnapshot> | null,
+  gradesHistorical: Partial<ProviderAnalystSnapshot> | null,
+  annualEstimates: ProviderAnalystEstimateSnapshot[],
+  quarterEstimates: ProviderAnalystEstimateSnapshot[],
+  ratingsSnapshot: ProviderFinancialRatingSnapshot | null,
+  ratingsHistorical: ProviderFinancialRatingSnapshot[],
   latestPrice: number | null,
 ): ProviderAnalystSnapshot | null {
+  const latestAnnualEstimate = annualEstimates[0] ?? null;
+  const latestQuarterEstimate = quarterEstimates[0] ?? null;
+  const latestHistoricalRating = ratingsHistorical[0] ?? null;
+
   const merged: ProviderAnalystSnapshot = {
     ticker,
     capturedAt:
       summary?.capturedAt ??
       consensus?.capturedAt ??
-      ratings?.capturedAt ??
+      gradesConsensus?.capturedAt ??
+      gradesHistorical?.capturedAt ??
       new Date(),
     source: pickFirstString([
       summary?.source,
       consensus?.source,
-      ratings?.source,
+      gradesConsensus?.source,
+      gradesHistorical?.source,
       "FMP",
     ]),
     priceTargetAverage: pickFirstNumber([
       summary?.priceTargetAverage,
       consensus?.priceTargetAverage,
-      ratings?.priceTargetAverage,
+      gradesConsensus?.priceTargetAverage,
+      gradesHistorical?.priceTargetAverage,
     ]),
     priceTargetHigh: pickFirstNumber([
       summary?.priceTargetHigh,
       consensus?.priceTargetHigh,
-      ratings?.priceTargetHigh,
+      gradesConsensus?.priceTargetHigh,
+      gradesHistorical?.priceTargetHigh,
     ]),
     priceTargetLow: pickFirstNumber([
       summary?.priceTargetLow,
       consensus?.priceTargetLow,
-      ratings?.priceTargetLow,
+      gradesConsensus?.priceTargetLow,
+      gradesHistorical?.priceTargetLow,
     ]),
     priceTargetConsensus: pickFirstNumber([
       summary?.priceTargetConsensus,
       consensus?.priceTargetConsensus,
-      ratings?.priceTargetConsensus,
+      gradesConsensus?.priceTargetConsensus,
+      gradesHistorical?.priceTargetConsensus,
     ]),
+    targetMedian: pickFirstNumber([
+      consensus?.targetMedian,
+      summary?.targetMedian,
+    ]),
+    lastMonthPriceTargetAvg: summary?.lastMonthPriceTargetAvg,
+    lastMonthPriceTargetCount: summary?.lastMonthPriceTargetCount,
+    lastQuarterPriceTargetAvg: summary?.lastQuarterPriceTargetAvg,
+    lastQuarterPriceTargetCount: summary?.lastQuarterPriceTargetCount,
+    lastYearPriceTargetAvg: summary?.lastYearPriceTargetAvg,
+    lastYearPriceTargetCount: summary?.lastYearPriceTargetCount,
+    allTimePriceTargetAvg: summary?.allTimePriceTargetAvg,
+    allTimePriceTargetCount: summary?.allTimePriceTargetCount,
     analystCount: pickFirstNumber([
-      ratings?.analystCount,
+      gradesConsensus?.analystCount,
+      gradesHistorical?.analystCount,
       summary?.analystCount,
       consensus?.analystCount,
     ]) as number | undefined,
     ratingConsensus: pickFirstString([
-      ratings?.ratingConsensus,
+      gradesConsensus?.ratingConsensus,
+      gradesHistorical?.ratingConsensus,
       consensus?.ratingConsensus,
       summary?.ratingConsensus,
     ]),
     strongBuyCount: pickFirstNumber([
-      ratings?.strongBuyCount,
+      gradesConsensus?.strongBuyCount,
+      gradesHistorical?.strongBuyCount,
       summary?.strongBuyCount,
     ]) as number | undefined,
     buyCount: pickFirstNumber([
-      ratings?.buyCount,
+      gradesConsensus?.buyCount,
+      gradesHistorical?.buyCount,
       summary?.buyCount,
     ]) as number | undefined,
     holdCount: pickFirstNumber([
-      ratings?.holdCount,
+      gradesConsensus?.holdCount,
+      gradesHistorical?.holdCount,
       summary?.holdCount,
     ]) as number | undefined,
     sellCount: pickFirstNumber([
-      ratings?.sellCount,
+      gradesConsensus?.sellCount,
+      gradesHistorical?.sellCount,
       summary?.sellCount,
     ]) as number | undefined,
     strongSellCount: pickFirstNumber([
-      ratings?.strongSellCount,
+      gradesConsensus?.strongSellCount,
+      gradesHistorical?.strongSellCount,
       summary?.strongSellCount,
     ]) as number | undefined,
     upsidePercent: pickFirstNumber([
       summary?.upsidePercent,
       consensus?.upsidePercent,
-      ratings?.upsidePercent,
+      gradesConsensus?.upsidePercent,
+      gradesHistorical?.upsidePercent,
     ]),
     raw: {
       priceTargetSummary: summary?.raw ?? null,
       priceTargetConsensus: consensus?.raw ?? null,
-      analystRatings: ratings?.raw ?? null,
+      gradesConsensus: gradesConsensus?.raw ?? null,
+      gradesHistorical: gradesHistorical?.raw ?? null,
+      analystEstimates: {
+        latestAnnual: latestAnnualEstimate,
+        latestQuarter: latestQuarterEstimate,
+      },
+      ratingsSnapshot,
+      ratingsHistoricalLatest: latestHistoricalRating,
     },
   };
 
@@ -254,6 +298,11 @@ export async function ingestTickerAnalystData(
   const subsourceWarnings: IngestTickerAnalystDataResult["subsourceWarnings"] = {
     priceTargetSummary: [],
     priceTargetConsensus: [],
+    gradesConsensus: [],
+    gradesHistorical: [],
+    grades: [],
+    analystEstimates: [],
+    ratingsSnapshot: [],
     analystRatings: [],
     analystActions: [],
   };
@@ -274,19 +323,45 @@ export async function ingestTickerAnalystData(
   const consensusCall = await safeOptionalCall("Price-target consensus", () =>
     fmpAnalystProvider.getPriceTargetConsensus(normalizedTicker),
   );
-  const ratingsCall = await safeOptionalCall("Analyst ratings", () =>
-    fmpAnalystProvider.getAnalystRatings(normalizedTicker),
+  const gradesConsensusCall = await safeOptionalCall("Grades consensus", () =>
+    fmpAnalystProvider.getGradesConsensus(normalizedTicker),
+  );
+  const gradesHistoricalCall = await safeOptionalCall("Grades historical", () =>
+    fmpAnalystProvider.getHistoricalGrades(normalizedTicker, { limit: 1 }),
+  );
+  const estimatesAnnualCall = await safeOptionalCall("Analyst estimates (annual)", () =>
+    fmpAnalystProvider.getAnalystEstimates(normalizedTicker, { period: "annual", limit: 10 }),
+  );
+  const estimatesQuarterCall = await safeOptionalCall("Analyst estimates (quarter)", () =>
+    fmpAnalystProvider.getAnalystEstimates(normalizedTicker, { period: "quarter", limit: 10 }),
+  );
+  const ratingsSnapshotCall = await safeOptionalCall("Ratings snapshot", () =>
+    fmpAnalystProvider.getRatingsSnapshot(normalizedTicker),
+  );
+  const ratingsHistoricalCall = await safeOptionalCall("Ratings historical", () =>
+    fmpAnalystProvider.getHistoricalRatings(normalizedTicker, { limit: 1 }),
   );
 
   subsourceWarnings.priceTargetSummary.push(...summaryCall.warnings);
   subsourceWarnings.priceTargetConsensus.push(...consensusCall.warnings);
-  subsourceWarnings.analystRatings.push(...ratingsCall.warnings);
+  subsourceWarnings.gradesConsensus.push(...gradesConsensusCall.warnings);
+  subsourceWarnings.gradesHistorical.push(...gradesHistoricalCall.warnings);
+  subsourceWarnings.analystEstimates.push(...estimatesAnnualCall.warnings);
+  subsourceWarnings.analystEstimates.push(...estimatesQuarterCall.warnings);
+  subsourceWarnings.ratingsSnapshot.push(...ratingsSnapshotCall.warnings);
+  subsourceWarnings.ratingsSnapshot.push(...ratingsHistoricalCall.warnings);
+  subsourceWarnings.analystRatings.push(...gradesConsensusCall.warnings);
 
   const mergedSnapshot = mergeSnapshotParts(
     normalizedTicker,
     summaryCall.value,
     consensusCall.value,
-    ratingsCall.value,
+    gradesConsensusCall.value,
+    gradesHistoricalCall.value,
+    estimatesAnnualCall.value ?? [],
+    estimatesQuarterCall.value ?? [],
+    ratingsSnapshotCall.value,
+    ratingsHistoricalCall.value ?? [],
     latestPrice,
   );
 
@@ -302,6 +377,15 @@ export async function ingestTickerAnalystData(
       priceTargetHigh: mergedSnapshot.priceTargetHigh,
       priceTargetLow: mergedSnapshot.priceTargetLow,
       priceTargetConsensus: mergedSnapshot.priceTargetConsensus,
+      targetMedian: mergedSnapshot.targetMedian,
+      lastMonthPriceTargetAvg: mergedSnapshot.lastMonthPriceTargetAvg,
+      lastMonthPriceTargetCount: mergedSnapshot.lastMonthPriceTargetCount,
+      lastQuarterPriceTargetAvg: mergedSnapshot.lastQuarterPriceTargetAvg,
+      lastQuarterPriceTargetCount: mergedSnapshot.lastQuarterPriceTargetCount,
+      lastYearPriceTargetAvg: mergedSnapshot.lastYearPriceTargetAvg,
+      lastYearPriceTargetCount: mergedSnapshot.lastYearPriceTargetCount,
+      allTimePriceTargetAvg: mergedSnapshot.allTimePriceTargetAvg,
+      allTimePriceTargetCount: mergedSnapshot.allTimePriceTargetCount,
       analystCount: mergedSnapshot.analystCount,
       ratingConsensus: mergedSnapshot.ratingConsensus,
       strongBuyCount: mergedSnapshot.strongBuyCount,
@@ -321,7 +405,8 @@ export async function ingestTickerAnalystData(
     if (
       summaryCall.status === "EMPTY" &&
       consensusCall.status === "EMPTY" &&
-      ratingsCall.status === "EMPTY"
+      gradesConsensusCall.status === "EMPTY" &&
+      gradesHistoricalCall.status === "EMPTY"
     ) {
       subsourceWarnings.priceTargetSummary.push(
         `No analyst snapshot data returned for ticker ${normalizedTicker}.`,
@@ -329,9 +414,10 @@ export async function ingestTickerAnalystData(
     }
   }
 
-  const actionsCall = await safeOptionalCall("Upgrades/downgrades", () =>
-    fmpAnalystProvider.getUpgradesDowngrades(normalizedTicker, { limit: 100 }),
+  const actionsCall = await safeOptionalCall("Grades", () =>
+    fmpAnalystProvider.getRecentGrades(normalizedTicker, { limit: 100 }),
   );
+  subsourceWarnings.grades.push(...actionsCall.warnings);
   subsourceWarnings.analystActions.push(...actionsCall.warnings);
 
   let actionsCreated = 0;
@@ -372,9 +458,19 @@ export async function ingestTickerAnalystData(
   const warnings = [
     ...subsourceWarnings.priceTargetSummary,
     ...subsourceWarnings.priceTargetConsensus,
+    ...subsourceWarnings.gradesConsensus,
+    ...subsourceWarnings.gradesHistorical,
+    ...subsourceWarnings.grades,
+    ...subsourceWarnings.analystEstimates,
+    ...subsourceWarnings.ratingsSnapshot,
     ...subsourceWarnings.analystRatings,
     ...subsourceWarnings.analystActions,
   ];
+
+  const gradesStatus =
+    actionsCall.status === "SUCCESS" && actionsCreated + actionsUpdated === 0
+      ? "EMPTY"
+      : actionsCall.status;
 
   return {
     ticker: normalizedTicker,
@@ -384,11 +480,27 @@ export async function ingestTickerAnalystData(
     actionsUpdated,
     priceTargetSummaryStatus: summaryCall.status,
     priceTargetConsensusStatus: consensusCall.status,
-    analystRatingsStatus: ratingsCall.status,
-    analystActionsStatus:
-      actionsCall.status === "SUCCESS" && actionsCreated + actionsUpdated === 0
-        ? "EMPTY"
-        : actionsCall.status,
+    gradesConsensusStatus: gradesConsensusCall.status,
+    gradesHistoricalStatus: gradesHistoricalCall.status,
+    gradesStatus,
+    analystEstimatesStatus:
+      estimatesAnnualCall.status === "SUCCESS" || estimatesQuarterCall.status === "SUCCESS"
+        ? "SUCCESS"
+        : estimatesAnnualCall.status === "EMPTY" && estimatesQuarterCall.status === "EMPTY"
+          ? "EMPTY"
+          : estimatesAnnualCall.status === "ENTITLEMENT" || estimatesQuarterCall.status === "ENTITLEMENT"
+            ? "ENTITLEMENT"
+            : "ERROR",
+    ratingsSnapshotStatus:
+      ratingsSnapshotCall.status === "SUCCESS" || ratingsHistoricalCall.status === "SUCCESS"
+        ? "SUCCESS"
+        : ratingsSnapshotCall.status === "EMPTY" && ratingsHistoricalCall.status === "EMPTY"
+          ? "EMPTY"
+          : ratingsSnapshotCall.status === "ENTITLEMENT" || ratingsHistoricalCall.status === "ENTITLEMENT"
+            ? "ENTITLEMENT"
+            : "ERROR",
+    analystRatingsStatus: gradesConsensusCall.status,
+    analystActionsStatus: gradesStatus,
     subsourceWarnings,
     warnings,
   };

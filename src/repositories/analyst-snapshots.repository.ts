@@ -71,6 +71,15 @@ export async function upsertAnalystSnapshot(
       existing.priceTargetHigh === (input.priceTargetHigh ?? null) &&
       existing.priceTargetLow === (input.priceTargetLow ?? null) &&
       existing.priceTargetConsensus === (input.priceTargetConsensus ?? null) &&
+      existing.targetMedian === (input.targetMedian ?? null) &&
+      existing.lastMonthPriceTargetAvg === (input.lastMonthPriceTargetAvg ?? null) &&
+      existing.lastMonthPriceTargetCount === (input.lastMonthPriceTargetCount ?? null) &&
+      existing.lastQuarterPriceTargetAvg === (input.lastQuarterPriceTargetAvg ?? null) &&
+      existing.lastQuarterPriceTargetCount === (input.lastQuarterPriceTargetCount ?? null) &&
+      existing.lastYearPriceTargetAvg === (input.lastYearPriceTargetAvg ?? null) &&
+      existing.lastYearPriceTargetCount === (input.lastYearPriceTargetCount ?? null) &&
+      existing.allTimePriceTargetAvg === (input.allTimePriceTargetAvg ?? null) &&
+      existing.allTimePriceTargetCount === (input.allTimePriceTargetCount ?? null) &&
       existing.analystCount === (input.analystCount ?? null) &&
       existing.ratingConsensus === nextRatingConsensus &&
       existing.strongBuyCount === (input.strongBuyCount ?? null) &&
@@ -97,6 +106,15 @@ export async function upsertAnalystSnapshot(
         priceTargetHigh: input.priceTargetHigh ?? null,
         priceTargetLow: input.priceTargetLow ?? null,
         priceTargetConsensus: input.priceTargetConsensus ?? null,
+        targetMedian: input.targetMedian ?? null,
+        lastMonthPriceTargetAvg: input.lastMonthPriceTargetAvg ?? null,
+        lastMonthPriceTargetCount: input.lastMonthPriceTargetCount ?? null,
+        lastQuarterPriceTargetAvg: input.lastQuarterPriceTargetAvg ?? null,
+        lastQuarterPriceTargetCount: input.lastQuarterPriceTargetCount ?? null,
+        lastYearPriceTargetAvg: input.lastYearPriceTargetAvg ?? null,
+        lastYearPriceTargetCount: input.lastYearPriceTargetCount ?? null,
+        allTimePriceTargetAvg: input.allTimePriceTargetAvg ?? null,
+        allTimePriceTargetCount: input.allTimePriceTargetCount ?? null,
         analystCount: input.analystCount ?? null,
         ratingConsensus: nextRatingConsensus,
         strongBuyCount: input.strongBuyCount ?? null,
@@ -125,6 +143,15 @@ export async function upsertAnalystSnapshot(
       priceTargetHigh: input.priceTargetHigh ?? null,
       priceTargetLow: input.priceTargetLow ?? null,
       priceTargetConsensus: input.priceTargetConsensus ?? null,
+      targetMedian: input.targetMedian ?? null,
+      lastMonthPriceTargetAvg: input.lastMonthPriceTargetAvg ?? null,
+      lastMonthPriceTargetCount: input.lastMonthPriceTargetCount ?? null,
+      lastQuarterPriceTargetAvg: input.lastQuarterPriceTargetAvg ?? null,
+      lastQuarterPriceTargetCount: input.lastQuarterPriceTargetCount ?? null,
+      lastYearPriceTargetAvg: input.lastYearPriceTargetAvg ?? null,
+      lastYearPriceTargetCount: input.lastYearPriceTargetCount ?? null,
+      allTimePriceTargetAvg: input.allTimePriceTargetAvg ?? null,
+      allTimePriceTargetCount: input.allTimePriceTargetCount ?? null,
       analystCount: input.analystCount ?? null,
       ratingConsensus: nextRatingConsensus,
       strongBuyCount: input.strongBuyCount ?? null,

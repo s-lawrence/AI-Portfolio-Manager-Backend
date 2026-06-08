@@ -248,6 +248,15 @@ export interface FmpPriceTargetSummaryItem {
   symbol?: string;
   date?: string;
   asOfDate?: string;
+  lastMonthCount?: number | string;
+  lastMonthAvgPriceTarget?: number | string;
+  lastQuarterCount?: number | string;
+  lastQuarterAvgPriceTarget?: number | string;
+  lastYearCount?: number | string;
+  lastYearAvgPriceTarget?: number | string;
+  allTimeCount?: number | string;
+  allTimeAvgPriceTarget?: number | string;
+  publishers?: string | unknown[];
   targetAvg?: number | string;
   targetAverage?: number | string;
   targetHigh?: number | string;
@@ -289,6 +298,64 @@ export interface FmpPriceTargetConsensusItem {
   consensus?: string;
   ratingConsensus?: string;
   recommendation?: string;
+}
+
+export interface FmpGradesConsensusItem {
+  symbol?: string;
+  strongBuy?: number | string;
+  buy?: number | string;
+  hold?: number | string;
+  sell?: number | string;
+  strongSell?: number | string;
+  consensus?: string;
+}
+
+export interface FmpGradesHistoricalItem {
+  symbol?: string;
+  date?: string;
+  analystRatingsStrongBuy?: number | string;
+  analystRatingsBuy?: number | string;
+  analystRatingsHold?: number | string;
+  analystRatingsSell?: number | string;
+  analystRatingsStrongSell?: number | string;
+}
+
+export interface FmpAnalystEstimateItem {
+  symbol?: string;
+  date?: string;
+  revenueLow?: number | string;
+  revenueHigh?: number | string;
+  revenueAvg?: number | string;
+  ebitdaLow?: number | string;
+  ebitdaHigh?: number | string;
+  ebitdaAvg?: number | string;
+  ebitLow?: number | string;
+  ebitHigh?: number | string;
+  ebitAvg?: number | string;
+  netIncomeLow?: number | string;
+  netIncomeHigh?: number | string;
+  netIncomeAvg?: number | string;
+  sgaExpenseLow?: number | string;
+  sgaExpenseHigh?: number | string;
+  sgaExpenseAvg?: number | string;
+  epsAvg?: number | string;
+  epsHigh?: number | string;
+  epsLow?: number | string;
+  numAnalystsRevenue?: number | string;
+  numAnalystsEps?: number | string;
+}
+
+export interface FmpRatingsSnapshotItem {
+  symbol?: string;
+  date?: string;
+  rating?: string;
+  overallScore?: number | string;
+  discountedCashFlowScore?: number | string;
+  returnOnEquityScore?: number | string;
+  returnOnAssetsScore?: number | string;
+  debtToEquityScore?: number | string;
+  priceToEarningsScore?: number | string;
+  priceToBookScore?: number | string;
 }
 
 export interface FmpAnalystRatingItem {

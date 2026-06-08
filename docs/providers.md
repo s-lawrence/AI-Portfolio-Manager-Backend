@@ -91,8 +91,15 @@ Notes:
 - /news/stock?symbols={symbol}
 - /stable/price-target-summary?symbol={symbol} (fallback /price-target-summary)
 - /stable/price-target-consensus?symbol={symbol} (fallback /price-target-consensus)
-- /stable/analyst-ratings?symbol={symbol} (fallback /analyst-ratings, /stable/recommendation-trends, /recommendation-trends)
-- /stable/upgrades-downgrades?symbol={symbol} (fallback /upgrades-downgrades, /stable/upgrades-downgrades-consensus, /upgrades-downgrades-consensus)
+- /stable/grades-consensus?symbol={symbol} (primary analyst rating distribution source)
+- /stable/grades?symbol={symbol} (primary recent analyst action/grade events source)
+- /stable/grades-historical?symbol={symbol}&limit={n} (historical rating distribution source)
+- /stable/analyst-estimates?symbol={symbol}&period={annual|quarter}&page={n}&limit={n}
+- /stable/ratings-snapshot?symbol={symbol} (FMP financial score snapshot)
+- /stable/ratings-historical?symbol={symbol}&limit={n} (historical FMP financial score)
+- /stable/analyst-ratings?symbol={symbol} (legacy fallback only)
+- /stable/recommendation-trends?symbol={symbol} (legacy fallback only)
+- /stable/upgrades-downgrades?symbol={symbol} (legacy fallback only)
 - /stable/biggest-gainers (fallback /biggest-gainers, /stable/market-biggest-gainers, /market-biggest-gainers)
 - /stable/biggest-losers (fallback /biggest-losers, /stable/market-biggest-losers, /market-biggest-losers)
 - /stable/most-actives (fallback /most-actives, /stable/market-most-active, /market-most-active)
@@ -227,10 +234,14 @@ U.S. examples:
 - News ingestion reads company news from FMP and upserts by unique article URL for idempotency.
 - If provider sentiment/materiality is missing, deterministic local fallback classification is applied.
 - Demo-marked local fake news is explicitly identified so reports can prefer real company headlines.
-- Analyst ingestion reads price-target summary/consensus, analyst ratings, and upgrades-downgrades endpoints.
-- Analyst ingestion reports subsource diagnostics for summary, consensus, ratings, and actions.
+- Analyst ingestion reads price-target summary/consensus, grades-consensus, grades, grades-historical, analyst-estimates, ratings-snapshot, and ratings-historical endpoints.
+- Analyst ingestion reports subsource diagnostics for summary, consensus, grades consensus/historical, grades actions, analyst estimates, and ratings snapshot.
 - Subsource statuses distinguish `SUCCESS`, `EMPTY`, and `FAILED`, with warning details for partial payloads.
-- Analyst mapping tolerates common FMP schema variants (snake_case/camelCase and recommendation-trend count aliases).
+- `grades-consensus` is the primary analyst rating distribution source (strongBuy/buy/hold/sell/strongSell/consensus).
+- `grades` is the primary analyst action source and maps to upgrade/downgrade/reiterated/initiated events.
+- `analyst-estimates` is the forward revenue/EPS estimates source.
+- `ratings-snapshot` and `ratings-historical` are FMP financial score feeds and are not treated as buy/hold/sell analyst consensus.
+- Analyst mapping tolerates common FMP schema variants (snake_case/camelCase and legacy recommendation-trend count aliases).
 - Discovery ingestion reads gainers/losers/most-active plus analyst-upgrades/downgrades categories.
 - Discovery list reads apply default quality guards when omitted by callers: min price `>= 5`, max absolute change percent `<= 300`, and OTC exclusion.
 - Analyst/discovery endpoint fallback behavior: 404 responses try the next candidate endpoint automatically.

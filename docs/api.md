@@ -426,11 +426,21 @@ Analyst ingestion/read responses include subsource diagnostics when available:
 
 - `priceTargetSummaryStatus`
 - `priceTargetConsensusStatus`
+- `gradesConsensusStatus`
+- `gradesHistoricalStatus`
+- `gradesStatus`
+- `analystEstimatesStatus`
+- `ratingsSnapshotStatus`
 - `analystRatingsStatus`
 - `analystActionsStatus`
 - `subsourceWarnings`
 
-Status values are `SUCCESS`, `EMPTY`, or `FAILED`.
+Compatibility aliases:
+
+- `analystRatingsStatus` mirrors `gradesConsensusStatus`
+- `analystActionsStatus` mirrors `gradesStatus`
+
+Status values are `SUCCESS`, `EMPTY`, `ENTITLEMENT`, `ERROR`, or `SKIPPED`.
 
 Refresh and read discovery candidates:
 

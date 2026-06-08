@@ -122,6 +122,108 @@ function asNullableDate(value: unknown): Date | null {
   return null;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asOptionalFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function asOptionalInteger(value: unknown): number | undefined {
+  const numeric = asOptionalFiniteNumber(value);
+  return numeric == null ? undefined : Math.trunc(numeric);
+}
+
+function asOptionalIsoDate(value: unknown): string | undefined {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  return undefined;
+}
+
+function parseAnalystBundleDetails(raw: unknown): Pick<
+  WatchlistResearchItemSummary,
+  "latestAnnualAnalystEstimate" | "latestQuarterAnalystEstimate" | "fmpFinancialRating"
+> {
+  const payload = asRecord(raw);
+  if (!payload) {
+    return {
+      latestAnnualAnalystEstimate: null,
+      latestQuarterAnalystEstimate: null,
+      fmpFinancialRating: null,
+    };
+  }
+
+  const estimates = asRecord(payload.analystEstimates);
+  const latestAnnual = estimates ? asRecord(estimates.latestAnnual) : null;
+  const latestQuarter = estimates ? asRecord(estimates.latestQuarter) : null;
+  const ratingsSnapshot = asRecord(payload.ratingsSnapshot);
+
+  return {
+    latestAnnualAnalystEstimate: latestAnnual
+      ? {
+          period: "annual",
+          date: asOptionalIsoDate(latestAnnual.date) ?? new Date().toISOString(),
+          revenueLow: asOptionalFiniteNumber(latestAnnual.revenueLow),
+          revenueHigh: asOptionalFiniteNumber(latestAnnual.revenueHigh),
+          revenueAvg: asOptionalFiniteNumber(latestAnnual.revenueAvg),
+          epsAvg: asOptionalFiniteNumber(latestAnnual.epsAvg),
+          epsHigh: asOptionalFiniteNumber(latestAnnual.epsHigh),
+          epsLow: asOptionalFiniteNumber(latestAnnual.epsLow),
+          numAnalystsRevenue: asOptionalInteger(latestAnnual.numAnalystsRevenue),
+          numAnalystsEps: asOptionalInteger(latestAnnual.numAnalystsEps),
+        }
+      : null,
+    latestQuarterAnalystEstimate: latestQuarter
+      ? {
+          period: "quarter",
+          date: asOptionalIsoDate(latestQuarter.date) ?? new Date().toISOString(),
+          revenueLow: asOptionalFiniteNumber(latestQuarter.revenueLow),
+          revenueHigh: asOptionalFiniteNumber(latestQuarter.revenueHigh),
+          revenueAvg: asOptionalFiniteNumber(latestQuarter.revenueAvg),
+          epsAvg: asOptionalFiniteNumber(latestQuarter.epsAvg),
+          epsHigh: asOptionalFiniteNumber(latestQuarter.epsHigh),
+          epsLow: asOptionalFiniteNumber(latestQuarter.epsLow),
+          numAnalystsRevenue: asOptionalInteger(latestQuarter.numAnalystsRevenue),
+          numAnalystsEps: asOptionalInteger(latestQuarter.numAnalystsEps),
+        }
+      : null,
+    fmpFinancialRating: ratingsSnapshot
+      ? {
+          rating: typeof ratingsSnapshot.rating === "string" ? ratingsSnapshot.rating : undefined,
+          overallScore: asOptionalFiniteNumber(ratingsSnapshot.overallScore),
+          discountedCashFlowScore: asOptionalFiniteNumber(ratingsSnapshot.discountedCashFlowScore),
+          returnOnEquityScore: asOptionalFiniteNumber(ratingsSnapshot.returnOnEquityScore),
+          returnOnAssetsScore: asOptionalFiniteNumber(ratingsSnapshot.returnOnAssetsScore),
+          debtToEquityScore: asOptionalFiniteNumber(ratingsSnapshot.debtToEquityScore),
+          priceToEarningsScore: asOptionalFiniteNumber(ratingsSnapshot.priceToEarningsScore),
+          priceToBookScore: asOptionalFiniteNumber(ratingsSnapshot.priceToBookScore),
+          capturedAt: asOptionalIsoDate(ratingsSnapshot.capturedAt),
+        }
+      : null,
+  };
+}
+
 // Agent-ready service wrapper candidate for watchlist creation.
 export async function createWatchlistForUser(
   userId: string,
@@ -362,6 +464,7 @@ export async function getWatchlistResearchBundle(
       ]);
 
       const topHeadlines = recentNews.slice(0, 3);
+      const analystBundleDetails = parseAnalystBundleDetails(latestAnalystSnapshot?.raw);
 
       return {
         itemId: item.id,
@@ -391,6 +494,9 @@ export async function getWatchlistResearchBundle(
         latestFundamentalSnapshot,
         latestAnalystSnapshot,
         recentAnalystActions,
+        latestAnnualAnalystEstimate: analystBundleDetails.latestAnnualAnalystEstimate,
+        latestQuarterAnalystEstimate: analystBundleDetails.latestQuarterAnalystEstimate,
+        fmpFinancialRating: analystBundleDetails.fmpFinancialRating,
         discoveryContext:
           recentDiscovery[0] != null
             ? {

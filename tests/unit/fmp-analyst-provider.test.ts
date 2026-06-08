@@ -15,112 +15,108 @@ function createMockClient(
 }
 
 describe("fmp-analyst.provider", () => {
-  it("falls back from stable summary endpoint and maps analyst snapshot fields", async () => {
-    const calledPaths: string[] = [];
-    let calledQuery: FmpJsonQuery | undefined;
-
-    const provider = new FmpAnalystProvider(
-      createMockClient((path, query) => {
-        calledPaths.push(path);
-        calledQuery = query;
-
-        if (path === "/stable/price-target-summary") {
-          throw new ProviderRequestError(FMP_PROVIDER_NAME, "not found", {
-            statusCode: 404,
-          });
-        }
-
-        if (path === "/price-target-summary") {
-          return [
-            {
-              symbol: "aapl",
-              date: "2026-06-01",
-              targetMean: "210.5",
-              targetHigh: "238.0",
-              targetLow: "188.0",
-              targetConsensus: "215.0",
-              analystCount: "30",
-              ratingConsensus: "BUY",
-              upsidePercent: "11.4",
-            },
-          ];
-        }
-
-        return [];
-      }),
-    );
-
-    const snapshot = await provider.getPriceTargetSummary("aapl");
-
-    expect(snapshot).not.toBeNull();
-    expect(snapshot?.ticker).toBe("AAPL");
-    expect(snapshot?.priceTargetAverage).toBeCloseTo(210.5);
-    expect(snapshot?.priceTargetHigh).toBeCloseTo(238);
-    expect(snapshot?.priceTargetLow).toBeCloseTo(188);
-    expect(snapshot?.priceTargetConsensus).toBeCloseTo(215);
-    expect(snapshot?.analystCount).toBe(30);
-    expect(snapshot?.ratingConsensus).toBe("BUY");
-    expect(snapshot?.upsidePercent).toBeCloseTo(11.4);
-    expect(calledPaths).toEqual([
-      "/stable/price-target-summary",
-      "/price-target-summary",
-    ]);
-    expect(calledQuery).toMatchObject({ symbol: "AAPL" });
-  });
-
-  it("maps price-target consensus and analyst ratings payloads", async () => {
+  it("maps stable price-target summary payload including rolling-window fields", async () => {
     const provider = new FmpAnalystProvider(
       createMockClient((path) => {
-        if (path === "/stable/price-target-consensus") {
-          return [
-            {
-              targetConsensus: "190",
-              analystCount: 22,
-              ratingConsensus: "OUTPERFORM",
-            },
-          ];
+        if (path !== "/stable/price-target-summary") {
+          return [];
         }
 
-        if (path === "/stable/analyst-ratings") {
-          return [
-            {
-              analystCount: "22",
-              recommendation: "Outperform",
-              strongBuy: "8",
-              buy: "7",
-              hold: "5",
-              sell: "1",
-              strongSell: "1",
-            },
-          ];
-        }
-
-        return [];
+        return [
+          {
+            symbol: "AAPL",
+            lastMonthCount: 28,
+            lastMonthAvgPriceTarget: 209.12,
+            lastQuarterCount: 31,
+            lastQuarterAvgPriceTarget: 210.44,
+            lastYearCount: 39,
+            lastYearAvgPriceTarget: 205.83,
+            allTimeCount: 49,
+            allTimeAvgPriceTarget: 198.91,
+            publishers: '["Firm A", "Firm B"]',
+          },
+        ];
       }),
     );
 
-    const consensus = await provider.getPriceTargetConsensus("MSFT");
-    const ratings = await provider.getAnalystRatings("MSFT");
+    const snapshot = await provider.getPriceTargetSummary("AAPL");
 
-    expect(consensus).not.toBeNull();
-    expect(consensus?.priceTargetConsensus).toBe(190);
-    expect(consensus?.analystCount).toBe(22);
-    expect(consensus?.ratingConsensus).toBe("OUTPERFORM");
-
-    expect(ratings).not.toBeNull();
-    expect(ratings?.analystCount).toBe(22);
-    expect(ratings?.ratingConsensus).toBe("Outperform");
-    expect(ratings?.strongBuyCount).toBe(8);
-    expect(ratings?.buyCount).toBe(7);
-    expect(ratings?.holdCount).toBe(5);
-    expect(ratings?.sellCount).toBe(1);
-    expect(ratings?.strongSellCount).toBe(1);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.lastMonthPriceTargetCount).toBe(28);
+    expect(snapshot?.lastMonthPriceTargetAvg).toBeCloseTo(209.12);
+    expect(snapshot?.lastQuarterPriceTargetCount).toBe(31);
+    expect(snapshot?.lastQuarterPriceTargetAvg).toBeCloseTo(210.44);
+    expect(snapshot?.allTimePriceTargetCount).toBe(49);
+    expect(snapshot?.allTimePriceTargetAvg).toBeCloseTo(198.91);
+    expect(snapshot?.priceTargetAverage).toBeCloseTo(210.44);
+    expect(snapshot?.analystCount).toBe(31);
   });
 
-  it("maps upgrades/downgrades with ticker normalization, sort order, and limits", async () => {
+  it("maps stable price-target consensus payload including target median", async () => {
+    const provider = new FmpAnalystProvider(
+      createMockClient((path) => {
+        if (path !== "/stable/price-target-consensus") {
+          return [];
+        }
+
+        return [
+          {
+            symbol: "AAPL",
+            targetHigh: 240,
+            targetLow: 172,
+            targetConsensus: 212,
+            targetMedian: 214,
+          },
+        ];
+      }),
+    );
+
+    const consensus = await provider.getPriceTargetConsensus("AAPL");
+
+    expect(consensus).not.toBeNull();
+    expect(consensus?.priceTargetConsensus).toBe(212);
+    expect(consensus?.targetMedian).toBe(214);
+    expect(consensus?.priceTargetHigh).toBe(240);
+    expect(consensus?.priceTargetLow).toBe(172);
+  });
+
+  it("maps grades-consensus as analyst ratings distribution", async () => {
+    const provider = new FmpAnalystProvider(
+      createMockClient((path) => {
+        if (path !== "/stable/grades-consensus") {
+          return [];
+        }
+
+        return [
+          {
+            symbol: "AAPL",
+            strongBuy: 5,
+            buy: 17,
+            hold: 6,
+            sell: 1,
+            strongSell: 0,
+            consensus: "Buy",
+          },
+        ];
+      }),
+    );
+
+    const ratings = await provider.getAnalystRatings("AAPL");
+
+    expect(ratings).not.toBeNull();
+    expect(ratings?.ratingConsensus).toBe("Buy");
+    expect(ratings?.strongBuyCount).toBe(5);
+    expect(ratings?.buyCount).toBe(17);
+    expect(ratings?.holdCount).toBe(6);
+    expect(ratings?.sellCount).toBe(1);
+    expect(ratings?.strongSellCount).toBe(0);
+    expect(ratings?.analystCount).toBe(29);
+  });
+
+  it("maps grades rows into analyst action events", async () => {
     const provider = new FmpAnalystProvider(
       createMockClient((path, query) => {
-        if (path !== "/stable/upgrades-downgrades") {
+        if (path !== "/stable/grades") {
           return [];
         }
 
@@ -129,33 +125,27 @@ describe("fmp-analyst.provider", () => {
         return [
           {
             symbol: "nvda",
-            actionType: "Downgrade",
-            firm: "Firm B",
-            eventDate: "2026-06-08",
+            action: "Downgrade",
+            gradingCompany: "Firm B",
+            date: "2026-06-08",
             previousGrade: "Buy",
             newGrade: "Hold",
-            previousTargetPrice: "140",
-            newTargetPrice: "130",
           },
           {
             symbol: "nvda",
-            actionType: "Upgrade",
-            firm: "Firm A",
-            eventDate: "2026-06-10",
+            action: "Upgrade",
+            gradingCompany: "Firm A",
+            date: "2026-06-10",
             previousGrade: "Hold",
             newGrade: "Buy",
-            previousTargetPrice: "130",
-            newTargetPrice: "150",
           },
           {
             symbol: "nvda",
-            actionType: "Upgrade",
-            firm: "Firm C",
-            eventDate: "2026-06-09",
+            action: "Maintain",
+            gradingCompany: "Firm C",
+            date: "2026-06-09",
             previousGrade: "Neutral",
             newGrade: "Buy",
-            previousTargetPrice: "132",
-            newTargetPrice: "148",
           },
         ];
       }),
@@ -167,6 +157,7 @@ describe("fmp-analyst.provider", () => {
     expect(actions[0]?.ticker).toBe("NVDA");
     expect(actions[0]?.actionType).toBe("UPGRADE");
     expect(actions[0]?.firm).toBe("Firm A");
+    expect(actions[1]?.actionType).toBe("REITERATED");
     expect(actions[1]?.firm).toBe("Firm C");
   });
 
@@ -201,41 +192,100 @@ describe("fmp-analyst.provider", () => {
     expect(movers[0]?.volume).toBe(1_000_000);
   });
 
-  it("maps recommendation-trends rows using latest count fields", async () => {
+  it("uses grades-historical fallback when grades-consensus is unavailable", async () => {
     const provider = new FmpAnalystProvider(
       createMockClient((path) => {
-        if (path === "/stable/analyst-ratings") {
+        if (path === "/stable/grades-consensus") {
           return [];
         }
 
-        if (path === "/analyst-ratings") {
+        if (path !== "/stable/grades-historical") {
           return [];
         }
 
-        if (path === "/stable/recommendation-trends") {
+        return [
+          {
+            symbol: "AAPL",
+            date: "2026-06-01",
+            analystRatingsStrongBuy: 7,
+            analystRatingsBuy: 12,
+            analystRatingsHold: 4,
+            analystRatingsSell: 1,
+            analystRatingsStrongSell: 0,
+          },
+        ];
+      }),
+    );
+
+    const ratings = await provider.getAnalystRatings("AAPL");
+
+    expect(ratings).not.toBeNull();
+    expect(ratings?.strongBuyCount).toBe(7);
+    expect(ratings?.buyCount).toBe(12);
+    expect(ratings?.holdCount).toBe(4);
+    expect(ratings?.sellCount).toBe(1);
+    expect(ratings?.strongSellCount).toBe(0);
+    expect(ratings?.analystCount).toBe(24);
+  });
+
+  it("maps analyst-estimates annual payload", async () => {
+    const provider = new FmpAnalystProvider(
+      createMockClient((path, query) => {
+        if (path !== "/stable/analyst-estimates") {
+          return [];
+        }
+
+        expect(query).toMatchObject({ symbol: "AAPL", period: "annual", page: 0, limit: 10 });
+
+        return [
+          {
+            symbol: "AAPL",
+            date: "2027-09-30",
+            revenueLow: 410000000000,
+            revenueHigh: 430000000000,
+            revenueAvg: 420000000000,
+            epsAvg: 7.84,
+            epsHigh: 8.12,
+            epsLow: 7.41,
+            numAnalystsRevenue: 26,
+            numAnalystsEps: 27,
+          },
+        ];
+      }),
+    );
+
+    const estimates = await provider.getAnalystEstimates("AAPL", { period: "annual", limit: 10 });
+
+    expect(estimates).toHaveLength(1);
+    expect(estimates[0]?.period).toBe("annual");
+    expect(estimates[0]?.revenueAvg).toBe(420000000000);
+    expect(estimates[0]?.epsAvg).toBe(7.84);
+    expect(estimates[0]?.numAnalystsRevenue).toBe(26);
+  });
+
+  it("does not treat ratings-snapshot as analyst consensus distribution", async () => {
+    const provider = new FmpAnalystProvider(
+      createMockClient((path) => {
+        if (path === "/stable/grades-consensus") {
+          return [];
+        }
+
+        if (path === "/stable/grades-historical") {
+          return [];
+        }
+
+        if (path === "/stable/ratings-snapshot") {
           return [
             {
-              date: "2026-06-01",
-              recommendationTrends: [
-                {
-                  date: "2026-05-01",
-                  strongBuyCount: 1,
-                  buyCount: 2,
-                  holdCount: 3,
-                  sellCount: 4,
-                  strongSellCount: 5,
-                  totalAnalysts: 15,
-                },
-                {
-                  date: "2026-06-01",
-                  strongBuyCount: 2,
-                  buyCount: 4,
-                  holdCount: 1,
-                  sellCount: 0,
-                  strongSellCount: 1,
-                  totalAnalysts: 8,
-                },
-              ],
+              symbol: "AAPL",
+              rating: "B",
+              overallScore: 4,
+              discountedCashFlowScore: 4,
+              returnOnEquityScore: 5,
+              returnOnAssetsScore: 4,
+              debtToEquityScore: 3,
+              priceToEarningsScore: 4,
+              priceToBookScore: 4,
             },
           ];
         }
@@ -244,15 +294,13 @@ describe("fmp-analyst.provider", () => {
       }),
     );
 
-    const ratings = await provider.getAnalystRatings("AAPL");
+    const analystRatings = await provider.getAnalystRatings("AAPL");
+    const financialRating = await provider.getRatingsSnapshot("AAPL");
 
-    expect(ratings).not.toBeNull();
-    expect(ratings?.analystCount).toBe(8);
-    expect(ratings?.strongBuyCount).toBe(2);
-    expect(ratings?.buyCount).toBe(4);
-    expect(ratings?.holdCount).toBe(1);
-    expect(ratings?.sellCount).toBe(0);
-    expect(ratings?.strongSellCount).toBe(1);
+    expect(analystRatings).toBeNull();
+    expect(financialRating).not.toBeNull();
+    expect(financialRating?.rating).toBe("B");
+    expect(financialRating?.overallScore).toBe(4);
   });
 
   it("filters analyst discovery items by upgrades/downgrades category", async () => {

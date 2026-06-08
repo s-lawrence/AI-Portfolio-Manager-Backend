@@ -258,7 +258,7 @@ describe("API ingestion routes", () => {
       raw: { source: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 20,
       ratingConsensus: "BUY",
@@ -270,7 +270,12 @@ describe("API ingestion routes", () => {
       raw: { source: "ratings" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockImplementation(async (symbol) => [
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockImplementation(async (symbol) => [
       {
         ticker: symbol,
         source: "FMP",
@@ -348,8 +353,11 @@ describe("API ingestion routes", () => {
     expect(researchResponse.statusCode).toBe(200);
     expect(researchResponse.json().data.latestPriceSnapshot.price).toBe(310);
     expect(researchResponse.json().data.latestAnalystSnapshot).toBeDefined();
+    expect(typeof researchResponse.json().data.latestAnalystSnapshot.buyCount).toBe("number");
     expect(Array.isArray(researchResponse.json().data.recentAnalystActions)).toBe(true);
     expect(researchResponse.json().data.recentAnalystActions.length).toBeGreaterThan(0);
+    expect(researchResponse.json().data.latestAnnualAnalystEstimate).toBeDefined();
+    expect(researchResponse.json().data.fmpFinancialRating).toBeDefined();
 
     const portfolioResponse = await app.inject({
       method: "GET",
@@ -1437,7 +1445,7 @@ describe("API ingestion routes", () => {
       raw: { source: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 12,
       ratingConsensus: "BUY",
@@ -1449,7 +1457,12 @@ describe("API ingestion routes", () => {
       raw: { source: "ratings" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockResolvedValue([
       {
         ticker,
         source: "FMP",
@@ -1682,7 +1695,7 @@ describe("API ingestion routes", () => {
       raw: { source: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 9,
       ratingConsensus: "BUY",
@@ -1694,7 +1707,12 @@ describe("API ingestion routes", () => {
       raw: { source: "ratings" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockResolvedValue([
       {
         ticker: "TSTFRANA",
         source: "FMP",

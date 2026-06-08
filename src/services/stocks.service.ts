@@ -27,6 +27,112 @@ import { getLatestTechnicalSnapshot } from "../repositories/technical-snapshots.
 import { normalizeTickerOrThrow } from "../types/common";
 import { TickerDashboardSummary } from "../types/services";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toFiniteNumberOrUndefined(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function toIntegerOrUndefined(value: unknown): number | undefined {
+  const numeric = toFiniteNumberOrUndefined(value);
+  return numeric == null ? undefined : Math.trunc(numeric);
+}
+
+function toDateIsoOrUndefined(value: unknown): string | undefined {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  return undefined;
+}
+
+function parseAnalystBundleDetails(
+  raw: unknown,
+): Pick<
+  TickerDashboardSummary,
+  "latestAnnualAnalystEstimate" | "latestQuarterAnalystEstimate" | "fmpFinancialRating"
+> {
+  if (!isRecord(raw)) {
+    return {
+      latestAnnualAnalystEstimate: null,
+      latestQuarterAnalystEstimate: null,
+      fmpFinancialRating: null,
+    };
+  }
+
+  const estimates = isRecord(raw.analystEstimates) ? raw.analystEstimates : null;
+  const latestAnnual = estimates && isRecord(estimates.latestAnnual) ? estimates.latestAnnual : null;
+  const latestQuarter = estimates && isRecord(estimates.latestQuarter) ? estimates.latestQuarter : null;
+  const ratingsSnapshot = isRecord(raw.ratingsSnapshot) ? raw.ratingsSnapshot : null;
+
+  return {
+    latestAnnualAnalystEstimate: latestAnnual
+      ? {
+          period: "annual",
+          date: toDateIsoOrUndefined(latestAnnual.date) ?? new Date().toISOString(),
+          revenueLow: toFiniteNumberOrUndefined(latestAnnual.revenueLow),
+          revenueHigh: toFiniteNumberOrUndefined(latestAnnual.revenueHigh),
+          revenueAvg: toFiniteNumberOrUndefined(latestAnnual.revenueAvg),
+          epsAvg: toFiniteNumberOrUndefined(latestAnnual.epsAvg),
+          epsHigh: toFiniteNumberOrUndefined(latestAnnual.epsHigh),
+          epsLow: toFiniteNumberOrUndefined(latestAnnual.epsLow),
+          numAnalystsRevenue: toIntegerOrUndefined(latestAnnual.numAnalystsRevenue),
+          numAnalystsEps: toIntegerOrUndefined(latestAnnual.numAnalystsEps),
+        }
+      : null,
+    latestQuarterAnalystEstimate: latestQuarter
+      ? {
+          period: "quarter",
+          date: toDateIsoOrUndefined(latestQuarter.date) ?? new Date().toISOString(),
+          revenueLow: toFiniteNumberOrUndefined(latestQuarter.revenueLow),
+          revenueHigh: toFiniteNumberOrUndefined(latestQuarter.revenueHigh),
+          revenueAvg: toFiniteNumberOrUndefined(latestQuarter.revenueAvg),
+          epsAvg: toFiniteNumberOrUndefined(latestQuarter.epsAvg),
+          epsHigh: toFiniteNumberOrUndefined(latestQuarter.epsHigh),
+          epsLow: toFiniteNumberOrUndefined(latestQuarter.epsLow),
+          numAnalystsRevenue: toIntegerOrUndefined(latestQuarter.numAnalystsRevenue),
+          numAnalystsEps: toIntegerOrUndefined(latestQuarter.numAnalystsEps),
+        }
+      : null,
+    fmpFinancialRating: ratingsSnapshot
+      ? {
+          rating:
+            typeof ratingsSnapshot.rating === "string" ? ratingsSnapshot.rating : undefined,
+          overallScore: toFiniteNumberOrUndefined(ratingsSnapshot.overallScore),
+          discountedCashFlowScore: toFiniteNumberOrUndefined(
+            ratingsSnapshot.discountedCashFlowScore,
+          ),
+          returnOnEquityScore: toFiniteNumberOrUndefined(ratingsSnapshot.returnOnEquityScore),
+          returnOnAssetsScore: toFiniteNumberOrUndefined(ratingsSnapshot.returnOnAssetsScore),
+          debtToEquityScore: toFiniteNumberOrUndefined(ratingsSnapshot.debtToEquityScore),
+          priceToEarningsScore: toFiniteNumberOrUndefined(ratingsSnapshot.priceToEarningsScore),
+          priceToBookScore: toFiniteNumberOrUndefined(ratingsSnapshot.priceToBookScore),
+          capturedAt: toDateIsoOrUndefined(ratingsSnapshot.capturedAt),
+        }
+      : null,
+  };
+}
+
 function isFinitePositiveNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -242,6 +348,8 @@ export async function getStockResearchBundle(
     ? nextEarningsEventRaw
     : pickNextUsefulEarningsEvent(earningsEvents);
 
+  const analystBundleDetails = parseAnalystBundleDetails(latestAnalystSnapshot?.raw);
+
   return {
     stock,
     latestPriceSnapshot,
@@ -249,6 +357,9 @@ export async function getStockResearchBundle(
     latestFundamentalSnapshot,
     latestAnalystSnapshot,
     recentAnalystActions,
+    latestAnnualAnalystEstimate: analystBundleDetails.latestAnnualAnalystEstimate,
+    latestQuarterAnalystEstimate: analystBundleDetails.latestQuarterAnalystEstimate,
+    fmpFinancialRating: analystBundleDetails.fmpFinancialRating,
     recentNews,
     nextEarningsEvent,
     latestAIReport,

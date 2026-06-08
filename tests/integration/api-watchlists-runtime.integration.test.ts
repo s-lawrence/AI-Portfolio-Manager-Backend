@@ -105,7 +105,7 @@ describe("API watchlist route registration runtime", () => {
       raw: { source: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 10,
       ratingConsensus: "BUY",
@@ -117,7 +117,12 @@ describe("API watchlist route registration runtime", () => {
       raw: { source: "ratings" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockResolvedValue([
       {
         ticker,
         source: "FMP",
@@ -177,7 +182,10 @@ describe("API watchlist route registration runtime", () => {
     expect(Array.isArray(body.data.items)).toBe(true);
     expect(body.data.items[0].ticker).toBe(ticker);
     expect(body.data.items[0].latestAnalystSnapshot).toBeDefined();
+    expect(typeof body.data.items[0].latestAnalystSnapshot.buyCount).toBe("number");
     expect(Array.isArray(body.data.items[0].recentAnalystActions)).toBe(true);
+    expect(body.data.items[0].latestAnnualAnalystEstimate).toBeDefined();
+    expect(body.data.items[0].fmpFinancialRating).toBeDefined();
 
     await app.close();
   });

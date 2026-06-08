@@ -359,6 +359,7 @@ describe("ai-reports.service", () => {
     const rawModelOutput = result.report.rawModelOutput as { analystSummary?: string } | null;
     expect(rawModelOutput?.analystSummary).toBeDefined();
     expect(rawModelOutput?.analystSummary?.toLowerCase()).toContain("analyst");
+    expect(rawModelOutput?.analystSummary?.toLowerCase()).toContain("latest grade action");
 
     const allFactors = [...result.report.bullishFactors, ...result.report.bearishFactors];
     expect(allFactors.some((factor) => factor.toLowerCase().includes("analyst"))).toBe(true);

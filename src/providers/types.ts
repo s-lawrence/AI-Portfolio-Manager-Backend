@@ -141,6 +141,15 @@ export interface ProviderAnalystSnapshot {
   priceTargetHigh?: number;
   priceTargetLow?: number;
   priceTargetConsensus?: number;
+  targetMedian?: number;
+  lastMonthPriceTargetAvg?: number;
+  lastMonthPriceTargetCount?: number;
+  lastQuarterPriceTargetAvg?: number;
+  lastQuarterPriceTargetCount?: number;
+  lastYearPriceTargetAvg?: number;
+  lastYearPriceTargetCount?: number;
+  allTimePriceTargetAvg?: number;
+  allTimePriceTargetCount?: number;
   analystCount?: number;
   ratingConsensus?: string;
   strongBuyCount?: number;
@@ -149,6 +158,46 @@ export interface ProviderAnalystSnapshot {
   sellCount?: number;
   strongSellCount?: number;
   upsidePercent?: number;
+  raw?: unknown;
+}
+
+export interface ProviderAnalystEstimateSnapshot {
+  ticker: string;
+  period: "annual" | "quarter";
+  date: Date;
+  revenueLow?: number;
+  revenueHigh?: number;
+  revenueAvg?: number;
+  ebitdaLow?: number;
+  ebitdaHigh?: number;
+  ebitdaAvg?: number;
+  ebitLow?: number;
+  ebitHigh?: number;
+  ebitAvg?: number;
+  netIncomeLow?: number;
+  netIncomeHigh?: number;
+  netIncomeAvg?: number;
+  epsAvg?: number;
+  epsHigh?: number;
+  epsLow?: number;
+  numAnalystsRevenue?: number;
+  numAnalystsEps?: number;
+  source?: string;
+  raw?: unknown;
+}
+
+export interface ProviderFinancialRatingSnapshot {
+  ticker: string;
+  capturedAt: Date;
+  rating?: string;
+  overallScore?: number;
+  discountedCashFlowScore?: number;
+  returnOnEquityScore?: number;
+  returnOnAssetsScore?: number;
+  debtToEquityScore?: number;
+  priceToEarningsScore?: number;
+  priceToBookScore?: number;
+  source?: string;
   raw?: unknown;
 }
 
@@ -337,10 +386,32 @@ export interface AnalystProvider {
   getAnalystRatings(
     ticker: string,
   ): Promise<Partial<ProviderAnalystSnapshot> | null>;
+  getGradesConsensus(
+    ticker: string,
+  ): Promise<Partial<ProviderAnalystSnapshot> | null>;
   getUpgradesDowngrades(
     ticker: string,
     options?: ProviderDateRangeOptions,
   ): Promise<ProviderAnalystActionEvent[]>;
+  getRecentGrades(
+    ticker: string,
+    options?: ProviderDateRangeOptions,
+  ): Promise<ProviderAnalystActionEvent[]>;
+  getHistoricalGrades(
+    ticker: string,
+    options?: ProviderLimitOptions,
+  ): Promise<Partial<ProviderAnalystSnapshot> | null>;
+  getAnalystEstimates(
+    ticker: string,
+    options?: { period?: "annual" | "quarter"; page?: number; limit?: number },
+  ): Promise<ProviderAnalystEstimateSnapshot[]>;
+  getRatingsSnapshot(
+    ticker: string,
+  ): Promise<ProviderFinancialRatingSnapshot | null>;
+  getHistoricalRatings(
+    ticker: string,
+    options?: ProviderLimitOptions,
+  ): Promise<ProviderFinancialRatingSnapshot[]>;
   getMarketMovers(
     category: string,
     options?: ProviderLimitOptions,

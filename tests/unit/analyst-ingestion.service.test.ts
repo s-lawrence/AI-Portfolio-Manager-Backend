@@ -44,7 +44,7 @@ function mockAnalystProviderForTicker(): void {
     raw: { from: "consensus" },
   });
 
-  vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+  vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
     source: "FMP",
     analystCount: 11,
     ratingConsensus: "BUY",
@@ -56,7 +56,12 @@ function mockAnalystProviderForTicker(): void {
     raw: { from: "ratings" },
   });
 
-  vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockImplementation(async (inputTicker) => {
+  vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+  vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+  vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+  vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+
+  vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockImplementation(async (inputTicker) => {
     return [
       {
         ticker: inputTicker,
@@ -93,6 +98,8 @@ describe("analyst-ingestion.service", () => {
     expect(result.actionsCreated + result.actionsUpdated).toBe(1);
     expect(result.priceTargetSummaryStatus).toBe("SUCCESS");
     expect(result.priceTargetConsensusStatus).toBe("SUCCESS");
+    expect(result.gradesConsensusStatus).toBe("SUCCESS");
+    expect(result.gradesStatus).toBe("SUCCESS");
     expect(result.analystRatingsStatus).toBe("SUCCESS");
     expect(result.analystActionsStatus).toBe("SUCCESS");
     expect(result.subsourceWarnings.priceTargetSummary).toEqual([]);
@@ -137,7 +144,7 @@ describe("analyst-ingestion.service", () => {
       raw: { from: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 8,
       ratingConsensus: "BUY",
@@ -148,8 +155,12 @@ describe("analyst-ingestion.service", () => {
       strongSellCount: 0,
       raw: { from: "ratings" },
     });
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockImplementation(async (ticker) => {
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockImplementation(async (ticker) => {
       if (ticker === badStock.ticker) {
         return [
           {
@@ -228,7 +239,7 @@ describe("analyst-ingestion.service", () => {
       raw: { from: "consensus" },
     });
 
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue({
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue({
       source: "FMP",
       analystCount: 8,
       ratingConsensus: "BUY",
@@ -239,8 +250,12 @@ describe("analyst-ingestion.service", () => {
       strongSellCount: 0,
       raw: { from: "ratings" },
     });
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
 
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockImplementation(async (ticker) => {
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockImplementation(async (ticker) => {
       if (ticker === badStock.ticker) {
         return [
           {
@@ -300,15 +315,22 @@ describe("analyst-ingestion.service", () => {
       raw: { source: "summary" },
     });
     vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue(null);
-    vi.spyOn(fmpAnalystProvider, "getAnalystRatings").mockResolvedValue(null);
-    vi.spyOn(fmpAnalystProvider, "getUpgradesDowngrades").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([]);
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockResolvedValue([]);
 
     const result = await ingestTickerAnalystData(stock.ticker);
 
     expect(result.priceTargetSummaryStatus).toBe("SUCCESS");
     expect(result.priceTargetConsensusStatus).toBe("EMPTY");
+    expect(result.gradesConsensusStatus).toBe("EMPTY");
     expect(result.analystRatingsStatus).toBe("EMPTY");
+    expect(result.gradesStatus).toBe("EMPTY");
     expect(result.analystActionsStatus).toBe("EMPTY");
+    expect(result.subsourceWarnings.gradesConsensus.length).toBeGreaterThan(0);
     expect(result.subsourceWarnings.priceTargetConsensus.length).toBeGreaterThan(0);
     expect(result.subsourceWarnings.analystRatings.length).toBeGreaterThan(0);
     expect(result.subsourceWarnings.analystActions.length).toBeGreaterThan(0);
