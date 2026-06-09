@@ -252,6 +252,90 @@ Behavior:
 - enforces execution mode (`CONFIRMATION_REQUIRED`, `DISABLED`)
 - executes via the tool executor and returns bounded result metadata
 
+## Agent Chat API (v1)
+
+### Endpoint
+
+- `POST /api/agent/chat`
+
+Request:
+
+```json
+{
+  "message": "Research AAPL",
+  "context": {
+    "source": "USER",
+    "userId": "optional",
+    "portfolioId": "optional",
+    "requestId": "optional"
+  }
+}
+```
+
+Response payload includes:
+
+- `answer`
+- `intent`
+- `toolCalls`
+- `suggestedActions`
+- `warnings`
+- `missingContext`
+- `confidence` (`LOW | MEDIUM | HIGH`)
+- `metadata`:
+  - `mode` (`OPENAI_SYNTHESIS` or `DETERMINISTIC_ROUTER`)
+  - `modelName` (only populated when OpenAI synthesis is attempted)
+  - `fallbackUsed`
+  - `startedAt`
+  - `finishedAt`
+  - `durationMs`
+
+### Deterministic execution model
+
+- Intent routing and tool execution are always backend-controlled and deterministic.
+- OpenAI is only used for final synthesis text when enabled.
+- OpenAI does not execute tools directly in Agent v1.
+- Tool execution still goes through the registry/executor policy layer.
+
+### OpenAI enablement and fallback
+
+OpenAI synthesis is enabled only when both conditions are true:
+
+- `OPENAI_AGENT_PROVIDER_ENABLED=true`
+- `OPENAI_API_KEY` is present
+
+Optional model fallback:
+
+- `OPENAI_AGENT_MODEL_FALLBACK` can be set to a secondary model name.
+- Fallback is attempted only when the primary model is unavailable/unsupported.
+- Fallback usage is surfaced in metadata/warnings and is not silent.
+
+When OpenAI is disabled, fails, or returns invalid output:
+
+- the backend returns deterministic synthesis
+- `metadata.fallbackUsed=true` when OpenAI was attempted but fallback was used
+- confirmation policy for refresh/mutation tools remains unchanged
+
+### Non-production diagnostics on fallback
+
+When OpenAI synthesis fails and `NODE_ENV != production`, response metadata may include `openAiDiagnostics`:
+
+- `openAiAttempted`
+- `openAiFailureStage` (`REQUEST_FAILED | TIMEOUT | EMPTY_RESPONSE | PARSE_FAILED | VALIDATION_FAILED | UNSUPPORTED_MODEL | UNKNOWN`)
+- `openAiErrorCode` (when available)
+- `openAiStatus` (when available)
+- `openAiResponsePreview` (redacted, max 200 chars)
+- `openAiModelName`
+
+### OpenAI synthesis safety rules
+
+- Never log `OPENAI_API_KEY`.
+- Never return `OPENAI_API_KEY` in any endpoint.
+- Never expose raw model request headers.
+- Never send provider API keys to OpenAI.
+- Keep synthesis payload compact and avoid sending huge raw provider payloads.
+- Suggested actions with unknown tool names are dropped.
+- Suggested actions for refresh/mutation/high-impact tools are marked `requiresConfirmation=true`.
+
 ## Audit Logging Note
 
 Dedicated per-tool audit log persistence is intentionally deferred.

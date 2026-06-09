@@ -43,6 +43,7 @@ npm start
 - `/api/portfolio-summaries`
 - `/api/predictions`
 - `/api/alerts`
+- `/api/agent`
 - `/api/watchlists`
 - `/api/analyst`
 - `/api/discovery`
@@ -124,6 +125,57 @@ curl -X POST http://localhost:4000/api/dev/purge-demo-analytical-data \
 - `portfolioSummariesDeleted`
 - `alertsDeleted`
 - `warnings`
+
+## Agent Endpoints
+
+- `GET /api/agent/tools`
+- `POST /api/agent/tools/:toolName/execute`
+- `POST /api/agent/chat`
+
+`POST /api/agent/chat` behavior:
+
+- Determines intent deterministically.
+- Executes approved backend tools through the agent tool registry/executor.
+- Builds compact synthesis context from tool summaries, warnings, and missing context.
+- Uses OpenAI synthesis only when enabled; otherwise returns deterministic synthesis.
+- Tool execution remains backend-controlled and confirmation policy is unchanged.
+
+Agent chat request example:
+
+```bash
+curl -X POST http://localhost:4000/api/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Research AAPL",
+    "context": {
+      "source": "USER"
+    }
+  }'
+```
+
+OpenAI synthesis enablement:
+
+- `OPENAI_AGENT_PROVIDER_ENABLED=true`
+- `OPENAI_API_KEY` present in backend environment
+- optional `OPENAI_AGENT_MODEL_FALLBACK` for unsupported/unavailable primary model
+
+Fallback behavior:
+
+- If OpenAI is disabled, unavailable, or returns invalid output, deterministic synthesis is returned.
+- Chat metadata includes:
+  - `mode` (`OPENAI_SYNTHESIS` or `DETERMINISTIC_ROUTER`)
+  - `modelName` when OpenAI path is attempted
+  - `fallbackUsed`
+
+Non-production fallback diagnostics:
+
+- On OpenAI fallback in non-production, metadata may include `openAiDiagnostics` with safe fields only:
+  - `openAiAttempted`
+  - `openAiFailureStage`
+  - `openAiErrorCode`
+  - `openAiStatus`
+  - `openAiResponsePreview` (redacted, max 200 chars)
+  - `openAiModelName`
 
 ## Example cURL Commands
 

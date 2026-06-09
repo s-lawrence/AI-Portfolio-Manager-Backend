@@ -17,6 +17,11 @@ const optionalSecretString = z.preprocess(
   z.string().min(1).optional(),
 );
 
+const optionalNonEmptyString = z.preprocess(
+  blankToUndefined,
+  z.string().trim().min(1).optional(),
+);
+
 function optionalUrlWithDefault(defaultUrl: string) {
   return z.preprocess(blankToUndefined, z.string().url().default(defaultUrl));
 }
@@ -59,6 +64,15 @@ const envSchema = z.object({
   GDELT_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   GDELT_QUERY_DELAY_MS: z.coerce.number().int().min(0).default(250),
   GDELT_MAX_RETRY_429: z.coerce.number().int().min(0).max(5).default(1),
+  OPENAI_API_KEY: optionalSecretString,
+  OPENAI_AGENT_MODEL: z.string().trim().min(1).default("gpt-5.4-mini"),
+  OPENAI_AGENT_MODEL_FALLBACK: optionalNonEmptyString,
+  OPENAI_REPORT_MODEL: z.string().trim().min(1).default("gpt-5.4-mini"),
+  OPENAI_DEEP_RESEARCH_MODEL: z.string().trim().min(1).default("gpt-5.5"),
+  OPENAI_AGENT_ENABLE_ESCALATION: booleanFlag.default(false),
+  OPENAI_AGENT_MAX_TOOL_CALLS: z.coerce.number().int().positive().max(20).default(5),
+  OPENAI_AGENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  OPENAI_AGENT_PROVIDER_ENABLED: booleanFlag.default(false),
   PRINT_ROUTES_ON_STARTUP: booleanFlag.default(false),
 });
 
