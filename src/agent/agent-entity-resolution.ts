@@ -115,6 +115,13 @@ const ROYAL_BANK_CANDIDATES: AgentTickerResolutionCandidate[] = [
 
 const ROYAL_BANK_ALIASES = ["royal bank of canada", "royal bank", "rbc"] as const;
 
+const FX_AMBIGUOUS_TICKER_TOKENS = new Set([
+  "FX",
+  "USD",
+  "CAD",
+  "USDCAD",
+]);
+
 type StockLookupRecord = Pick<Stock, "ticker" | "companyName" | "exchange" | "currency">;
 
 export interface ResolveTickerFromMessageOptions {
@@ -190,6 +197,50 @@ function normalizeCompanyText(value: string): string {
     .trim();
 }
 
+export function isFxAmbiguousTickerToken(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "");
+
+  return FX_AMBIGUOUS_TICKER_TOKENS.has(normalized);
+}
+
+export function isFxSemanticContextMessage(message: string): boolean {
+  if (!message || message.trim().length === 0) {
+    return false;
+  }
+
+  const normalized = message.toLowerCase();
+
+  if (
+    /\busd\s*\/\s*cad\b/i.test(message) ||
+    /\busd\s*cad\b/i.test(message) ||
+    normalized.includes("foreign exchange") ||
+    normalized.includes("currency conversion") ||
+    normalized.includes("portfolio risk") ||
+    normalized.includes("risk data")
+  ) {
+    return true;
+  }
+
+  if (!/\bfx\b/i.test(message)) {
+    return false;
+  }
+
+  return (
+    /\brate\b/i.test(message) ||
+    /\bcurrency\b/i.test(message) ||
+    /\bportfolio\b/i.test(message) ||
+    /\brisk\b/i.test(message) ||
+    /\bconvert\b/i.test(message)
+  );
+}
+
 function isLikelyTickerToken(rawToken: string): boolean {
   if (rawToken.includes(".") || rawToken.includes("-")) {
     return true;
@@ -201,6 +252,7 @@ function isLikelyTickerToken(rawToken: string): boolean {
 function extractTickerPatternMatches(message: string): Array<{ ticker: string; originalText: string }> {
   const matches = message.matchAll(TICKER_TOKEN_PATTERN);
   const unique = new Map<string, { ticker: string; originalText: string }>();
+  const hasFxSemanticContext = isFxSemanticContextMessage(message);
 
   for (const match of matches) {
     const rawToken = match[1];
@@ -210,6 +262,10 @@ function extractTickerPatternMatches(message: string): Array<{ ticker: string; o
 
     const normalizedTicker = normalizeTicker(rawToken);
     if (!normalizedTicker) {
+      continue;
+    }
+
+    if (hasFxSemanticContext && isFxAmbiguousTickerToken(normalizedTicker)) {
       continue;
     }
 
@@ -447,7 +503,7 @@ export function collectMentionedTickers(
 ): string[] {
   const tickers = new Set<string>();
   const explicit = normalizeTicker(explicitTicker);
-  if (explicit) {
+  if (explicit && !(isFxSemanticContextMessage(message) && isFxAmbiguousTickerToken(explicit))) {
     tickers.add(explicit);
   }
 
@@ -469,7 +525,9 @@ export async function resolveTickerFromMessage(
   options: ResolveTickerFromMessageOptions = {},
 ): Promise<AgentTickerResolutionResult> {
   const explicit = normalizeTicker(explicitTicker);
-  if (explicit) {
+  const hasFxSemanticContext = isFxSemanticContextMessage(message);
+
+  if (explicit && !(hasFxSemanticContext && isFxAmbiguousTickerToken(explicit))) {
     return {
       ticker: explicit,
       confidence: "HIGH",
@@ -502,6 +560,13 @@ export async function resolveTickerFromMessage(
   const staticAliasResult = resolveStaticAlias(message, options);
   if (staticAliasResult) {
     return staticAliasResult;
+  }
+
+  if (hasFxSemanticContext) {
+    return {
+      confidence: "LOW",
+      source: "NONE",
+    };
   }
 
   const stockDbResult = await resolveFromStockDatabase(message, options);

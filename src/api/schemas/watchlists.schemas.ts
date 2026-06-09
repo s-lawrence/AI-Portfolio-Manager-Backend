@@ -1,8 +1,10 @@
 import { z } from "zod";
 
 import {
+  booleanQuerySchema,
   cuidSchema,
   nonNegativeNumberSchema,
+  optionalLimitSchema,
   tickerSchema,
   watchlistItemPrioritySchema,
   watchlistItemSourceSchema,
@@ -74,3 +76,14 @@ export const updateWatchlistItemBodySchema = z
   .refine((value) => Object.values(value).some((field) => field !== undefined), {
     message: "At least one field must be provided.",
   });
+
+export const refreshWatchlistResearchDataBodySchema = z.object({
+  historicalLimit: optionalLimitSchema,
+  newsLimitPerTicker: optionalLimitSchema,
+  includeMarketData: booleanQuerySchema.optional(),
+  includeFundamentals: booleanQuerySchema.optional(),
+  includeEarnings: booleanQuerySchema.optional(),
+  includeNews: booleanQuerySchema.optional(),
+  includeAnalystData: booleanQuerySchema.optional(),
+  runReports: booleanQuerySchema.optional(),
+});

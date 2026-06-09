@@ -21,6 +21,7 @@ import * as geopoliticalService from "../services/geopolitical-ingestion.service
 import * as analystService from "../services/analyst-ingestion.service";
 import * as realDataIngestionService from "../services/real-data-ingestion.service";
 import * as researchScoringService from "../services/research-scoring.service";
+import * as macroIngestionService from "../services/macro-ingestion.service";
 
 const tickerSchema = z
   .string()
@@ -422,6 +423,20 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       execute: async (input: { ticker: string }) => analystService.ingestTickerAnalystData(input.ticker),
     },
     {
+      name: "refreshUsdCadFxRate",
+      description:
+        "Refreshes persisted USD/CAD FX snapshots from the configured Bank of Canada USD/CAD series.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.REFRESH,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.CONFIRMATION_REQUIRED,
+      inputSchema: z.object({}),
+      notes: [
+        "Refresh tool: confirmation required.",
+        "Dry-run validates input and returns planned action only.",
+        "Targets macro/FX ingestion and must not be used as a stock-ticker refresh.",
+      ],
+      execute: async () => macroIngestionService.ingestBankOfCanadaUsdCad(),
+    },
+    {
       name: "refreshWatchlistAnalystData",
       description: "Refreshes persisted analyst context for all tickers in a watchlist.",
       riskLevel: AGENT_TOOL_RISK_LEVEL.REFRESH,
@@ -435,6 +450,84 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       ],
       execute: async (input: { watchlistId: string }) =>
         analystService.ingestWatchlistAnalystData(input.watchlistId),
+    },
+    {
+      name: "refreshWatchlistResearchData",
+      description:
+        "Refreshes watchlist ticker research data (market, fundamentals, earnings, news, analyst, optional reports).",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.REFRESH,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.CONFIRMATION_REQUIRED,
+      inputSchema: z.object({
+        watchlistId: z.string().trim().min(1),
+        historicalLimit: optionalLimitSchema,
+        newsLimitPerTicker: optionalLimitSchema,
+        includeMarketData: z.boolean().optional(),
+        includeFundamentals: z.boolean().optional(),
+        includeEarnings: z.boolean().optional(),
+        includeNews: z.boolean().optional(),
+        includeAnalystData: z.boolean().optional(),
+        runReports: z.boolean().optional(),
+      }),
+      notes: [
+        "Refresh tool: confirmation required.",
+        "Dry-run returns planned tickers and selected options without provider calls or writes.",
+      ],
+      execute: async (input: {
+        watchlistId: string;
+        historicalLimit?: number;
+        newsLimitPerTicker?: number;
+        includeMarketData?: boolean;
+        includeFundamentals?: boolean;
+        includeEarnings?: boolean;
+        includeNews?: boolean;
+        includeAnalystData?: boolean;
+        runReports?: boolean;
+      }) =>
+        watchlistsService.refreshWatchlistResearchData(input.watchlistId, {
+          historicalLimit: input.historicalLimit,
+          newsLimitPerTicker: input.newsLimitPerTicker,
+          includeMarketData: input.includeMarketData,
+          includeFundamentals: input.includeFundamentals,
+          includeEarnings: input.includeEarnings,
+          includeNews: input.includeNews,
+          includeAnalystData: input.includeAnalystData,
+          runReports: input.runReports,
+        }),
+      dryRunPlan: async (input: {
+        watchlistId: string;
+        historicalLimit?: number;
+        newsLimitPerTicker?: number;
+        includeMarketData?: boolean;
+        includeFundamentals?: boolean;
+        includeEarnings?: boolean;
+        includeNews?: boolean;
+        includeAnalystData?: boolean;
+        runReports?: boolean;
+      }) => {
+        const plan = await watchlistsService.refreshWatchlistResearchData(input.watchlistId, {
+          historicalLimit: input.historicalLimit,
+          newsLimitPerTicker: input.newsLimitPerTicker,
+          includeMarketData: input.includeMarketData,
+          includeFundamentals: input.includeFundamentals,
+          includeEarnings: input.includeEarnings,
+          includeNews: input.includeNews,
+          includeAnalystData: input.includeAnalystData,
+          runReports: input.runReports,
+          dryRun: true,
+        });
+
+        return {
+          plannedAction: true,
+          toolName: "refreshWatchlistResearchData",
+          input,
+          message: "Dry-run planned watchlist research refresh. No provider call or data write was performed.",
+          watchlistId: input.watchlistId,
+          plannedTickers: plan.plannedTickers ?? [],
+          tickersProcessed: plan.tickersProcessed,
+          tickersSkipped: plan.tickersSkipped,
+          perTickerResults: plan.perTickerResults,
+        };
+      },
     },
     {
       name: "refreshDiscoveryCategory",

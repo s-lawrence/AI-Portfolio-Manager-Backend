@@ -70,22 +70,25 @@ export class AgentToolExecutor {
 
     if (dryRun && tool.riskLevel !== AGENT_TOOL_RISK_LEVEL.READ_ONLY) {
       warnings.push("Dry-run mode: execution was not performed.");
+      const plannedData = tool.dryRunPlan
+        ? await tool.dryRunPlan(input, request.context)
+        : {
+            plannedAction: true,
+            toolName: tool.name,
+            riskLevel: tool.riskLevel,
+            executionMode: tool.executionMode,
+            input,
+            message:
+              tool.riskLevel === AGENT_TOOL_RISK_LEVEL.MUTATION
+                ? "Dry-run validated mutation input. No database write was performed."
+                : "Dry-run validated refresh input. No provider call or data write was performed.",
+          };
       const finishedAtDate = new Date();
 
       return {
         toolName: tool.name,
         success: true,
-        data: {
-          plannedAction: true,
-          toolName: tool.name,
-          riskLevel: tool.riskLevel,
-          executionMode: tool.executionMode,
-          input,
-          message:
-            tool.riskLevel === AGENT_TOOL_RISK_LEVEL.MUTATION
-              ? "Dry-run validated mutation input. No database write was performed."
-              : "Dry-run validated refresh input. No provider call or data write was performed.",
-        },
+        data: plannedData,
         warnings,
         errors,
         metadata: {

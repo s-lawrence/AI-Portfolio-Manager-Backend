@@ -19,6 +19,15 @@ import * as realDataIngestionService from "../../src/services/real-data-ingestio
 import * as researchScoringService from "../../src/services/research-scoring.service";
 import * as stocksService from "../../src/services/stocks.service";
 import * as watchlistsService from "../../src/services/watchlists.service";
+import * as macroIngestionService from "../../src/services/macro-ingestion.service";
+import { bankOfCanadaProvider } from "../../src/providers/bank-of-canada";
+import { updateHolding } from "../../src/repositories/holdings.repository";
+import {
+  createTestHolding,
+  createTestPortfolio,
+  createTestPriceSnapshot,
+  createTestStock,
+} from "../../src/test/factories";
 
 describe("agent tool registry and executor", () => {
   afterEach(() => {
@@ -43,7 +52,9 @@ describe("agent tool registry and executor", () => {
         "getPortfolioRiskSnapshot",
         "runPortfolioFullRefresh",
         "refreshTickerAnalystData",
+        "refreshUsdCadFxRate",
         "refreshWatchlistAnalystData",
+        "refreshWatchlistResearchData",
         "refreshDiscoveryCategory",
         "refreshGdeltRiskContext",
         "addTickerToWatchlist",
@@ -302,6 +313,140 @@ describe("agent tool registry and executor", () => {
         riskLevel: "REFRESH",
       },
     });
+  });
+
+  it("refreshWatchlistResearchData requires confirmation", async () => {
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+
+    await expect(
+      executor.executeByName({
+        toolName: "refreshWatchlistResearchData",
+        input: { watchlistId: "watchlist-1" },
+        context: { source: "USER" },
+      }),
+    ).rejects.toMatchObject({
+      code: "AGENT_TOOL_CONFIRMATION_REQUIRED",
+      statusCode: 409,
+      details: {
+        toolName: "refreshWatchlistResearchData",
+        riskLevel: "REFRESH",
+      },
+    });
+  });
+
+  it("refreshWatchlistResearchData dry-run returns planned tickers", async () => {
+    const refreshSpy = vi.spyOn(watchlistsService, "refreshWatchlistResearchData").mockResolvedValue({
+      watchlistId: "watchlist-1",
+      startedAt: new Date("2026-06-01T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-01T00:00:01.000Z").toISOString(),
+      durationMs: 1000,
+      tickersProcessed: 2,
+      tickersFailed: 0,
+      tickersSkipped: 1,
+      plannedTickers: ["NVDA", "RY.TO"],
+      perTickerResults: [
+        {
+          ticker: "NVDA",
+          itemId: "item-1",
+          status: "WATCHING",
+          skipped: false,
+          warnings: [],
+          failedCategories: [],
+        },
+      ],
+      warnings: [],
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "refreshWatchlistResearchData",
+      input: {
+        watchlistId: "watchlist-1",
+      },
+      context: { source: "USER", dryRun: true },
+      confirmed: true,
+    });
+
+    expect(refreshSpy).toHaveBeenCalledWith("watchlist-1", expect.objectContaining({ dryRun: true }));
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      plannedAction: true,
+      toolName: "refreshWatchlistResearchData",
+      plannedTickers: ["NVDA", "RY.TO"],
+    });
+  });
+
+  it("confirmed refreshUsdCadFxRate executes Bank of Canada USD/CAD ingestion", async () => {
+    const refreshSpy = vi.spyOn(macroIngestionService, "ingestBankOfCanadaUsdCad").mockResolvedValue({
+      startedAt: new Date("2026-06-01T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-01T00:00:01.000Z").toISOString(),
+      durationMs: 1000,
+      recordsCreated: 1,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      warnings: [],
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "refreshUsdCadFxRate",
+      input: {},
+      context: { source: "AGENT" },
+      confirmed: true,
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+
+  it("refreshUsdCadFxRate followed by getPortfolioRiskSnapshot resolves missing FX", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTRFX01");
+    const holding = await createTestHolding(portfolio.id, stock.id);
+
+    await updateHolding(holding.id, {
+      status: "OWNED",
+      shares: 10,
+      averageCost: 90,
+    });
+
+    await createTestPriceSnapshot(stock.id, {
+      price: 100,
+      capturedAt: new Date("2026-06-07T00:00:00.000Z"),
+    });
+
+    const before = await researchScoringService.getPortfolioRiskSnapshot(portfolio.id);
+    expect(before.holdingsMissingFx).toEqual([
+      {
+        ticker: stock.ticker,
+        currency: "USD",
+      },
+    ]);
+
+    vi.spyOn(bankOfCanadaProvider, "getUsdCadRate").mockResolvedValue([
+      {
+        baseCurrency: "USD",
+        quoteCurrency: "CAD",
+        rate: 1.35,
+        capturedAt: new Date("2026-06-07T00:00:00.000Z"),
+        source: "Bank of Canada Valet:FXUSDCAD",
+      },
+    ]);
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const refreshResult = await executor.executeByName({
+      toolName: "refreshUsdCadFxRate",
+      input: {},
+      context: { source: "AGENT" },
+      confirmed: true,
+    });
+
+    expect(refreshResult.success).toBe(true);
+
+    const after = await researchScoringService.getPortfolioRiskSnapshot(portfolio.id);
+    expect(after.holdingsMissingFx).toEqual([]);
+    expect(after.fxRateUsed?.pair).toBe("USD/CAD");
+    expect(after.conversionStatuses[0]?.conversionStatus).toBe("CONVERTED");
   });
 
   it("mutation tools require confirmation", async () => {

@@ -935,6 +935,104 @@ describe("agent-chat.service planner flow", () => {
     expect(result.intent).toBe("WATCHLIST_SCORE");
   });
 
+  it("scoreWatchlist summary uses scored counters and top ranked ticker", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "WATCHLIST_SCORE",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "scoreWatchlist",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Rank watchlist entries",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Watchlist ranked."));
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreWatchlist", {
+        totalItems: 5,
+        activeItemsCount: 4,
+        scoredItemsCount: 1,
+        skippedItemsCount: 3,
+        rankedItems: [{ ticker: "NVDA", compositeScore: 78.4 }],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Which watchlist names look best?",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    expect(result.toolCalls[0]?.summary).toContain("total=5");
+    expect(result.toolCalls[0]?.summary).toContain("scored=1");
+    expect(result.toolCalls[0]?.summary).toContain("NVDA");
+  });
+
+  it("deterministic watchlist intent handles buy-timing phrasing", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreWatchlist", {
+        totalItems: 3,
+        activeItemsCount: 3,
+        scoredItemsCount: 1,
+        skippedItemsCount: 2,
+        rankedItems: [{ ticker: "NVDA", compositeScore: 64.6 }],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Are any of the items in my watchlist a good time to buy?",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    expect(result.intent).toBe("WATCHLIST_SCORE");
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "scoreWatchlist",
+      input: { watchlistId: "watchlist-1" },
+    }));
+  });
+
+  it("watchlist refresh prompt suggests confirmation action for refreshWatchlistResearchData", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Refresh my watchlist research data",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.intent).toBe("WATCHLIST_REFRESH_REQUEST");
+    expect(result.suggestedActions.some((action) =>
+      action.toolName === "refreshWatchlistResearchData" && action.requiresConfirmation === true,
+    )).toBe(true);
+  });
+
   it("add to watchlist returns confirmation suggestion and does not mutate without confirmation", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = true;
     env.OPENAI_API_KEY = "test-key";
@@ -1240,6 +1338,191 @@ describe("agent-chat.service planner flow", () => {
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
       toolName: "runPortfolioFullRefresh",
+      confirmed: true,
+    }));
+    expect(result.metadata.executedToolCount).toBe(1);
+  });
+
+  it("confirmed add uses resolved NVDA ticker and does not use ADD command word", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("addTickerToWatchlist", { ticker: "NVDA" }) as never,
+    );
+
+    await runAgentChat({
+      message: "Confirm add NVDA to my watchlist",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+      confirmedToolExecutions: ["addTickerToWatchlist"],
+      allowMutation: true,
+      dryRun: false,
+    });
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "addTickerToWatchlist",
+      input: expect.objectContaining({
+        ticker: "NVDA",
+      }),
+      confirmed: true,
+    }));
+    expect(executeSpy).not.toHaveBeenCalledWith(expect.objectContaining({
+      input: expect.objectContaining({
+        ticker: "ADD",
+      }),
+    }));
+  });
+
+  it("drops FX pseudo-ticker analyst refresh and suggests USD/CAD FX refresh", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "REFRESH_REQUEST",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "refreshTickerAnalystData",
+            input: { ticker: "FX" },
+            purpose: "Refresh FX/risk data",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: true,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Use safer refresh."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Refresh FX/risk data and USD/CAD rate",
+      context: {
+        source: "USER",
+      },
+      allowRefresh: false,
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.warnings.some((warning) => warning.includes("Dropped ticker refresh for FX/risk context"))).toBe(true);
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshUsdCadFxRate")).toBe(true);
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshTickerAnalystData")).toBe(false);
+  });
+
+  it("drops non-geopolitical GDELT refresh planning", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "REFRESH_REQUEST",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "refreshGdeltRiskContext",
+            input: { mode: "quick" },
+            purpose: "Refresh risk data",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: true,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("No GDELT action."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Refresh FX/risk data",
+      context: {
+        source: "USER",
+      },
+      allowRefresh: false,
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.warnings.some((warning) => warning.includes("Dropped non-geopolitical GDELT refresh request."))).toBe(true);
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshGdeltRiskContext")).toBe(false);
+  });
+
+  it("suggests USD/CAD FX refresh when risk snapshot reports missing FX rates", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getPortfolioRiskSnapshot", {
+        topRisks: [],
+        holdingsMissingFx: [{ ticker: "SHOP", currency: "USD" }],
+        missingData: ["Missing FX rates for 1 holding(s): SHOP."],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Show portfolio risk",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshUsdCadFxRate" && action.requiresConfirmation)).toBe(true);
+  });
+
+  it("does not suggest USD/CAD FX refresh when holdingsMissingFx is empty", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getPortfolioRiskSnapshot", {
+        topRisks: ["Some holdings are missing currency metadata"],
+        holdingsMissingFx: [],
+        missingData: ["Some holdings are missing currency metadata: SHOP."],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Show portfolio risk",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshUsdCadFxRate")).toBe(false);
+  });
+
+  it("confirmed USD/CAD FX refresh executes only with allowRefresh=true", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("refreshUsdCadFxRate", { recordsCreated: 1 }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Confirm: Refresh USD/CAD FX rate",
+      context: {
+        source: "USER",
+      },
+      confirmedToolExecutions: ["refreshUsdCadFxRate"],
+      allowRefresh: true,
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "refreshUsdCadFxRate",
       confirmed: true,
     }));
     expect(result.metadata.executedToolCount).toBe(1);

@@ -1,16 +1,25 @@
-import { Sentiment } from "@prisma/client";
+import { HoldingStatus, Sentiment, WatchlistItemStatus } from "@prisma/client";
 
 import {
   type CompareTickersResult,
+  type PortfolioFxIssue,
   type PortfolioConcentrationRisk,
   type PortfolioRiskExposure,
+  type PortfolioRiskConversionStatus,
   type PortfolioRiskSnapshotResult,
+  type PortfolioOverviewHoldingSummary,
   type SuggestedResearchStance,
   type TickerResearchComponentScores,
   type TickerResearchScoreResult,
   type WatchlistResearchScoreResult,
+  type WatchlistResearchItemSummary,
+  type WatchlistSkippedItem,
   type WatchlistScoredItem,
 } from "../types/services";
+import {
+  convertMoneyToCad,
+  type ConvertMoneyToCadResult,
+} from "./fx-rates.service";
 import { getGeopoliticalSummary } from "./geopolitical-ingestion.service";
 import { getLatestMacroObservation } from "./macro-series.service";
 import { getPortfolioOverview } from "./portfolios.service";
@@ -18,6 +27,11 @@ import { getStockResearchBundle } from "./stocks.service";
 import { getWatchlistResearchBundle } from "./watchlists.service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_WATCHLIST_STATUSES = new Set<WatchlistItemStatus>([
+  WatchlistItemStatus.WATCHING,
+  WatchlistItemStatus.RESEARCHING,
+  WatchlistItemStatus.CANDIDATE,
+]);
 
 type StockResearchBundle = NonNullable<Awaited<ReturnType<typeof getStockResearchBundle>>>;
 
@@ -803,21 +817,64 @@ export async function scoreWatchlist(watchlistId: string): Promise<WatchlistRese
     throw new Error("Watchlist research bundle not found.");
   }
 
-  const scoredItems: WatchlistScoredItem[] = await Promise.all(
-    watchlistBundle.items.map(async (item) => {
-      const score = await scoreTickerResearch(item.ticker);
-      return {
+  const warnings: string[] = [];
+  const skippedItems: WatchlistSkippedItem[] = [];
+
+  const activeItems = watchlistBundle.items.filter((item) =>
+    ACTIVE_WATCHLIST_STATUSES.has(item.status),
+  );
+
+  const scoredItems: WatchlistScoredItem[] = [];
+
+  for (const item of activeItems) {
+    let normalizedTicker: string;
+
+    try {
+      normalizedTicker = normalizeTicker(item.ticker);
+    } catch {
+      skippedItems.push({
+        ticker: item.ticker,
+        reason: "Invalid ticker format.",
+      });
+      continue;
+    }
+
+    const missingSignals = collectMissingResearchSignals(item);
+    if (missingSignals.length >= 6) {
+      skippedItems.push({
+        ticker: item.ticker,
+        reason: "No meaningful research data is currently available.",
+        missingData: missingSignals,
+      });
+      continue;
+    }
+
+    try {
+      const score = await scoreTickerResearch(normalizedTicker);
+      scoredItems.push({
         rank: 0,
         itemId: item.itemId,
-        ticker: item.ticker,
+        ticker: normalizedTicker,
         status: item.status,
         priority: item.priority,
         compositeScore: score.compositeScore,
         suggestedStance: score.suggestedStance,
         score,
-      };
-    }),
-  );
+      });
+    } catch (error) {
+      const reason = error instanceof Error && error.message.trim().length > 0
+        ? error.message
+        : "Ticker scoring failed.";
+
+      skippedItems.push({
+        ticker: normalizedTicker,
+        reason,
+        missingData: missingSignals,
+      });
+
+      warnings.push(`Skipped ${normalizedTicker}: ${reason}`);
+    }
+  }
 
   scoredItems.sort((left, right) => {
     if (right.compositeScore !== left.compositeScore) {
@@ -836,9 +893,45 @@ export async function scoreWatchlist(watchlistId: string): Promise<WatchlistRese
     watchlistId: watchlistBundle.watchlist.id,
     watchlistName: watchlistBundle.watchlist.name,
     asOf: new Date().toISOString(),
+    totalItems: watchlistBundle.itemCount,
+    activeItemsCount: activeItems.length,
+    scoredItemsCount: rankedItems.length,
+    skippedItemsCount: skippedItems.length,
+    skippedItems,
+    warnings: dedupe(warnings),
     itemCount: rankedItems.length,
     rankedItems,
   };
+}
+
+function collectMissingResearchSignals(item: WatchlistResearchItemSummary): string[] {
+  const missing: string[] = [];
+
+  if (!item.latestPriceSnapshot) {
+    missing.push("latestPriceSnapshot");
+  }
+
+  if (!item.latestTechnicalSnapshot) {
+    missing.push("latestTechnicalSnapshot");
+  }
+
+  if (!item.latestFundamentalSnapshot) {
+    missing.push("latestFundamentalSnapshot");
+  }
+
+  if (!item.latestAnalystSnapshot && (!Array.isArray(item.recentAnalystActions) || item.recentAnalystActions.length === 0)) {
+    missing.push("analystContext");
+  }
+
+  if (!Array.isArray(item.topHeadlines) || item.topHeadlines.length === 0) {
+    missing.push("topHeadlines");
+  }
+
+  if (!item.nextEarningsEvent) {
+    missing.push("nextEarningsEvent");
+  }
+
+  return missing;
 }
 
 function compareScoredValues(scores: TickerResearchScoreResult[]): string[] {
@@ -928,6 +1021,126 @@ function toExposure(
     .sort((left, right) => (right.sharePercent ?? 0) - (left.sharePercent ?? 0));
 }
 
+function normalizeCurrencyCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function toTickerList(values: Array<{ ticker: string }>): string {
+  return values.map((value) => value.ticker).join(", ");
+}
+
+function toUnsupportedCurrencyList(values: PortfolioFxIssue[]): string {
+  return values
+    .map((value) => {
+      if (!value.currency) {
+        return value.ticker;
+      }
+
+      return `${value.ticker} (${value.currency})`;
+    })
+    .join(", ");
+}
+
+function selectRiskScopedHoldings(
+  holdings: PortfolioOverviewHoldingSummary[],
+): PortfolioOverviewHoldingSummary[] {
+  const hasStatusValues = holdings.some((holding) => holding.status != null);
+  if (!hasStatusValues) {
+    return holdings;
+  }
+
+  return holdings.filter((holding) => holding.status === HoldingStatus.OWNED);
+}
+
+async function collectRiskConversionDiagnostics(
+  holdings: PortfolioOverviewHoldingSummary[],
+): Promise<{
+  fxRateUsed: PortfolioRiskSnapshotResult["fxRateUsed"];
+  holdingsMissingFx: PortfolioFxIssue[];
+  holdingsUnsupportedCurrency: PortfolioFxIssue[];
+  holdingsMissingCurrency: Array<{ ticker: string }>;
+  conversionStatuses: PortfolioRiskConversionStatus[];
+}> {
+  let usdCadCachedProbe: ConvertMoneyToCadResult | null = null;
+  let fxRateUsed: PortfolioRiskSnapshotResult["fxRateUsed"] = null;
+
+  const holdingsMissingFx: PortfolioFxIssue[] = [];
+  const holdingsUnsupportedCurrency: PortfolioFxIssue[] = [];
+  const holdingsMissingCurrency: Array<{ ticker: string }> = [];
+  const conversionStatuses: PortfolioRiskConversionStatus[] = [];
+
+  for (const holding of holdings) {
+    const currency = normalizeCurrencyCode(holding.nativeCurrency ?? holding.currency);
+
+    if (!currency) {
+      holdingsMissingCurrency.push({ ticker: holding.ticker });
+      conversionStatuses.push({
+        ticker: holding.ticker,
+        currency: null,
+        conversionStatus: "UNSUPPORTED_CURRENCY",
+      });
+      continue;
+    }
+
+    let conversion: ConvertMoneyToCadResult;
+    if (currency === "USD" && usdCadCachedProbe) {
+      conversion = usdCadCachedProbe;
+    } else {
+      conversion = await convertMoneyToCad({
+        amount: 1,
+        currency,
+      });
+
+      if (currency === "USD") {
+        usdCadCachedProbe = conversion;
+      }
+    }
+
+    conversionStatuses.push({
+      ticker: holding.ticker,
+      currency,
+      conversionStatus: conversion.conversionStatus,
+    });
+
+    if (
+      !fxRateUsed &&
+      conversion.conversionStatus === "CONVERTED" &&
+      conversion.fxRate != null
+    ) {
+      fxRateUsed = {
+        pair: "USD/CAD",
+        rate: conversion.fxRate,
+        source: conversion.fxRateSource,
+        capturedAt: conversion.fxRateCapturedAt,
+      };
+    }
+
+    if (conversion.conversionStatus === "MISSING_FX") {
+      holdingsMissingFx.push({
+        ticker: holding.ticker,
+        currency,
+      });
+      continue;
+    }
+
+    if (conversion.conversionStatus === "UNSUPPORTED_CURRENCY") {
+      holdingsUnsupportedCurrency.push({
+        ticker: holding.ticker,
+        currency,
+      });
+    }
+  }
+
+  return {
+    fxRateUsed,
+    holdingsMissingFx,
+    holdingsUnsupportedCurrency,
+    holdingsMissingCurrency,
+    conversionStatuses,
+  };
+}
+
 export async function getPortfolioRiskSnapshot(
   portfolioId: string,
 ): Promise<PortfolioRiskSnapshotResult> {
@@ -937,25 +1150,32 @@ export async function getPortfolioRiskSnapshot(
     throw new Error("Portfolio not found.");
   }
 
+  const scopedHoldings = selectRiskScopedHoldings(overview.holdings);
+  const conversionDiagnostics = await collectRiskConversionDiagnostics(scopedHoldings);
+
+  const fxRateUsed = conversionDiagnostics.fxRateUsed ?? overview.fxRateUsed;
+
   const missingData: string[] = [];
 
-  if (overview.holdingsMissingFx.length > 0) {
+  if (conversionDiagnostics.holdingsMissingFx.length > 0) {
     missingData.push(
-      `Missing FX rates for ${overview.holdingsMissingFx.length} holding(s): ${overview.holdingsMissingFx
-        .map((item) => item.ticker)
-        .join(", ")}.`,
+      `Missing FX rates for ${conversionDiagnostics.holdingsMissingFx.length} holding(s): ${toTickerList(conversionDiagnostics.holdingsMissingFx)}.`,
     );
   }
 
-  if (overview.holdingsUnsupportedCurrency.length > 0) {
+  if (conversionDiagnostics.holdingsMissingCurrency.length > 0) {
     missingData.push(
-      `Unsupported currencies for ${overview.holdingsUnsupportedCurrency.length} holding(s): ${overview.holdingsUnsupportedCurrency
-        .map((item) => item.ticker)
-        .join(", ")}.`,
+      `Some holdings are missing currency metadata: ${toTickerList(conversionDiagnostics.holdingsMissingCurrency)}.`,
     );
   }
 
-  const holdingsWithoutPrice = overview.holdings.filter((holding) => holding.latestPrice == null);
+  if (conversionDiagnostics.holdingsUnsupportedCurrency.length > 0) {
+    missingData.push(
+      `Some holdings use unsupported currencies: ${toUnsupportedCurrencyList(conversionDiagnostics.holdingsUnsupportedCurrency)}.`,
+    );
+  }
+
+  const holdingsWithoutPrice = scopedHoldings.filter((holding) => holding.latestPrice == null);
   if (holdingsWithoutPrice.length > 0) {
     missingData.push(
       `Missing latest price for ${holdingsWithoutPrice.length} holding(s): ${holdingsWithoutPrice
@@ -964,7 +1184,7 @@ export async function getPortfolioRiskSnapshot(
     );
   }
 
-  const totalMarketValueCad = overview.holdings.reduce(
+  const totalMarketValueCad = scopedHoldings.reduce(
     (sum, holding) => sum + Math.max(0, holding.marketValueCad ?? 0),
     0,
   );
@@ -972,7 +1192,7 @@ export async function getPortfolioRiskSnapshot(
   const concentrationRisks: PortfolioConcentrationRisk[] = [];
 
   if (totalMarketValueCad > 0) {
-    const holdingsByShare = overview.holdings
+    const holdingsByShare = scopedHoldings
       .map((holding) => ({
         ticker: holding.ticker,
         sharePercent: ((holding.marketValueCad ?? 0) / totalMarketValueCad) * 100,
@@ -1012,8 +1232,8 @@ export async function getPortfolioRiskSnapshot(
   const currencyMap = new Map<string, { holdings: number; marketValueCad: number }>();
   const sectorMap = new Map<string, { holdings: number; marketValueCad: number }>();
 
-  for (const holding of overview.holdings) {
-    const currencyKey = (holding.currency ?? "UNKNOWN").toUpperCase();
+  for (const holding of scopedHoldings) {
+    const currencyKey = normalizeCurrencyCode(holding.nativeCurrency ?? holding.currency) ?? "UNKNOWN";
     const currencyEntry = currencyMap.get(currencyKey) ?? { holdings: 0, marketValueCad: 0 };
     currencyEntry.holdings += 1;
     currencyEntry.marketValueCad += Math.max(0, holding.marketValueCad ?? 0);
@@ -1045,7 +1265,7 @@ export async function getPortfolioRiskSnapshot(
   ]).slice(0, 5);
 
   const summaryParts = [
-    `Portfolio includes ${overview.holdingCount} holding(s).`,
+    `Portfolio includes ${overview.holdingCount} holding(s); ${scopedHoldings.length} owned holding(s) were analyzed for risk.`,
     concentrationRisks.length > 0
       ? `${concentrationRisks.length} concentration risk signal(s) detected.`
       : "No severe concentration thresholds were triggered.",
@@ -1057,6 +1277,11 @@ export async function getPortfolioRiskSnapshot(
   return {
     portfolioId: overview.portfolio.id,
     asOf: new Date().toISOString(),
+    fxRateUsed,
+    holdingsMissingFx: conversionDiagnostics.holdingsMissingFx,
+    holdingsUnsupportedCurrency: conversionDiagnostics.holdingsUnsupportedCurrency,
+    holdingsMissingCurrency: conversionDiagnostics.holdingsMissingCurrency,
+    conversionStatuses: conversionDiagnostics.conversionStatuses,
     concentrationRisks,
     currencyExposure,
     sectorExposure,

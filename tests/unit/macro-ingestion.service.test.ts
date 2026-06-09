@@ -44,12 +44,25 @@ describe("macro-ingestion.service", () => {
 
     const second = await ingestBankOfCanadaUsdCad();
 
+    bocSpy.mockResolvedValueOnce([
+      {
+        baseCurrency: "USD",
+        quoteCurrency: "CAD",
+        rate: 1.389,
+        capturedAt,
+        source: "Bank of Canada Valet:FXUSDCAD",
+      },
+    ]);
+
+    const third = await ingestBankOfCanadaUsdCad();
+
     const latest = await getLatestFxRate("USD", "CAD");
 
     expect(first.recordsCreated).toBe(1);
     expect(first.recordsUpdated).toBe(0);
     expect(second.recordsCreated).toBe(0);
     expect(second.recordsUpdated).toBe(1);
+    expect(third.recordsSkipped).toBe(1);
     expect(latest?.rate).toBe(1.389);
   });
 

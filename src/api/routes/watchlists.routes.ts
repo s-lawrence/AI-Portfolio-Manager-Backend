@@ -5,6 +5,7 @@ import { created, deleted, ok, paginated } from "../response";
 import {
   addWatchlistItemBodySchema,
   createWatchlistBodySchema,
+  refreshWatchlistResearchDataBodySchema,
   updateWatchlistBodySchema,
   updateWatchlistItemBodySchema,
   userIdParamsSchema,
@@ -18,6 +19,7 @@ import {
   getWatchlistDetail,
   getWatchlistResearchBundle,
   listWatchlistsForUser,
+  refreshWatchlistResearchData,
   removeWatchlistItem,
   updateWatchlist,
   updateWatchlistItemDetails,
@@ -89,6 +91,28 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
     }
 
     reply.send(ok(bundle));
+  });
+
+  app.post("/:watchlistId/refresh-research-data", async (request, reply) => {
+    const params = watchlistIdParamsSchema.parse(request.params);
+    const body = refreshWatchlistResearchDataBodySchema.parse(
+      typeof request.body === "object" && request.body != null ? request.body : {},
+    );
+
+    const result = await runService(() =>
+      refreshWatchlistResearchData(params.watchlistId, {
+        historicalLimit: body.historicalLimit,
+        newsLimitPerTicker: body.newsLimitPerTicker,
+        includeMarketData: body.includeMarketData,
+        includeFundamentals: body.includeFundamentals,
+        includeEarnings: body.includeEarnings,
+        includeNews: body.includeNews,
+        includeAnalystData: body.includeAnalystData,
+        runReports: body.runReports,
+      }),
+    );
+
+    reply.send(ok(result));
   });
 
   app.get("/:watchlistId", async (request, reply) => {

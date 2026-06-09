@@ -34,15 +34,27 @@ import { listNewsByStockId } from "../repositories/news-articles.repository";
 import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
 import { getLatestTechnicalSnapshot } from "../repositories/technical-snapshots.repository";
 import { getUserById } from "../repositories/users.repository";
-import { normalizeTickerOrThrow } from "../types/common";
+import { normalizeListLimit, normalizeTickerOrThrow } from "../types/common";
 import {
+  type RefreshWatchlistResearchDataOptions,
+  type RefreshWatchlistResearchDataResult,
   WatchlistDetail,
   WatchlistDetailItem,
+  type WatchlistRefreshCategoryResult,
+  type WatchlistRefreshPerTickerResult,
   WatchlistResearchBundle,
   WatchlistResearchItemSummary,
 } from "../types/services";
 import { ensureStockExists } from "./stocks.service";
 import { getGeopoliticalSummary } from "./geopolitical-ingestion.service";
+import {
+  ingestTickerEarnings,
+  ingestTickerFundamentals,
+  ingestTickerMarketData,
+  ingestTickerNews,
+} from "./real-data-ingestion.service";
+import { ingestTickerAnalystData } from "./analyst-ingestion.service";
+import { generateMockTickerReport } from "./ai-reports.service";
 
 export type CreateWatchlistForUserInput = Pick<
   Prisma.WatchlistUncheckedCreateInput,
@@ -69,6 +81,14 @@ export type AddTickerToWatchlistInput = {
 
 export type UpdateWatchlistItemDetailsInput = Prisma.WatchlistItemUncheckedUpdateInput;
 
+const DEFAULT_REFRESH_HISTORICAL_LIMIT = 250;
+const DEFAULT_REFRESH_NEWS_LIMIT_PER_TICKER = 10;
+const DEFAULT_REFRESH_ACTIVE_STATUSES: WatchlistItemStatus[] = [
+  WatchlistItemStatus.WATCHING,
+  WatchlistItemStatus.RESEARCHING,
+  WatchlistItemStatus.CANDIDATE,
+];
+
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -80,6 +100,22 @@ function assertNonBlank(value: string, label: string): string {
 
 function normalizeName(value: string): string {
   return assertNonBlank(value, "Watchlist name");
+}
+
+function toErrorReason(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function calculateDurationMs(startedAtDate: Date, finishedAtDate: Date): number {
+  return Math.max(0, finishedAtDate.getTime() - startedAtDate.getTime());
+}
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
 }
 
 function toWatchlistDetailItems(
@@ -159,6 +195,124 @@ function asOptionalIsoDate(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function toValidDate(value: unknown): Date | null {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === "string" || typeof value === "number") {
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function collectMissingResearchData(input: {
+  latestPriceSnapshot: unknown;
+  latestTechnicalSnapshot: unknown;
+  latestFundamentalSnapshot: unknown;
+  latestAnalystSnapshot: unknown;
+  recentAnalystActions: unknown;
+  topHeadlines: unknown;
+  nextEarningsEvent: unknown;
+}): string[] {
+  const missing: string[] = [];
+
+  if (!input.latestPriceSnapshot) {
+    missing.push("latestPriceSnapshot");
+  }
+
+  if (!input.latestTechnicalSnapshot) {
+    missing.push("latestTechnicalSnapshot");
+  }
+
+  if (!input.latestFundamentalSnapshot) {
+    missing.push("latestFundamentalSnapshot");
+  }
+
+  const hasAnalystActions = Array.isArray(input.recentAnalystActions) && input.recentAnalystActions.length > 0;
+  if (!input.latestAnalystSnapshot && !hasAnalystActions) {
+    missing.push("analystContext");
+  }
+
+  if (!Array.isArray(input.topHeadlines) || input.topHeadlines.length === 0) {
+    missing.push("topHeadlines");
+  }
+
+  if (!input.nextEarningsEvent) {
+    missing.push("nextEarningsEvent");
+  }
+
+  return missing;
+}
+
+function resolveLatestResearchUpdatedAt(input: {
+  latestPriceSnapshot: { capturedAt?: unknown } | null;
+  latestTechnicalSnapshot: { capturedAt?: unknown } | null;
+  latestFundamentalSnapshot: { capturedAt?: unknown } | null;
+  latestAnalystSnapshot: { capturedAt?: unknown; updatedAt?: unknown } | null;
+  latestAIReport: { reportDate?: unknown; updatedAt?: unknown; createdAt?: unknown } | null;
+  topHeadlines: Array<{ publishedAt?: unknown }>;
+  nextEarningsEvent: { updatedAt?: unknown; createdAt?: unknown; earningsDate?: unknown } | null;
+}): Date | null {
+  const candidates: Date[] = [];
+
+  const pushDate = (value: unknown): void => {
+    const parsed = toValidDate(value);
+    if (parsed) {
+      candidates.push(parsed);
+    }
+  };
+
+  pushDate(input.latestPriceSnapshot?.capturedAt);
+  pushDate(input.latestTechnicalSnapshot?.capturedAt);
+  pushDate(input.latestFundamentalSnapshot?.capturedAt);
+  pushDate(input.latestAnalystSnapshot?.updatedAt);
+  pushDate(input.latestAnalystSnapshot?.capturedAt);
+  pushDate(input.latestAIReport?.reportDate);
+  pushDate(input.latestAIReport?.updatedAt);
+  pushDate(input.latestAIReport?.createdAt);
+  pushDate(input.nextEarningsEvent?.updatedAt);
+  pushDate(input.nextEarningsEvent?.createdAt);
+  pushDate(input.nextEarningsEvent?.earningsDate);
+
+  for (const headline of input.topHeadlines) {
+    pushDate(headline.publishedAt);
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const latestTimestamp = Math.max(...candidates.map((candidate) => candidate.getTime()));
+  return new Date(latestTimestamp);
+}
+
+function summarizeCategoryResult<T extends { warnings?: string[]; ticker?: string }>(
+  result: T,
+): WatchlistRefreshCategoryResult {
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const summary: Record<string, unknown> = Object.entries(result as Record<string, unknown>).reduce(
+    (accumulator, [key, value]) => {
+      accumulator[key] = value;
+      return accumulator;
+    },
+    {} as Record<string, unknown>,
+  );
+  delete summary.warnings;
+  delete summary.ticker;
+
+  return {
+    attempted: true,
+    success: true,
+    warnings,
+    summary,
+  };
 }
 
 function parseAnalystBundleDetails(raw: unknown): Pick<
@@ -465,6 +619,25 @@ export async function getWatchlistResearchBundle(
 
       const topHeadlines = recentNews.slice(0, 3);
       const analystBundleDetails = parseAnalystBundleDetails(latestAnalystSnapshot?.raw);
+      const missingResearchData = collectMissingResearchData({
+        latestPriceSnapshot,
+        latestTechnicalSnapshot,
+        latestFundamentalSnapshot,
+        latestAnalystSnapshot,
+        recentAnalystActions,
+        topHeadlines,
+        nextEarningsEvent,
+      });
+      const hasResearchData = missingResearchData.length < 6;
+      const latestResearchUpdatedAt = resolveLatestResearchUpdatedAt({
+        latestPriceSnapshot,
+        latestTechnicalSnapshot,
+        latestFundamentalSnapshot,
+        latestAnalystSnapshot,
+        latestAIReport,
+        topHeadlines,
+        nextEarningsEvent,
+      });
 
       return {
         itemId: item.id,
@@ -505,8 +678,15 @@ export async function getWatchlistResearchBundle(
               }
             : null,
         latestAIReport,
+        latestReportRecommendation: latestAIReport?.recommendation ?? null,
+        latestReportSentiment: latestAIReport?.sentiment ?? null,
+        latestReportConfidenceScore: latestAIReport?.confidenceScore ?? null,
+        latestReportDate: latestAIReport?.reportDate ?? null,
         nextEarningsEvent,
         topHeadlines,
+        hasResearchData,
+        missingResearchData,
+        latestResearchUpdatedAt,
         sentimentCounts: sentimentCountsFromNews(recentNews),
       };
     }),
@@ -522,6 +702,247 @@ export async function getWatchlistResearchBundle(
     itemCount: items.length,
     geopoliticalSummary: geopoliticalSummary ?? undefined,
     items,
+  };
+}
+
+export async function refreshWatchlistResearchData(
+  watchlistId: string,
+  options: RefreshWatchlistResearchDataOptions = {},
+): Promise<RefreshWatchlistResearchDataResult> {
+  const normalizedWatchlistId = assertNonBlank(watchlistId, "watchlistId");
+  const startedAtDate = new Date();
+
+  const watchlist = await getWatchlistWithItems(normalizedWatchlistId);
+  if (!watchlist) {
+    throw new Error("Watchlist not found.");
+  }
+
+  const historicalLimit = normalizeListLimit(options.historicalLimit, DEFAULT_REFRESH_HISTORICAL_LIMIT);
+  const newsLimitPerTicker = normalizeListLimit(options.newsLimitPerTicker, DEFAULT_REFRESH_NEWS_LIMIT_PER_TICKER);
+  const includeMarketData = options.includeMarketData ?? true;
+  const includeFundamentals = options.includeFundamentals ?? true;
+  const includeEarnings = options.includeEarnings ?? true;
+  const includeNews = options.includeNews ?? true;
+  const includeAnalystData = options.includeAnalystData ?? true;
+  const runReports = options.runReports ?? false;
+  const activeStatuses = options.activeStatuses?.length
+    ? options.activeStatuses
+    : DEFAULT_REFRESH_ACTIVE_STATUSES;
+  const activeStatusSet = new Set(activeStatuses);
+
+  const perTickerResults: WatchlistRefreshPerTickerResult[] = [];
+  const warnings: string[] = [];
+  const plannedTickers: string[] = [];
+
+  let tickersProcessed = 0;
+  let tickersFailed = 0;
+  let tickersSkipped = 0;
+
+  for (const item of watchlist.items) {
+    const rawTicker = item.stock.ticker;
+
+    if (!activeStatusSet.has(item.status)) {
+      tickersSkipped += 1;
+      perTickerResults.push({
+        ticker: rawTicker,
+        itemId: item.id,
+        status: item.status,
+        skipped: true,
+        skipReason: `Skipped due to status ${item.status}.`,
+        warnings: [],
+        failedCategories: [],
+      });
+      continue;
+    }
+
+    tickersProcessed += 1;
+    plannedTickers.push(rawTicker);
+
+    if (options.dryRun === true) {
+      perTickerResults.push({
+        ticker: rawTicker,
+        itemId: item.id,
+        status: item.status,
+        skipped: false,
+        warnings: [],
+        failedCategories: [],
+      });
+      continue;
+    }
+
+    const perTickerWarnings: string[] = [];
+    const perTickerResult: WatchlistRefreshPerTickerResult = {
+      ticker: rawTicker,
+      itemId: item.id,
+      status: item.status,
+      skipped: false,
+      warnings: [],
+      failedCategories: [],
+    };
+
+    let normalizedTicker = rawTicker;
+
+    try {
+      normalizedTicker = normalizeTickerOrThrow(rawTicker);
+      await ensureStockExists(normalizedTicker);
+      perTickerResult.ticker = normalizedTicker;
+    } catch (error) {
+      const reason = toErrorReason(error);
+      perTickerWarnings.push(`Ticker validation failed: ${reason}`);
+      perTickerResult.failedCategories.push("ticker");
+      perTickerResult.warnings = dedupe(perTickerWarnings);
+      perTickerResults.push(perTickerResult);
+      tickersFailed += 1;
+      warnings.push(`${rawTicker}: ${reason}`);
+      continue;
+    }
+
+    if (includeMarketData) {
+      try {
+        const marketDataResult = await ingestTickerMarketData(normalizedTicker, {
+          historicalLimit,
+        });
+        perTickerResult.marketData = summarizeCategoryResult(marketDataResult);
+        perTickerWarnings.push(...(perTickerResult.marketData.warnings ?? []));
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.marketData = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("marketData");
+        perTickerWarnings.push(`Market data refresh failed: ${reason}`);
+      }
+    }
+
+    if (includeFundamentals) {
+      try {
+        const fundamentalsResult = await ingestTickerFundamentals(normalizedTicker);
+        perTickerResult.fundamentals = summarizeCategoryResult(fundamentalsResult);
+        perTickerWarnings.push(...(perTickerResult.fundamentals.warnings ?? []));
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.fundamentals = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("fundamentals");
+        perTickerWarnings.push(`Fundamentals refresh failed: ${reason}`);
+      }
+    }
+
+    if (includeEarnings) {
+      try {
+        const earningsResult = await ingestTickerEarnings(normalizedTicker);
+        perTickerResult.earnings = summarizeCategoryResult(earningsResult);
+        perTickerWarnings.push(...(perTickerResult.earnings.warnings ?? []));
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.earnings = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("earnings");
+        perTickerWarnings.push(`Earnings refresh failed: ${reason}`);
+      }
+    }
+
+    if (includeNews) {
+      try {
+        const newsResult = await ingestTickerNews(normalizedTicker, {
+          limit: newsLimitPerTicker,
+        });
+        perTickerResult.news = summarizeCategoryResult(newsResult);
+        perTickerWarnings.push(...(perTickerResult.news.warnings ?? []));
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.news = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("news");
+        perTickerWarnings.push(`News refresh failed: ${reason}`);
+      }
+    }
+
+    if (includeAnalystData) {
+      try {
+        const analystResult = await ingestTickerAnalystData(normalizedTicker);
+        perTickerResult.analystData = summarizeCategoryResult(analystResult);
+        perTickerWarnings.push(...(perTickerResult.analystData.warnings ?? []));
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.analystData = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("analystData");
+        perTickerWarnings.push(`Analyst refresh failed: ${reason}`);
+      }
+    }
+
+    if (runReports) {
+      try {
+        const reportResult = await generateMockTickerReport(normalizedTicker);
+        perTickerResult.report = {
+          attempted: true,
+          success: true,
+          warnings: [],
+          summary: {
+            reportId: reportResult.report.id,
+            recommendation: reportResult.report.recommendation,
+            sentiment: reportResult.report.sentiment,
+            confidenceScore: reportResult.report.confidenceScore,
+            reportDate: reportResult.report.reportDate,
+            predictionsCreated: reportResult.predictions.length,
+          },
+        };
+      } catch (error) {
+        const reason = toErrorReason(error);
+        perTickerResult.report = {
+          attempted: true,
+          success: false,
+          warnings: [],
+          error: reason,
+        };
+        perTickerResult.failedCategories.push("report");
+        perTickerWarnings.push(`Report generation failed: ${reason}`);
+      }
+    }
+
+    perTickerResult.warnings = dedupe(perTickerWarnings);
+    perTickerResult.failedCategories = dedupe(perTickerResult.failedCategories);
+    if (perTickerResult.failedCategories.length > 0) {
+      tickersFailed += 1;
+    }
+
+    perTickerResults.push(perTickerResult);
+    warnings.push(...perTickerResult.warnings.map((warning) => `${normalizedTicker}: ${warning}`));
+  }
+
+  const finishedAtDate = new Date();
+
+  return {
+    watchlistId: normalizedWatchlistId,
+    startedAt: startedAtDate.toISOString(),
+    finishedAt: finishedAtDate.toISOString(),
+    durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
+    tickersProcessed,
+    tickersFailed,
+    tickersSkipped,
+    plannedTickers: options.dryRun === true ? plannedTickers : undefined,
+    perTickerResults,
+    warnings: dedupe(warnings),
   };
 }
 

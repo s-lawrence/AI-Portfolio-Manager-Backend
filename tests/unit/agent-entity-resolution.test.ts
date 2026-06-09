@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveTickerFromMessage } from "../../src/agent/agent-entity-resolution";
+import { collectMentionedTickers, resolveTickerFromMessage } from "../../src/agent/agent-entity-resolution";
 
 describe("agent entity resolution", () => {
   it("resolves Apple to AAPL via static alias", async () => {
@@ -62,5 +62,32 @@ describe("agent entity resolution", () => {
     expect(result.confidence).toBe("LOW");
     expect(result.candidates?.some((candidate) => candidate.ticker === "RY")).toBe(true);
     expect(result.candidates?.some((candidate) => candidate.ticker === "RY.TO")).toBe(true);
+  });
+
+  it("does not resolve FX as a ticker for FX/risk semantic context", async () => {
+    const result = await resolveTickerFromMessage("Refresh FX/risk data and USD/CAD rate", undefined, {
+      searchStockRecords: false,
+    });
+
+    expect(result.source).toBe("NONE");
+    expect(result.ticker).toBeUndefined();
+  });
+
+  it("still resolves FX ticker token when no FX semantic context is present", async () => {
+    const result = await resolveTickerFromMessage("Research FX", undefined, {
+      searchStockRecords: false,
+    });
+
+    expect(result.source).toBe("TICKER_PATTERN");
+    expect(result.ticker).toBe("FX");
+  });
+
+  it("ignores add command word and keeps intended ticker", () => {
+    const tickers = collectMentionedTickers("Confirm add NVDA to my watchlist", undefined, {
+      searchStockRecords: false,
+    });
+
+    expect(tickers).toContain("NVDA");
+    expect(tickers).not.toContain("ADD");
   });
 });

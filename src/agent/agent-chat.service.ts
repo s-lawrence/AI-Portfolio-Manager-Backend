@@ -28,6 +28,8 @@ import {
 } from "./openai-agent-client";
 import {
   collectMentionedTickers,
+  isFxAmbiguousTickerToken,
+  isFxSemanticContextMessage,
   resolveTickerFromMessage,
 } from "./agent-entity-resolution";
 
@@ -39,6 +41,17 @@ const FULL_REFRESH_DEFAULT_INPUT = {
   includeAnalystData: true,
   includeGdelt: false,
   runAnalysis: true,
+} as const;
+
+const WATCHLIST_REFRESH_DEFAULT_INPUT = {
+  historicalLimit: 250,
+  newsLimitPerTicker: 10,
+  includeMarketData: true,
+  includeFundamentals: true,
+  includeEarnings: true,
+  includeNews: true,
+  includeAnalystData: true,
+  runReports: false,
 } as const;
 
 type PlannedToolExecution = {
@@ -85,6 +98,13 @@ function buildFullRefreshInput(portfolioId: string): Record<string, unknown> {
   return {
     portfolioId,
     ...FULL_REFRESH_DEFAULT_INPUT,
+  };
+}
+
+function buildWatchlistRefreshInput(watchlistId: string): Record<string, unknown> {
+  return {
+    watchlistId,
+    ...WATCHLIST_REFRESH_DEFAULT_INPUT,
   };
 }
 
@@ -183,6 +203,77 @@ function isPortfolioContextIntent(intent: string): boolean {
   return intent === "DAILY_RISK_CHECK" || intent === "PORTFOLIO_REVIEW" || intent === "PORTFOLIO_RISK_SNAPSHOT";
 }
 
+function isGeopoliticalContextMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+
+  return (
+    normalized.includes("geopolit") ||
+    normalized.includes("gdelt") ||
+    normalized.includes("sanction") ||
+    normalized.includes("war") ||
+    normalized.includes("conflict") ||
+    normalized.includes("headline risk") ||
+    normalized.includes("global risk")
+  );
+}
+
+function shouldBlockFxTickerRefresh(input: {
+  toolName: AgentToolName;
+  toolInput: Record<string, unknown>;
+  userMessage: string;
+}): boolean {
+  if (input.toolName !== "refreshTickerAnalystData") {
+    return false;
+  }
+
+  if (!isFxSemanticContextMessage(input.userMessage)) {
+    return false;
+  }
+
+  const ticker = typeof input.toolInput.ticker === "string"
+    ? input.toolInput.ticker
+    : undefined;
+
+  return isFxAmbiguousTickerToken(ticker);
+}
+
+function hasMissingFxSignals(result: AgentToolResult): boolean {
+  if (!result.success || !result.data || typeof result.data !== "object") {
+    return false;
+  }
+
+  const payload = result.data as Record<string, unknown>;
+
+  if (result.toolName === "getPortfolioOverview") {
+    return Array.isArray(payload.holdingsMissingFx) && payload.holdingsMissingFx.length > 0;
+  }
+
+  if (result.toolName !== "getPortfolioRiskSnapshot") {
+    return false;
+  }
+
+  if (!Array.isArray(payload.holdingsMissingFx)) {
+    return false;
+  }
+
+  return payload.holdingsMissingFx.length > 0;
+}
+
+function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): AgentSuggestedAction[] {
+  const suggestedActions: AgentSuggestedAction[] = [];
+
+  if (toolResults.some((result) => hasMissingFxSignals(result))) {
+    suggestedActions.push({
+      label: "Refresh USD/CAD FX rate",
+      toolName: "refreshUsdCadFxRate",
+      input: {},
+      requiresConfirmation: true,
+    });
+  }
+
+  return suggestedActions;
+}
+
 function reconcilePlannerMissingContext(input: {
   intent: string;
   missingContext: string[];
@@ -223,6 +314,13 @@ function determineIntent(message: string, tickers: string[]): string {
   }
 
   if (
+    normalized.includes("refresh") &&
+    normalized.includes("watchlist")
+  ) {
+    return "WATCHLIST_REFRESH_REQUEST";
+  }
+
+  if (
     normalized.includes("run full refresh") ||
     normalized.includes("refresh data") ||
     normalized.includes("update portfolio data") ||
@@ -237,7 +335,16 @@ function determineIntent(message: string, tickers: string[]): string {
 
   if (
     normalized.includes("watchlist") &&
-    (normalized.includes("look best") || normalized.includes("best") || normalized.includes("look good"))
+    (
+      normalized.includes("look best") ||
+      normalized.includes("best") ||
+      normalized.includes("look good") ||
+      normalized.includes("good time to buy") ||
+      normalized.includes("time to buy") ||
+      normalized.includes("good to buy") ||
+      normalized.includes("which items") ||
+      normalized.includes("any of the items")
+    )
   ) {
     return "WATCHLIST_SCORE";
   }
@@ -302,10 +409,43 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
   }
 
   if (toolName === "scoreWatchlist") {
-    const scoredItems = Array.isArray(payload.items)
-      ? (payload.items as unknown[]).length
-      : 0;
-    return `Watchlist scoring completed for ${scoredItems} item(s).`;
+    const totalItems = typeof payload.totalItems === "number"
+      ? payload.totalItems
+      : typeof payload.itemCount === "number"
+        ? payload.itemCount
+        : Array.isArray(payload.rankedItems)
+          ? (payload.rankedItems as unknown[]).length
+          : 0;
+    const activeItemsCount = typeof payload.activeItemsCount === "number"
+      ? payload.activeItemsCount
+      : totalItems;
+    const scoredItemsCount = typeof payload.scoredItemsCount === "number"
+      ? payload.scoredItemsCount
+      : Array.isArray(payload.rankedItems)
+        ? (payload.rankedItems as unknown[]).length
+        : typeof payload.itemCount === "number"
+          ? payload.itemCount
+          : 0;
+    const skippedItemsCount = typeof payload.skippedItemsCount === "number"
+      ? payload.skippedItemsCount
+      : Math.max(0, activeItemsCount - scoredItemsCount);
+    const topTickers = Array.isArray(payload.rankedItems)
+      ? (payload.rankedItems as Array<Record<string, unknown>>)
+        .slice(0, 3)
+        .map((item) => {
+          const ticker = typeof item.ticker === "string" ? item.ticker : "?";
+          const score = typeof item.compositeScore === "number"
+            ? item.compositeScore.toFixed(1)
+            : "n/a";
+          return `${ticker} (${score})`;
+        })
+      : [];
+
+    const topSummary = topTickers.length > 0
+      ? ` Top: ${topTickers.join(", ")}.`
+      : "";
+
+    return `Watchlist scoring processed total=${totalItems}, active=${activeItemsCount}, scored=${scoredItemsCount}, skipped=${skippedItemsCount}.${topSummary}`.trim();
   }
 
   if (toolName === "getPortfolioOverview") {
@@ -322,8 +462,19 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
     return `Portfolio risk snapshot generated. ${topRisks}`.trim();
   }
 
+  if (toolName === "refreshWatchlistResearchData") {
+    const processed = typeof payload.tickersProcessed === "number" ? payload.tickersProcessed : 0;
+    const failed = typeof payload.tickersFailed === "number" ? payload.tickersFailed : 0;
+    const skipped = typeof payload.tickersSkipped === "number" ? payload.tickersSkipped : 0;
+    return `Watchlist refresh processed ${processed} ticker(s), failed ${failed}, skipped ${skipped}.`;
+  }
+
   if (toolName === "runPortfolioFullRefresh") {
     return "Portfolio refresh executed successfully.";
+  }
+
+  if (toolName === "refreshUsdCadFxRate") {
+    return "USD/CAD FX rate refresh executed successfully.";
   }
 
   if (toolName === "addTickerToWatchlist") {
@@ -410,6 +561,7 @@ function addConfirmationPolicy(actions: AgentSuggestedAction[]): AgentSuggestedA
 
 function sanitizeSuggestedActions(
   actions: AgentSuggestedAction[],
+  userMessage: string,
 ): { actions: AgentSuggestedAction[]; warnings: string[] } {
   const warnings: string[] = [];
   const sanitized: AgentSuggestedAction[] = [];
@@ -417,6 +569,29 @@ function sanitizeSuggestedActions(
   for (const action of actions) {
     if (action.toolName && !AGENT_TOOL_NAMES.includes(action.toolName as (typeof AGENT_TOOL_NAMES)[number])) {
       warnings.push(`Dropped unapproved suggested tool '${action.toolName}'.`);
+      continue;
+    }
+
+    if (action.toolName === "refreshGdeltRiskContext" && !isGeopoliticalContextMessage(userMessage)) {
+      warnings.push("Dropped non-geopolitical GDELT refresh suggestion.");
+      continue;
+    }
+
+    if (
+      action.toolName === "refreshTickerAnalystData" &&
+      shouldBlockFxTickerRefresh({
+        toolName: "refreshTickerAnalystData",
+        toolInput: action.input ?? {},
+        userMessage,
+      })
+    ) {
+      warnings.push("Dropped ticker refresh suggestion for FX/risk context; use USD/CAD FX refresh instead.");
+      sanitized.push({
+        label: "Refresh USD/CAD FX rate",
+        toolName: "refreshUsdCadFxRate",
+        input: {},
+        requiresConfirmation: true,
+      });
       continue;
     }
 
@@ -468,6 +643,10 @@ function deterministicAnswer(input: {
 
   if (input.intent === "REFRESH_REQUEST") {
     return "I prepared a full portfolio refresh action. Confirmation is required before execution.";
+  }
+
+  if (input.intent === "WATCHLIST_REFRESH_REQUEST") {
+    return "I prepared a watchlist research refresh action. Confirmation is required before execution.";
   }
 
   if (input.intent === "WATCHLIST_ADD" && input.suggestedActions.some((action) => action.toolName === "addTickerToWatchlist")) {
@@ -553,6 +732,14 @@ function labelForTool(toolName: AgentToolName, purpose: string): string {
     return "Run full portfolio refresh";
   }
 
+  if (toolName === "refreshWatchlistResearchData") {
+    return "Refresh watchlist research data";
+  }
+
+  if (toolName === "refreshUsdCadFxRate") {
+    return "Refresh USD/CAD FX rate";
+  }
+
   if (toolName === "addTickerToWatchlist") {
     return "Add ticker to watchlist";
   }
@@ -620,6 +807,18 @@ function resolveConfirmedToolInput(
     };
   }
 
+  if (toolName === "refreshUsdCadFxRate") {
+    return {};
+  }
+
+  if (toolName === "refreshWatchlistResearchData") {
+    if (!request.context.watchlistId) {
+      return undefined;
+    }
+
+    return buildWatchlistRefreshInput(request.context.watchlistId);
+  }
+
   return {};
 }
 
@@ -679,6 +878,28 @@ function validateAndPrepareToolCalls(input: {
         ? error.message
         : "Invalid planner tool input.";
       warnings.push(`Dropped invalid planned input for '${toolName}': ${message}`);
+      continue;
+    }
+
+    if (toolName === "refreshGdeltRiskContext" && !isGeopoliticalContextMessage(input.request.message)) {
+      droppedToolCount += 1;
+      warnings.push("Dropped non-geopolitical GDELT refresh request.");
+      continue;
+    }
+
+    if (shouldBlockFxTickerRefresh({
+      toolName,
+      toolInput: normalizedInput,
+      userMessage: input.request.message,
+    })) {
+      droppedToolCount += 1;
+      warnings.push("Dropped ticker refresh for FX/risk context; suggest USD/CAD FX refresh instead.");
+      suggestedActions.push({
+        label: "Refresh USD/CAD FX rate",
+        toolName: "refreshUsdCadFxRate",
+        input: {},
+        requiresConfirmation: true,
+      });
       continue;
     }
 
@@ -856,6 +1077,18 @@ function buildDeterministicPlan(
         toolName: "scoreWatchlist",
         input: { watchlistId: request.context.watchlistId },
         purpose: "Score watchlist holdings",
+      });
+    }
+  }
+
+  if (intent === "WATCHLIST_REFRESH_REQUEST") {
+    if (!request.context.watchlistId) {
+      missingContext.push("watchlistId");
+    } else {
+      toolCalls.push({
+        toolName: "refreshWatchlistResearchData",
+        input: buildWatchlistRefreshInput(request.context.watchlistId),
+        purpose: "Refresh watchlist research data",
       });
     }
   }
@@ -1210,6 +1443,9 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
     ...toolCalls.flatMap((call) => [...call.warnings, ...call.errors]),
   ]);
 
+  const dataDerivedSuggestedActions = deriveSuggestedActionsFromToolResults(toolResults);
+  suggestedActions = mergeRequiredActions(dataDerivedSuggestedActions, suggestedActions);
+
   let answer = deterministicAnswer({
     intent: planningIntent,
     toolCalls,
@@ -1239,7 +1475,7 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
         suggestedActions,
       });
 
-      const sanitized = sanitizeSuggestedActions(synthesis.synthesis.suggestedActions);
+      const sanitized = sanitizeSuggestedActions(synthesis.synthesis.suggestedActions, message);
 
       answer = synthesis.synthesis.answer;
       confidence = synthesis.synthesis.confidence;

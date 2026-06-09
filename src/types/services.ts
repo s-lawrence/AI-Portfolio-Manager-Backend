@@ -239,8 +239,15 @@ export interface WatchlistResearchItemSummary {
     source: string | null;
   } | null;
   latestAIReport: AIReport | null;
+  latestReportRecommendation: Recommendation | null;
+  latestReportSentiment: Sentiment | null;
+  latestReportConfidenceScore: number | null;
+  latestReportDate: Date | string | null;
   nextEarningsEvent: EarningsEvent | null;
   topHeadlines: NewsArticle[];
+  hasResearchData: boolean;
+  missingResearchData: string[];
+  latestResearchUpdatedAt: Date | string | null;
   sentimentCounts: {
     bullish: number;
     neutral: number;
@@ -299,12 +306,74 @@ export interface WatchlistScoredItem {
   score: TickerResearchScoreResult;
 }
 
+export interface WatchlistSkippedItem {
+  ticker: string;
+  reason: string;
+  missingData?: string[];
+}
+
 export interface WatchlistResearchScoreResult {
   watchlistId: string;
   watchlistName: string;
   asOf: string;
+  totalItems: number;
+  activeItemsCount: number;
+  scoredItemsCount: number;
+  skippedItemsCount: number;
+  skippedItems: WatchlistSkippedItem[];
+  warnings: string[];
   itemCount: number;
   rankedItems: WatchlistScoredItem[];
+}
+
+export interface RefreshWatchlistResearchDataOptions {
+  historicalLimit?: number;
+  newsLimitPerTicker?: number;
+  includeMarketData?: boolean;
+  includeFundamentals?: boolean;
+  includeEarnings?: boolean;
+  includeNews?: boolean;
+  includeAnalystData?: boolean;
+  runReports?: boolean;
+  activeStatuses?: WatchlistItemStatus[];
+  dryRun?: boolean;
+}
+
+export interface WatchlistRefreshCategoryResult {
+  attempted: boolean;
+  success: boolean;
+  warnings: string[];
+  error?: string;
+  summary?: Record<string, unknown>;
+}
+
+export interface WatchlistRefreshPerTickerResult {
+  ticker: string;
+  itemId: string | null;
+  status: WatchlistItemStatus;
+  skipped: boolean;
+  skipReason?: string;
+  warnings: string[];
+  failedCategories: string[];
+  marketData?: WatchlistRefreshCategoryResult;
+  fundamentals?: WatchlistRefreshCategoryResult;
+  earnings?: WatchlistRefreshCategoryResult;
+  news?: WatchlistRefreshCategoryResult;
+  analystData?: WatchlistRefreshCategoryResult;
+  report?: WatchlistRefreshCategoryResult;
+}
+
+export interface RefreshWatchlistResearchDataResult {
+  watchlistId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs?: number;
+  tickersProcessed: number;
+  tickersFailed: number;
+  tickersSkipped: number;
+  plannedTickers?: string[];
+  perTickerResults: WatchlistRefreshPerTickerResult[];
+  warnings: string[];
 }
 
 export interface CompareTickersResult {
@@ -328,9 +397,20 @@ export interface PortfolioConcentrationRisk {
   message: string;
 }
 
+export interface PortfolioRiskConversionStatus {
+  ticker: string;
+  currency: string | null;
+  conversionStatus: CadConversionStatus;
+}
+
 export interface PortfolioRiskSnapshotResult {
   portfolioId: string;
   asOf: string;
+  fxRateUsed: PortfolioFxRateUsed | null;
+  holdingsMissingFx: PortfolioFxIssue[];
+  holdingsUnsupportedCurrency: PortfolioFxIssue[];
+  holdingsMissingCurrency: Array<{ ticker: string }>;
+  conversionStatuses: PortfolioRiskConversionStatus[];
   concentrationRisks: PortfolioConcentrationRisk[];
   currencyExposure: PortfolioRiskExposure[];
   sectorExposure: PortfolioRiskExposure[];

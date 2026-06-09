@@ -189,4 +189,59 @@ describe("API watchlist route registration runtime", () => {
 
     await app.close();
   });
+
+  it("POST /api/watchlists/:watchlistId/refresh-research-data returns app envelope", async () => {
+    const app = buildApp();
+    const token = nextToken();
+    const ticker = `TSTWRF${token}`;
+
+    const user = await createUser({
+      email: `test+auto-watchlist-refresh-${token}@example.com`,
+      name: `[TEST] Watchlist Refresh ${token}`,
+    });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/watchlists",
+      payload: {
+        userId: user.id,
+        name: `[TEST] Refresh Watchlist ${token}`,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    const watchlistId = (createResponse.json().data.id ?? "") as string;
+
+    const addItemResponse = await app.inject({
+      method: "POST",
+      url: `/api/watchlists/${watchlistId}/items`,
+      payload: {
+        ticker,
+      },
+    });
+
+    expect(addItemResponse.statusCode).toBe(201);
+
+    const refreshResponse = await app.inject({
+      method: "POST",
+      url: `/api/watchlists/${watchlistId}/refresh-research-data`,
+      payload: {
+        includeMarketData: false,
+        includeFundamentals: false,
+        includeEarnings: false,
+        includeNews: false,
+        includeAnalystData: false,
+        runReports: false,
+      },
+    });
+
+    expect(refreshResponse.statusCode).toBe(200);
+    const body = refreshResponse.json();
+    expectStandardEnvelope(body);
+    expect(body.success).toBe(true);
+    expect(body.data.watchlistId).toBe(watchlistId);
+    expect(typeof body.data.tickersProcessed).toBe("number");
+
+    await app.close();
+  });
 });

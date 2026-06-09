@@ -13,7 +13,9 @@ export const AGENT_TOOL_NAMES = [
   "getPortfolioRiskSnapshot",
   "runPortfolioFullRefresh",
   "refreshTickerAnalystData",
+  "refreshUsdCadFxRate",
   "refreshWatchlistAnalystData",
+  "refreshWatchlistResearchData",
   "refreshDiscoveryCategory",
   "refreshGdeltRiskContext",
   "addTickerToWatchlist",
@@ -84,6 +86,7 @@ export interface AgentToolDefinition<
   outputSchema?: ZodType<TOutput>;
   notes: string[];
   execute: (input: TInput, context: AgentToolContext) => Promise<TOutput>;
+  dryRunPlan?: (input: TInput, context: AgentToolContext) => Promise<unknown>;
 }
 
 export interface AgentToolDescriptor {
