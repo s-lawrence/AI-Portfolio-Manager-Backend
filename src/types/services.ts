@@ -257,6 +257,88 @@ export interface WatchlistResearchBundle {
   items: WatchlistResearchItemSummary[];
 }
 
+export type SuggestedResearchStance =
+  | "STRONG_CANDIDATE"
+  | "CANDIDATE"
+  | "WATCH"
+  | "HOLD_OFF"
+  | "AVOID";
+
+export interface TickerResearchComponentScores {
+  technicalScore: number;
+  fundamentalScore: number;
+  valuationScore: number;
+  analystScore: number;
+  newsScore: number;
+  macroRiskScore: number;
+  earningsRiskScore: number;
+  dataQualityScore: number;
+}
+
+export interface TickerResearchScoreResult {
+  ticker: string;
+  asOf: string;
+  componentScores: TickerResearchComponentScores;
+  compositeScore: number;
+  suggestedStance: SuggestedResearchStance;
+  bullishFactors: string[];
+  bearishFactors: string[];
+  missingData: string[];
+  staleDataWarnings: string[];
+  explanation: string;
+}
+
+export interface WatchlistScoredItem {
+  rank: number;
+  itemId: string | null;
+  ticker: string;
+  status?: WatchlistItemStatus;
+  priority?: WatchlistItemPriority;
+  compositeScore: number;
+  suggestedStance: SuggestedResearchStance;
+  score: TickerResearchScoreResult;
+}
+
+export interface WatchlistResearchScoreResult {
+  watchlistId: string;
+  watchlistName: string;
+  asOf: string;
+  itemCount: number;
+  rankedItems: WatchlistScoredItem[];
+}
+
+export interface CompareTickersResult {
+  asOf: string;
+  requestedTickers: string[];
+  scores: TickerResearchScoreResult[];
+  keyDifferences: string[];
+}
+
+export interface PortfolioRiskExposure {
+  key: string;
+  holdings: number;
+  marketValueCad: number | null;
+  sharePercent: number | null;
+}
+
+export interface PortfolioConcentrationRisk {
+  type: "HOLDING" | "SECTOR";
+  key: string;
+  sharePercent: number;
+  message: string;
+}
+
+export interface PortfolioRiskSnapshotResult {
+  portfolioId: string;
+  asOf: string;
+  concentrationRisks: PortfolioConcentrationRisk[];
+  currencyExposure: PortfolioRiskExposure[];
+  sectorExposure: PortfolioRiskExposure[];
+  missingData: string[];
+  topRisks: string[];
+  summary: string;
+}
+
 export interface GeopoliticalSummaryResult {
   from: string;
   to: string;

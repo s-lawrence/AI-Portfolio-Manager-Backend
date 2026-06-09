@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
+import { agentToolsRoutes } from "./agent-tools.routes";
 import { analystIngestionRoutes } from "./analyst-ingestion.routes";
 import { alertsRoutes } from "./alerts.routes";
 import { devRoutes } from "./dev.routes";
@@ -37,6 +38,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
   await app.register(predictionsRoutes, { prefix: "/api/predictions" });
   await app.register(alertsRoutes, { prefix: "/api/alerts" });
+  await app.register(agentToolsRoutes, { prefix: "/api/agent" });
   await app.register(watchlistsRoutes, { prefix: "/api/watchlists" });
   await app.register(discoveryRoutes, { prefix: "/api/discovery" });
   await app.register(analystIngestionRoutes, { prefix: "/api" });

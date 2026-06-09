@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 
+import { AgentToolExecutionError } from "../agent/agent-tool.types";
 import { env } from "../config/env";
 import {
   ProviderConfigurationError,
@@ -65,6 +66,10 @@ function providerErrorDetails(error: {
 export function mapKnownError(error: unknown): Error {
   if (error instanceof ApiError || error instanceof ZodError) {
     return error;
+  }
+
+  if (error instanceof AgentToolExecutionError) {
+    return new ApiError(error.statusCode, error.code, error.message, error.details);
   }
 
   if (error instanceof ProviderConfigurationError) {

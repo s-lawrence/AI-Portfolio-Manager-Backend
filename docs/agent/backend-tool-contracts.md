@@ -1,274 +1,265 @@
-# Backend Tool Contracts
+# Backend Agent Tool Contracts
 
-This document defines backend-facing contracts for agent tools that need analyst and discovery context.
+## Purpose
 
-## Conventions
+The backend agent tool layer provides a curated registry of backend capabilities for agent workflows.
 
-- All tool responses should preserve backend envelope semantics when mapped from API routes:
-  - Success: `{ success: true, data: ... }`
-  - Error: `{ success: false, error: { code, message, details? } }`
-- Tickers are uppercase and normalized by backend rules.
-- Empty/no-data cases return successful responses with null/empty lists unless explicitly noted.
+Agent orchestrators must use this layer instead of calling arbitrary backend routes directly.
 
-## getTickerAnalystContext
+## Safety and Design Rules
 
-Purpose:
-- Fetch latest analyst snapshot and recent analyst actions for one ticker.
+- Preserve backend response envelope semantics.
+- Use explicit tool risk and execution policies.
+- Validate tool input with Zod before execution.
+- Return bounded, auditable execution results with timestamps and duration.
+- Do not expose provider keys or bypass existing service guardrails.
+- Keep refresh and mutation operations confirmation-gated.
 
-Recommended backend calls:
-- `GET /api/analyst/:ticker/latest`
-- `GET /api/analyst/:ticker/actions?limit=<N>`
+## Core Contract
 
-Input:
+Each tool definition includes:
+
+- `name`
+- `description`
+- `riskLevel`
+- `executionMode`
+- `inputSchema`
+- optional `outputSchema`
+- `notes`
+- `execute(input, context)`
+
+Execution context:
+
+- `userId?`
+- `portfolioId?`
+- `requestId?`
+- `source`: `USER | AGENT | SYSTEM`
+- `dryRun?`
+
+Execution result:
+
+- `toolName`
+- `success`
+- `data?`
+- `warnings: string[]`
+- `errors: string[]`
+- `metadata`:
+  - `startedAt`
+  - `finishedAt`
+  - `durationMs`
+  - `riskLevel`
+  - `executionMode`
+  - `dryRun`
+
+## Risk Levels
+
+- `READ_ONLY`
+- `REFRESH`
+- `MUTATION`
+- `HIGH_IMPACT`
+
+## Execution Modes
+
+- `AUTO_ALLOWED`
+- `CONFIRMATION_REQUIRED`
+- `DISABLED`
+
+Policy defaults:
+
+- read-only tools: `AUTO_ALLOWED`
+- refresh tools: `CONFIRMATION_REQUIRED`
+- mutation tools: `CONFIRMATION_REQUIRED`
+- high-impact tools: `DISABLED`
+
+## Tool Catalog
+
+### Read-only tools
+
+- `getPortfolioOverview` -> `getPortfolioOverview`
+- `getTickerResearchBundle` -> `getStockResearchBundle`
+- `getWatchlistResearchBundle` -> `getWatchlistResearchBundle`
+- `getDiscoveryCandidates` -> `listDiscoveryCandidates`
+- `getGeopoliticalSummary` -> `getGeopoliticalSummary`
+- `getLatestAnalystContext` -> `getLatestTickerAnalystSnapshot` + `listTickerAnalystActions`
+- `scoreTickerResearch` -> `scoreTickerResearch`
+  - Inputs: `ticker`
+  - Outputs include:
+    - `componentScores` (`technicalScore`, `fundamentalScore`, `valuationScore`, `analystScore`, `newsScore`, `macroRiskScore`, `earningsRiskScore`, `dataQualityScore`)
+    - `compositeScore`
+    - `suggestedStance` (`STRONG_CANDIDATE | CANDIDATE | WATCH | HOLD_OFF | AVOID`)
+    - `bullishFactors`, `bearishFactors`, `missingData`, `staleDataWarnings`, `explanation`
+- `scoreWatchlist` -> `scoreWatchlist`
+  - Inputs: `watchlistId`
+  - Returns ranked deterministic ticker scores for watchlist items
+- `compareTickers` -> `compareTickers`
+  - Inputs: `tickers: string[]`
+  - Returns side-by-side deterministic scorecards and key differences
+- `getPortfolioRiskSnapshot` -> `getPortfolioRiskSnapshot`
+  - Inputs: `portfolioId`
+  - Returns concentration, currency exposure, sector exposure, missing data, top risks, and summary
+
+### Deterministic Scoring Notes
+
+- Scoring tools are deterministic decision-support aids and are not investment advice.
+- Scores are transparent heuristics from persisted backend data only (no external LLM calls).
+- Component meanings:
+  - `technicalScore`: trend/RSI/MACD and moving-average structure
+  - `fundamentalScore`: growth, margins, balance-sheet/liquidity health
+  - `valuationScore`: conservative multiple-range checks (not sector-relative fair value)
+  - `analystScore`: upside, consensus, ratings distribution, upgrade/downgrade tilt
+  - `newsScore`: sentiment/materiality directional context
+  - `macroRiskScore`: broad macro/geopolitical backdrop risk context
+  - `earningsRiskScore`: near-term event risk around upcoming earnings timing
+  - `dataQualityScore`: confidence proxy from missing/stale data penalties
+- Missing/stale behavior:
+  - missing components lower `dataQualityScore` and appear in `missingData`
+  - stale snapshots/observations add `staleDataWarnings`
+  - conservative penalties prevent overconfident outputs on sparse inputs
+
+### Refresh tools
+
+All refresh tools are `CONFIRMATION_REQUIRED`.
+
+- `runPortfolioFullRefresh` -> `ingestPortfolioFmpFullRefresh`
+  - Inputs:
+    - `portfolioId`
+    - `refreshMode?` (`quick` default)
+    - `includeEconomics?` (`true` default)
+    - `includeBankOfCanada?` (`true` default)
+    - `includeFred?` (`true` default)
+    - `includeAnalystData?` (`true` default)
+    - `includeGdelt?` (`false` default)
+    - `runAnalysis?` (`true` default)
+- `refreshTickerAnalystData` -> `ingestTickerAnalystData`
+  - Inputs: `ticker`
+- `refreshWatchlistAnalystData` -> `ingestWatchlistAnalystData`
+  - Inputs: `watchlistId`
+- `refreshDiscoveryCategory` -> `ingestMarketDiscovery`
+  - Inputs: `category`, `limit?`
+- `refreshGdeltRiskContext` -> `ingestDefaultGdeltRiskSet`
+  - Inputs:
+    - `mode?` (`quick` default)
+    - `maxRecordsPerQuery?`
+    - `lookbackDays?` (`7` default)
+  - Output preserves ingestion warnings and `failedQueries`.
+
+### Mutation tools
+
+All mutation tools are `CONFIRMATION_REQUIRED`.
+
+- `addTickerToWatchlist` -> `addTickerToWatchlist`
+  - Inputs:
+    - `watchlistId`
+    - `ticker`
+    - `status?`
+    - `priority?`
+    - `thesis?`
+    - `riskNotes?`
+    - `targetEntryPrice?`
+    - `targetExitPrice?`
+    - `targetAllocation?`
+    - `tags?`
+    - `source?`
+  - If `source` is omitted, source defaults to `AGENT` when `context.source = AGENT`; otherwise `USER`.
+- `updateWatchlistItem` -> `updateWatchlistItemDetails`
+  - Inputs:
+    - `itemId`
+    - one or more update fields (`status`, `priority`, `thesis`, `riskNotes`, targets, `tags`, `rejectionReason`)
+- `removeWatchlistItem` -> `removeWatchlistItem`
+  - Inputs: `itemId`
+
+### Disabled high-impact placeholder
+
+- `rebalancePaperPortfolio`
+  - Risk: `HIGH_IMPACT`
+  - Mode: `DISABLED`
+  - Exists as a policy placeholder and cannot be executed.
+
+## Confirmation and Dry-Run Policy
+
+### Confirmation-required behavior
+
+If a tool is `CONFIRMATION_REQUIRED` and `confirmed !== true`, execution fails with:
+
+- status code: `409`
+- code: `AGENT_TOOL_CONFIRMATION_REQUIRED`
+- message: `Tool requires confirmation.`
+- details include `toolName`, `riskLevel`, and `executionMode`
+
+### Disabled behavior
+
+If a tool is `DISABLED`, execution fails with:
+
+- status code: `403`
+- code: `AGENT_TOOL_DISABLED`
+
+### Dry-run behavior
+
+- For `READ_ONLY` tools, execution still runs normally.
+- For `REFRESH` and `MUTATION` tools, dry-run validates input and returns a structured planned action.
+- In dry-run for non-read-only tools, no provider calls and no database writes are performed.
+
+Example dry-run result payload fragment:
 
 ```json
 {
-  "ticker": "AAPL",
-  "limit": 20
-}
-```
-
-Output:
-
-```json
-{
-  "ticker": "AAPL",
-  "latestAnalystSnapshot": {
-    "priceTargetConsensus": 215,
-    "ratingConsensus": "BUY",
-    "analystCount": 30
+  "toolName": "addTickerToWatchlist",
+  "success": true,
+  "data": {
+    "plannedAction": true,
+    "toolName": "addTickerToWatchlist",
+    "riskLevel": "MUTATION",
+    "executionMode": "CONFIRMATION_REQUIRED",
+    "input": {
+      "watchlistId": "watchlist-1",
+      "ticker": "AAPL"
+    },
+    "message": "Dry-run validated mutation input. No database write was performed."
   },
-  "recentAnalystActions": []
+  "warnings": ["Dry-run mode: execution was not performed."]
 }
 ```
 
-Failure behavior:
-- If latest snapshot is missing, treat as no-data context and return null snapshot with empty actions.
-- If actions endpoint fails but latest succeeds, return latest snapshot and empty actions plus warning metadata.
+## Agent Tool API
 
-## refreshTickerAnalystData
+### List registered tools
 
-Purpose:
-- Trigger provider ingestion for one ticker analyst context.
+- `GET /api/agent/tools`
 
-Recommended backend call:
-- `POST /api/ingestion/fmp/ticker/:ticker/analyst`
+### Execute a tool
 
-Input:
+- `POST /api/agent/tools/:toolName/execute`
+
+Request:
 
 ```json
 {
-  "ticker": "AAPL"
-}
-```
-
-Output:
-
-```json
-{
-  "ticker": "AAPL",
-  "snapshotsCreated": 1,
-  "snapshotsUpdated": 0,
-  "actionsCreated": 2,
-  "actionsUpdated": 0,
-  "warnings": []
-}
-```
-
-Failure behavior:
-- Provider entitlement/no-data issues should surface as warnings where possible.
-- Hard validation/storage errors should return backend error envelope.
-
-## refreshWatchlistAnalystData
-
-Purpose:
-- Trigger analyst ingestion for all tickers in one watchlist.
-
-Recommended backend call:
-- `POST /api/ingestion/fmp/watchlist/:watchlistId/analyst`
-
-Input:
-
-```json
-{
-  "watchlistId": "ckxxxxxxxxxxxxxxxxxxxx"
-}
-```
-
-Output:
-
-```json
-{
-  "watchlistId": "ckxxxxxxxxxxxxxxxxxxxx",
-  "tickersProcessed": 8,
-  "tickersFailed": 1,
-  "snapshotsCreated": 6,
-  "snapshotsUpdated": 2,
-  "actionsCreated": 10,
-  "actionsUpdated": 1,
-  "results": [],
-  "failedTickers": [],
-  "warnings": []
-}
-```
-
-Failure behavior:
-- Partial failures are expected and should be represented in `failedTickers` without failing the entire call.
-
-## getDiscoveryCandidates
-
-Purpose:
-- Read latest discovery candidates for one category, optionally after refresh.
-
-Recommended backend calls:
-- Refresh category: `POST /api/discovery/fmp/:category/refresh`
-- Refresh defaults: `POST /api/discovery/fmp/default-set`
-- Read latest category: `GET /api/discovery/:category?limit=<N>`
-
-Input:
-
-```json
-{
-  "category": "GAINERS",
-  "limit": 25,
-  "refresh": true
-}
-```
-
-Output:
-
-```json
-{
-  "category": "GAINERS",
-  "items": [
-    {
-      "ticker": "AAPL",
-      "companyName": "Apple Inc.",
-      "price": 205.12,
-      "changePercent": 3.1,
-      "capturedAt": "2026-06-08T12:00:00.000Z"
-    }
-  ]
-}
-```
-
-Failure behavior:
-- Unsupported category should return backend error envelope.
-- Empty category result is valid and should return `items: []`.
-
-## refreshGdeltRiskContext
-
-Purpose:
-- Trigger GDELT ingestion for either one explicit query or the default global-risk query set.
-
-Recommended backend calls:
-- Single query: `POST /api/ingestion/gdelt/query`
-- Default set: `POST /api/ingestion/gdelt/default-risk-set`
-
-Input (single query):
-
-```json
-{
-  "query": "war OR sanctions",
-  "from": "2026-06-01T00:00:00.000Z",
-  "to": "2026-06-08T00:00:00.000Z",
-  "maxRecords": 25
-}
-```
-
-Input (default risk set):
-
-```json
-{
-  "from": "2026-06-01T00:00:00.000Z",
-  "to": "2026-06-08T00:00:00.000Z",
-  "maxRecordsPerQuery": 25
-}
-```
-
-Output:
-
-```json
-{
-  "queriesProcessed": 8,
-  "queriesFailed": 0,
-  "eventsCreated": 42,
-  "eventsUpdated": 6,
-  "eventsSkipped": 3,
-  "warnings": [],
-  "failedQueries": []
-}
-```
-
-Failure behavior:
-- Query-level failures are captured in `failedQueries` and should not block all results.
-
-## getLatestGeopoliticalContext
-
-Purpose:
-- Retrieve recent stored GDELT geopolitical events for near-term context retrieval.
-
-Recommended backend call:
-- `GET /api/geopolitical/latest?limit=<N>&days=<D>`
-
-Input:
-
-```json
-{
-  "limit": 20,
-  "days": 7
-}
-```
-
-Output:
-
-```json
-{
-  "from": "2026-06-01T00:00:00.000Z",
-  "to": "2026-06-08T00:00:00.000Z",
-  "items": []
-}
-```
-
-Failure behavior:
-- Empty result is valid (`items: []`).
-
-## getGeopoliticalSummary
-
-Purpose:
-- Fetch bounded aggregate geopolitical/global-risk summary for reports and watchlists.
-
-Recommended backend call:
-- `GET /api/geopolitical/summary?days=<D>`
-
-Input:
-
-```json
-{
-  "days": 7
-}
-```
-
-Output:
-
-```json
-{
-  "totalEvents": 100,
-  "countsByCategory": [
-    { "key": "GEOPOLITICAL", "count": 40 }
-  ],
-  "countsByTheme": [
-    { "key": "GLOBAL_RISK", "count": 30 }
-  ],
-  "sentimentMix": {
-    "positive": 12,
-    "neutral": 55,
-    "negative": 28,
-    "unknown": 5
+  "context": {
+    "userId": "...",
+    "portfolioId": "...",
+    "source": "USER",
+    "dryRun": false
   },
-  "topHeadlines": []
+  "input": {},
+  "confirmed": false
 }
 ```
 
-Failure behavior:
-- If no events exist, return summary with `totalEvents = 0` and empty arrays.
+Behavior:
+
+- validates tool existence
+- validates input with the registered Zod schema
+- enforces execution mode (`CONFIRMATION_REQUIRED`, `DISABLED`)
+- executes via the tool executor and returns bounded result metadata
+
+## Audit Logging Note
+
+Dedicated per-tool audit log persistence is intentionally deferred.
+
+The current foundation exposes tool metadata (`toolName`, execution mode, risk, timestamps, duration, dry-run flag) to support later audit sink integration without changing tool contracts.
+
+## Rule for LLM Integration
+
+Any future LLM or agentic orchestration must invoke backend capabilities through this tool registry/executor contract.
+
+It must not bypass this layer by calling arbitrary backend API routes.
