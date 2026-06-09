@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import type { AgentToolExecutionMode, AgentToolRiskLevel, AgentToolRequestSource } from "./agent-tool.types";
+import type {
+  AgentToolExecutionMode,
+  AgentToolName,
+  AgentToolRiskLevel,
+  AgentToolRequestSource,
+} from "./agent-tool.types";
 
 export const agentConfidenceSchema = z.enum(["LOW", "MEDIUM", "HIGH"]);
 export type AgentConfidence = z.infer<typeof agentConfidenceSchema>;
@@ -42,9 +47,18 @@ export interface AgentOpenAiDiagnostics {
 }
 
 export interface AgentChatMetadata {
-  mode: "OPENAI_SYNTHESIS" | "DETERMINISTIC_ROUTER";
+  mode: "OPENAI_PLANNED_SYNTHESIS" | "OPENAI_SYNTHESIS" | "DETERMINISTIC_ROUTER";
   modelName?: string;
   fallbackUsed: boolean;
+  plannerUsed: boolean;
+  plannerFallbackUsed: boolean;
+  plannedToolCount: number;
+  executedToolCount: number;
+  droppedToolCount: number;
+  fallbackReason?: string;
+  openAiProviderEnabled?: boolean;
+  openAiKeyConfigured?: boolean;
+  plannerSkipReason?: "PROVIDER_DISABLED" | "API_KEY_MISSING";
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -68,9 +82,84 @@ export interface AgentChatRequest {
     source: AgentToolRequestSource;
     userId?: string;
     portfolioId?: string;
+    watchlistId?: string;
+    ticker?: string;
     requestId?: string;
   };
+  confirmedToolExecutions?: AgentToolName[];
+  confirmedToolInputs?: Partial<Record<AgentToolName, Record<string, unknown>>>;
+  allowRefresh?: boolean;
+  allowMutation?: boolean;
+  dryRun?: boolean;
 }
+
+export type AgentTickerResolutionConfidence = "HIGH" | "MEDIUM" | "LOW";
+
+export type AgentTickerResolutionSource =
+  | "EXPLICIT"
+  | "TICKER_PATTERN"
+  | "STATIC_ALIAS"
+  | "STOCK_DB"
+  | "NONE"
+  | "AMBIGUOUS";
+
+export interface AgentTickerResolutionCandidate {
+  ticker: string;
+  companyName?: string;
+  exchange?: string;
+  currency?: string;
+}
+
+export interface AgentTickerResolutionResult {
+  ticker?: string;
+  confidence: AgentTickerResolutionConfidence;
+  source: AgentTickerResolutionSource;
+  originalText?: string;
+  candidates?: AgentTickerResolutionCandidate[];
+}
+
+export interface OpenAiToolCatalogItem {
+  name: AgentToolName;
+  description: string;
+  riskLevel: AgentToolRiskLevel;
+  executionMode: AgentToolExecutionMode;
+  inputSchemaSummary: string;
+}
+
+export interface OpenAiToolPlannerInput {
+  userMessage: string;
+  availableTools: OpenAiToolCatalogItem[];
+  context: {
+    userId?: string;
+    portfolioId?: string;
+    watchlistId?: string;
+    ticker?: string;
+    allowRefresh: boolean;
+    allowMutation: boolean;
+    dryRun: boolean;
+  };
+  resolvedEntities?: {
+    ticker?: AgentTickerResolutionResult;
+  };
+  recentConversationSummary?: string;
+}
+
+export const openAiToolPlanToolCallSchema = z.object({
+  toolName: z.string().trim().min(1),
+  input: z.record(z.string(), z.unknown()).default({}),
+  purpose: z.string().trim().min(1),
+});
+
+export const openAiToolPlanOutputSchema = z.object({
+  intent: z.string().trim().min(1),
+  needsTools: z.boolean(),
+  toolCalls: z.array(openAiToolPlanToolCallSchema).max(20).default([]),
+  missingContext: z.array(z.string().trim().min(1)).max(20).default([]),
+  requiresConfirmation: z.boolean().default(false),
+  clarifyingQuestion: z.string().trim().min(1).nullable().default(null),
+});
+
+export type OpenAiToolPlanOutput = z.infer<typeof openAiToolPlanOutputSchema>;
 
 export const openAiAgentSynthesisOutputSchema = z.object({
   answer: z.string().trim().min(1),

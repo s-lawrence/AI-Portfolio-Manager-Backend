@@ -1,11 +1,15 @@
 import OpenAI from "openai";
+import type { ZodSchema } from "zod";
 
 import { env } from "../config/env";
 import {
   type OpenAiFailureStage,
   type OpenAiAgentSynthesisInput,
   type OpenAiAgentSynthesisOutput,
+  type OpenAiToolPlanOutput,
+  type OpenAiToolPlannerInput,
   openAiAgentSynthesisOutputSchema,
+  openAiToolPlanOutputSchema,
 } from "./agent-chat.types";
 
 const OPENAI_SYNTHESIS_SYSTEM_PROMPT = [
@@ -19,6 +23,19 @@ const OPENAI_SYNTHESIS_SYSTEM_PROMPT = [
   "If a suggested action mutates data or refreshes providers, mark requiresConfirmation=true.",
   "Keep the answer concise and actionable.",
   "Return strict JSON with keys: answer, confidence, warnings, suggestedActions.",
+].join(" ");
+
+const OPENAI_TOOL_PLANNER_SYSTEM_PROMPT = [
+  "You are planning safe backend tool use for an investment research app.",
+  "Use only tools listed in the supplied catalog.",
+  "Prefer read-only tools unless the user explicitly asks to refresh or change data.",
+  "Refresh, mutation, and high-impact tools require confirmation.",
+  "When resolvedEntities.ticker is provided by backend with HIGH confidence, use that ticker and do not ask for ticker confirmation.",
+  "Ask for ticker clarification only when backend resolution is AMBIGUOUS or LOW confidence.",
+  "Do not invent unsupported tickers beyond backend-provided context and entities.",
+  "Ask for missing portfolio/watchlist/ticker context when needed.",
+  "Do not invent data, tools, or provider/API calls.",
+  "Return only JSON matching keys: intent, needsTools, toolCalls, missingContext, requiresConfirmation, clarifyingQuestion.",
 ].join(" ");
 
 const openAiClient = env.OPENAI_API_KEY
@@ -37,6 +54,13 @@ export interface OpenAiFailureDiagnostic {
 
 export interface GenerateAgentSynthesisResult {
   synthesis: OpenAiAgentSynthesisOutput;
+  modelName: string;
+  usedFallbackModel: boolean;
+  primaryModelFailure?: OpenAiFailureDiagnostic;
+}
+
+export interface GenerateToolPlanResult {
+  plan: OpenAiToolPlanOutput;
   modelName: string;
   usedFallbackModel: boolean;
   primaryModelFailure?: OpenAiFailureDiagnostic;
@@ -166,7 +190,41 @@ function extractJsonCandidate(text: string): string {
   );
 }
 
-function parseStructuredResponse(content: string, modelName: string): OpenAiAgentSynthesisOutput {
+function parseStructuredResponse<T>(
+  content: string,
+  modelName: string,
+  schema: ZodSchema<T>,
+): T {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonCandidate(content));
+  } catch {
+    throw new OpenAiAgentClientError(
+      {
+        stage: "PARSE_FAILED",
+        responsePreview: previewText(content),
+        modelName,
+      },
+      "OpenAI returned invalid JSON.",
+    );
+  }
+
+  const validated = schema.safeParse(parsed);
+  if (!validated.success) {
+    throw new OpenAiAgentClientError(
+      {
+        stage: "VALIDATION_FAILED",
+        responsePreview: previewText(content),
+        modelName,
+      },
+      "OpenAI JSON did not match output schema.",
+    );
+  }
+
+  return validated.data;
+}
+
+function parseSynthesisResponse(content: string, modelName: string): OpenAiAgentSynthesisOutput {
   let parsed: unknown;
   try {
     parsed = JSON.parse(extractJsonCandidate(content));
@@ -214,6 +272,10 @@ function parseStructuredResponse(content: string, modelName: string): OpenAiAgen
   }
 
   return validated.data;
+}
+
+function parseToolPlanResponse(content: string, modelName: string): OpenAiToolPlanOutput {
+  return parseStructuredResponse(content, modelName, openAiToolPlanOutputSchema);
 }
 
 function normalizeConfidence(value: unknown): OpenAiAgentSynthesisOutput["confidence"] {
@@ -313,10 +375,16 @@ function readAssistantContent(response: {
   return "";
 }
 
-async function requestAgentSynthesis(
-  input: OpenAiAgentSynthesisInput,
-  modelName: string,
-): Promise<OpenAiAgentSynthesisOutput> {
+async function requestJsonCompletion(
+  input: {
+    systemPrompt: string;
+    payload: unknown;
+    modelName: string;
+    temperature: number;
+  },
+): Promise<string> {
+  const modelName = input.modelName;
+
   if (!env.OPENAI_API_KEY || !openAiClient) {
     throw new OpenAiAgentClientError(
       {
@@ -335,20 +403,20 @@ async function requestAgentSynthesis(
     const response = await openAiClient.chat.completions.create(
       {
         model: modelName,
-        temperature: 0.2,
+        temperature: input.temperature,
         response_format: {
           type: "json_object",
         },
         messages: [
           {
             role: "system",
-            content: OPENAI_SYNTHESIS_SYSTEM_PROMPT,
+            content: input.systemPrompt,
           },
           {
             role: "user",
             content: [
               "Return only JSON. Do not wrap in markdown fences.",
-              JSON.stringify(input),
+              JSON.stringify(input.payload),
             ].join("\n\n"),
           },
         ],
@@ -369,7 +437,7 @@ async function requestAgentSynthesis(
       );
     }
 
-    return parseStructuredResponse(content, modelName);
+    return content;
   } catch (error) {
     if (error instanceof OpenAiAgentClientError) {
       throw error;
@@ -431,15 +499,40 @@ async function requestAgentSynthesis(
   }
 }
 
-async function requestWithRetry(
+async function requestAgentSynthesis(
   input: OpenAiAgentSynthesisInput,
   modelName: string,
 ): Promise<OpenAiAgentSynthesisOutput> {
+  const content = await requestJsonCompletion({
+    systemPrompt: OPENAI_SYNTHESIS_SYSTEM_PROMPT,
+    payload: input,
+    modelName,
+    temperature: 0.2,
+  });
+
+  return parseSynthesisResponse(content, modelName);
+}
+
+async function requestToolPlan(
+  input: OpenAiToolPlannerInput,
+  modelName: string,
+): Promise<OpenAiToolPlanOutput> {
+  const content = await requestJsonCompletion({
+    systemPrompt: OPENAI_TOOL_PLANNER_SYSTEM_PROMPT,
+    payload: input,
+    modelName,
+    temperature: 0.1,
+  });
+
+  return parseToolPlanResponse(content, modelName);
+}
+
+async function requestWithRetry<T>(operation: () => Promise<T>): Promise<T> {
   const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await requestAgentSynthesis(input, modelName);
+      return await operation();
     } catch (error) {
       if (
         error instanceof OpenAiAgentClientError &&
@@ -457,22 +550,26 @@ async function requestWithRetry(
   throw new OpenAiAgentClientError(
     {
       stage: "REQUEST_FAILED",
-      modelName,
     },
     "OpenAI request failed.",
   );
 }
 
-export async function generateAgentSynthesis(
-  input: OpenAiAgentSynthesisInput,
-): Promise<GenerateAgentSynthesisResult> {
+async function requestWithFallbackModel<T>(
+  requester: (modelName: string) => Promise<T>,
+): Promise<{
+  data: T;
+  modelName: string;
+  usedFallbackModel: boolean;
+  primaryModelFailure?: OpenAiFailureDiagnostic;
+}> {
   const primaryModel = env.OPENAI_AGENT_MODEL;
   const fallbackModel = env.OPENAI_AGENT_MODEL_FALLBACK;
 
   try {
-    const synthesis = await requestWithRetry(input, primaryModel);
+    const data = await requestWithRetry(() => requester(primaryModel));
     return {
-      synthesis,
+      data,
       modelName: primaryModel,
       usedFallbackModel: false,
     };
@@ -483,9 +580,9 @@ export async function generateAgentSynthesis(
       fallbackModel &&
       fallbackModel !== primaryModel
     ) {
-      const synthesis = await requestWithRetry(input, fallbackModel);
+      const data = await requestWithRetry(() => requester(fallbackModel));
       return {
-        synthesis,
+        data,
         modelName: fallbackModel,
         usedFallbackModel: true,
         primaryModelFailure: error.failure,
@@ -501,9 +598,33 @@ export async function generateAgentSynthesis(
         stage: "UNKNOWN",
         modelName: primaryModel,
       },
-      "Unknown OpenAI synthesis failure.",
+      "Unknown OpenAI failure.",
     );
   }
+}
+
+export async function generateAgentSynthesis(
+  input: OpenAiAgentSynthesisInput,
+): Promise<GenerateAgentSynthesisResult> {
+  const result = await requestWithFallbackModel((modelName) => requestAgentSynthesis(input, modelName));
+  return {
+    synthesis: result.data,
+    modelName: result.modelName,
+    usedFallbackModel: result.usedFallbackModel,
+    primaryModelFailure: result.primaryModelFailure,
+  };
+}
+
+export async function generateToolPlan(
+  input: OpenAiToolPlannerInput,
+): Promise<GenerateToolPlanResult> {
+  const result = await requestWithFallbackModel((modelName) => requestToolPlan(input, modelName));
+  return {
+    plan: result.data,
+    modelName: result.modelName,
+    usedFallbackModel: result.usedFallbackModel,
+    primaryModelFailure: result.primaryModelFailure,
+  };
 }
 
 export async function generateTickerReport(): Promise<never> {
