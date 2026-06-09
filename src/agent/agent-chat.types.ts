@@ -37,6 +37,12 @@ export type OpenAiFailureStage =
   | "UNSUPPORTED_MODEL"
   | "UNKNOWN";
 
+export interface AgentOpenAiValidationIssue {
+  path: string;
+  code: string;
+  message: string;
+}
+
 export interface AgentOpenAiDiagnostics {
   openAiAttempted: true;
   openAiFailureStage: OpenAiFailureStage;
@@ -44,6 +50,8 @@ export interface AgentOpenAiDiagnostics {
   openAiStatus?: number;
   openAiResponsePreview?: string;
   openAiModelName?: string;
+  validationIssues?: AgentOpenAiValidationIssue[];
+  validationIssueCount?: number;
 }
 
 export interface AgentChatMetadata {
@@ -59,6 +67,22 @@ export interface AgentChatMetadata {
   openAiProviderEnabled?: boolean;
   openAiKeyConfigured?: boolean;
   plannerSkipReason?: "PROVIDER_DISABLED" | "API_KEY_MISSING";
+  receivedContextKeys?: Array<"source" | "userId" | "portfolioId" | "watchlistId" | "ticker" | "requestId">;
+  receivedPortfolioIdConfigured?: boolean;
+  receivedWatchlistIdConfigured?: boolean;
+  receivedTickerConfigured?: boolean;
+  routeReceivedTopLevelUserId?: boolean;
+  routeReceivedTopLevelPortfolioId?: boolean;
+  routeReceivedTopLevelWatchlistId?: boolean;
+  routeReceivedTopLevelTicker?: boolean;
+  routeReceivedNestedUserId?: boolean;
+  routeReceivedNestedPortfolioId?: boolean;
+  routeReceivedNestedWatchlistId?: boolean;
+  routeReceivedNestedTicker?: boolean;
+  canonicalUserIdConfigured?: boolean;
+  canonicalPortfolioIdConfigured?: boolean;
+  canonicalWatchlistIdConfigured?: boolean;
+  canonicalTickerConfigured?: boolean;
   startedAt: string;
   finishedAt: string;
   durationMs: number;

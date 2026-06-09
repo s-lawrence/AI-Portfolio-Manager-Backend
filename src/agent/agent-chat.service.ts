@@ -24,6 +24,7 @@ import {
   OpenAiAgentClientError,
   generateAgentSynthesis,
   generateToolPlan,
+  normalizePlannerOutputAliases,
 } from "./openai-agent-client";
 import {
   collectMentionedTickers,
@@ -100,6 +101,14 @@ function redactDiagnosticText(value: string | undefined): string | undefined {
   return redacted.length > 0 ? redacted.slice(0, 200) : undefined;
 }
 
+function previewPlannerPayload(value: unknown): string | undefined {
+  try {
+    return redactDiagnosticText(JSON.stringify(value));
+  } catch {
+    return undefined;
+  }
+}
+
 function inferCanadianTickerPreference(request: AgentChatRequest): boolean | undefined {
   const message = request.message.toLowerCase();
   const contextTicker = request.context.ticker?.trim().toUpperCase();
@@ -137,6 +146,73 @@ function buildTickerClarifyingQuestion(resolution: AgentTickerResolutionResult):
     .join(", ");
 
   return `I found multiple ticker candidates: ${options}. Which ticker should I use?`;
+}
+
+function hasConfiguredContextString(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function collectReceivedContextKeys(
+  context: AgentChatRequest["context"],
+): NonNullable<AgentChatResponse["metadata"]["receivedContextKeys"]> {
+  const keys: NonNullable<AgentChatResponse["metadata"]["receivedContextKeys"]> = [];
+
+  if (hasConfiguredContextString(context.source)) {
+    keys.push("source");
+  }
+  if (hasConfiguredContextString(context.userId)) {
+    keys.push("userId");
+  }
+  if (hasConfiguredContextString(context.portfolioId)) {
+    keys.push("portfolioId");
+  }
+  if (hasConfiguredContextString(context.watchlistId)) {
+    keys.push("watchlistId");
+  }
+  if (hasConfiguredContextString(context.ticker)) {
+    keys.push("ticker");
+  }
+  if (hasConfiguredContextString(context.requestId)) {
+    keys.push("requestId");
+  }
+
+  return keys;
+}
+
+function isPortfolioContextIntent(intent: string): boolean {
+  return intent === "DAILY_RISK_CHECK" || intent === "PORTFOLIO_REVIEW" || intent === "PORTFOLIO_RISK_SNAPSHOT";
+}
+
+function reconcilePlannerMissingContext(input: {
+  intent: string;
+  missingContext: string[];
+  request: AgentChatRequest;
+}): string[] {
+  const reconciled = new Set(dedupe(input.missingContext));
+
+  if (hasConfiguredContextString(input.request.context.userId)) {
+    reconciled.delete("userId");
+  }
+
+  if (hasConfiguredContextString(input.request.context.portfolioId)) {
+    reconciled.delete("portfolioId");
+  }
+
+  if (hasConfiguredContextString(input.request.context.watchlistId)) {
+    reconciled.delete("watchlistId");
+  }
+
+  const hasTicker = hasConfiguredContextString(input.request.context.ticker);
+  if (hasTicker) {
+    reconciled.delete("ticker");
+  }
+
+  // Portfolio risk/overview intents should not require ticker if portfolio context exists.
+  if (isPortfolioContextIntent(input.intent) && hasConfiguredContextString(input.request.context.portfolioId)) {
+    reconciled.delete("ticker");
+  }
+
+  return [...reconciled];
 }
 
 function determineIntent(message: string, tickers: string[]): string {
@@ -914,6 +990,10 @@ async function executePlannedTool(
 export async function runAgentChat(request: AgentChatRequest): Promise<AgentChatResponse> {
   const startedAtDate = new Date();
   const message = request.message.trim();
+  const receivedContextKeys = collectReceivedContextKeys(request.context);
+  const receivedPortfolioIdConfigured = hasConfiguredContextString(request.context.portfolioId);
+  const receivedWatchlistIdConfigured = hasConfiguredContextString(request.context.watchlistId);
+  const receivedTickerConfigured = hasConfiguredContextString(request.context.ticker);
   const preferCanadianTicker = inferCanadianTickerPreference(request);
   const tickerResolution = await resolveTickerFromMessage(message, request.context.ticker, {
     preferCanadianTicker,
@@ -997,12 +1077,25 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
 
       modelName = planResult.modelName;
 
-      const parsedPlan = openAiToolPlanOutputSchema.safeParse(planResult.plan);
+      const parsedPlan = openAiToolPlanOutputSchema.safeParse(
+        normalizePlannerOutputAliases(planResult.plan),
+      );
       if (!parsedPlan.success) {
+        const validationIssues = parsedPlan.error.issues
+          .slice(0, 20)
+          .map((issue) => ({
+            path: issue.path.length > 0 ? issue.path.join(".") : "$",
+            code: issue.code,
+            message: issue.message.slice(0, 300),
+          }));
+
         throw new OpenAiAgentClientError(
           {
             stage: "VALIDATION_FAILED",
             modelName: planResult.modelName,
+            responsePreview: previewPlannerPayload(planResult.plan),
+            validationIssues,
+            validationIssueCount: parsedPlan.error.issues.length,
           },
           "OpenAI planner JSON did not match schema.",
         );
@@ -1012,11 +1105,25 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
         planningWarnings.push("Primary OpenAI model was unavailable; fallback model was used for planning.");
       }
 
+      const reconciledMissingContext = reconcilePlannerMissingContext({
+        intent: parsedPlan.data.intent,
+        missingContext: parsedPlan.data.missingContext,
+        request: effectiveRequest,
+      });
+
+      const reconciledClarifyingQuestion = reconciledMissingContext.length === 0
+        ? null
+        : parsedPlan.data.clarifyingQuestion;
+
+      if (reconciledMissingContext.length < parsedPlan.data.missingContext.length) {
+        planningWarnings.push("Planner requested context that was already provided; missing-context list was reconciled.");
+      }
+
       const validatedPlan = validateAndPrepareToolCalls({
         intent: parsedPlan.data.intent,
         toolCalls: parsedPlan.data.toolCalls,
-        missingContext: parsedPlan.data.missingContext,
-        clarifyingQuestion: parsedPlan.data.clarifyingQuestion,
+        missingContext: reconciledMissingContext,
+        clarifyingQuestion: reconciledClarifyingQuestion,
         request: effectiveRequest,
       });
 
@@ -1043,6 +1150,8 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
             openAiStatus: error.failure.status,
             openAiResponsePreview: redactDiagnosticText(error.failure.responsePreview),
             openAiModelName: error.failure.modelName ?? modelName,
+            validationIssues: error.failure.validationIssues,
+            validationIssueCount: error.failure.validationIssueCount,
           };
         } else {
           openAiDiagnostics = {
@@ -1155,6 +1264,8 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
               synthesis.primaryModelFailure.responsePreview,
             ),
             openAiModelName: synthesis.modelName,
+            validationIssues: synthesis.primaryModelFailure.validationIssues,
+            validationIssueCount: synthesis.primaryModelFailure.validationIssueCount,
           };
         }
       }
@@ -1173,6 +1284,8 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
             openAiStatus: error.failure.status,
             openAiResponsePreview: redactDiagnosticText(error.failure.responsePreview),
             openAiModelName: error.failure.modelName ?? modelName,
+            validationIssues: error.failure.validationIssues,
+            validationIssueCount: error.failure.validationIssueCount,
           };
         } else {
           openAiDiagnostics = {
@@ -1208,6 +1321,10 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       openAiProviderEnabled: env.NODE_ENV !== "production" ? openAiProviderEnabled : undefined,
       openAiKeyConfigured: env.NODE_ENV !== "production" ? openAiKeyConfigured : undefined,
       plannerSkipReason: env.NODE_ENV !== "production" ? plannerSkipReason : undefined,
+      receivedContextKeys: env.NODE_ENV !== "production" ? receivedContextKeys : undefined,
+      receivedPortfolioIdConfigured: env.NODE_ENV !== "production" ? receivedPortfolioIdConfigured : undefined,
+      receivedWatchlistIdConfigured: env.NODE_ENV !== "production" ? receivedWatchlistIdConfigured : undefined,
+      receivedTickerConfigured: env.NODE_ENV !== "production" ? receivedTickerConfigured : undefined,
       startedAt: startedAtDate.toISOString(),
       finishedAt: finishedAtDate.toISOString(),
       durationMs: calculateDurationMs(startedAtDate, finishedAtDate),

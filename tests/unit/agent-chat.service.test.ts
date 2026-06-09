@@ -142,6 +142,565 @@ describe("agent-chat.service planner flow", () => {
     expect(result.missingContext).toEqual([]);
   });
 
+  it("planner output using toolName/input validates normally", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "RESEARCH_TICKER",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "scoreTickerResearch",
+            input: { ticker: "AAPL" },
+            purpose: "Score ticker",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Normalized."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreTickerResearch", { ticker: "AAPL" }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Take a look at Apple",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "scoreTickerResearch",
+    }));
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+  });
+
+  it("planner output using name/arguments is normalized and accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "RESEARCH_TICKER",
+        needsTools: true,
+        toolCalls: [
+          {
+            name: "getTickerResearchBundle",
+            arguments: { ticker: "AAPL" },
+            purpose: "Load research",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Alias normalized."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getTickerResearchBundle", { ticker: "AAPL" }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Take a look at Apple",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "getTickerResearchBundle",
+      input: { ticker: "AAPL" },
+    }));
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+  });
+
+  it("planner output using name/args is normalized and accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "RESEARCH_TICKER",
+        needsTools: true,
+        toolCalls: [
+          {
+            name: "scoreTickerResearch",
+            args: { ticker: "AAPL" },
+            purpose: "Score",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Alias args normalized."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreTickerResearch", { ticker: "AAPL" }) as never,
+    );
+
+    await runAgentChat({
+      message: "Take a look at Apple",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "scoreTickerResearch",
+      input: { ticker: "AAPL" },
+    }));
+  });
+
+  it("unknown tool using name/arguments is still dropped", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "GENERAL_QA",
+        needsTools: true,
+        toolCalls: [
+          {
+            name: "doSomethingUnsafe",
+            arguments: {},
+            purpose: "unsafe",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Dropped."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Do something",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.metadata.droppedToolCount).toBeGreaterThan(0);
+    expect(result.warnings.some((warning) => warning.includes("Dropped unknown planned tool"))).toBe(true);
+  });
+
+  it("invalid input after alias normalization is still dropped", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "COMPARE_TICKERS",
+        needsTools: true,
+        toolCalls: [
+          {
+            name: "compareTickers",
+            args: { tickers: "AAPL,MSFT" },
+            purpose: "compare",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Invalid dropped."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Compare AAPL and MSFT",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.metadata.droppedToolCount).toBeGreaterThan(0);
+    expect(result.warnings.some((warning) => warning.includes("Dropped invalid planned input"))).toBe(true);
+  });
+
+  it("confirmation-required tool using name/arguments still requires confirmation", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "REFRESH_REQUEST",
+        needsTools: true,
+        toolCalls: [
+          {
+            name: "runPortfolioFullRefresh",
+            arguments: {
+              portfolioId: "portfolio-1",
+              refreshMode: "quick",
+              includeEconomics: true,
+              includeBankOfCanada: true,
+              includeFred: true,
+              includeAnalystData: true,
+              includeGdelt: false,
+              runAnalysis: true,
+            },
+            purpose: "Refresh all portfolio data",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: true,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Confirm."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Run full refresh",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+      allowRefresh: false,
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.suggestedActions.some((action) => action.toolName === "runPortfolioFullRefresh" && action.requiresConfirmation)).toBe(true);
+  });
+
+  it("planner output missing purpose is accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "DAILY_RISK_CHECK",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getGeopoliticalSummary",
+            input: {},
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Macro complete."));
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getGeopoliticalSummary", { ok: true }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Anything I should be worried about?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "getGeopoliticalSummary",
+      input: {},
+    }));
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+  });
+
+  it("planner output missing missingContext is accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "DAILY_RISK_CHECK",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getGeopoliticalSummary",
+            input: {},
+            purpose: "Check global risk",
+          },
+        ],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Macro complete."));
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getGeopoliticalSummary", { ok: true }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Anything I should be worried about?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+    expect(result.missingContext).toEqual([]);
+  });
+
+  it("planner output missing requiresConfirmation is accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "DAILY_RISK_CHECK",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getGeopoliticalSummary",
+            input: {},
+            purpose: "Check macro risk",
+          },
+        ],
+        missingContext: [],
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Macro complete."));
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getGeopoliticalSummary", { ok: true }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Anything I should be worried about?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+  });
+
+  it("planner output missing clarifyingQuestion is accepted", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "DAILY_RISK_CHECK",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getGeopoliticalSummary",
+            input: {},
+            purpose: "Check macro risk",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Macro complete."));
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getGeopoliticalSummary", { ok: true }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Anything I should be worried about?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.plannerFallbackUsed).toBe(false);
+  });
+
+  it("planner output with input omitted defaults to {}", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "DAILY_RISK_CHECK",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getGeopoliticalSummary",
+            purpose: "Check macro risk",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Macro complete."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getGeopoliticalSummary", { ok: true }) as never,
+    );
+
+    await runAgentChat({
+      message: "Anything I should be worried about?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "getGeopoliticalSummary",
+      input: {},
+    }));
+  });
+
+  it("invalid actual tool input is dropped after planner validation", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "RESEARCH_TICKER",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "scoreTickerResearch",
+            purpose: "Score ticker",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Dropped invalid input."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Research AAPL",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.warnings.some((warning) => warning.includes("Dropped invalid planned input"))).toBe(true);
+  });
+
+  it("validation failure diagnostics include issue path, code, and message when planner JSON is truly invalid", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "RESEARCH_TICKER",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: 123,
+            input: { ticker: "AAPL" },
+            purpose: "Score",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      } as never,
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Unused."));
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreTickerResearch", {
+        ticker: "AAPL",
+        compositeScore: 65,
+        suggestedStance: "WATCH",
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Research AAPL",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(result.metadata.plannerFallbackUsed).toBe(true);
+    expect(result.metadata.openAiDiagnostics?.openAiFailureStage).toBe("VALIDATION_FAILED");
+    expect(result.metadata.openAiDiagnostics?.validationIssueCount).toBeGreaterThan(0);
+    expect(result.metadata.openAiDiagnostics?.validationIssues?.[0]).toEqual(
+      expect.objectContaining({
+        path: expect.any(String),
+        code: expect.any(String),
+        message: expect.any(String),
+      }),
+    );
+  });
+
+  it("missing portfolio context includes non-prod received context diagnostics", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const result = await runAgentChat({
+      message: "Anything I should be worried about today?",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(result.missingContext).toContain("portfolioId");
+    expect(result.metadata.receivedContextKeys).toEqual(["source"]);
+    expect(result.metadata.receivedPortfolioIdConfigured).toBe(false);
+    expect(result.metadata.receivedWatchlistIdConfigured).toBe(false);
+    expect(result.metadata.receivedTickerConfigured).toBe(false);
+  });
+
   it("provider disabled skips planner with plannerSkipReason=PROVIDER_DISABLED", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = false;
     env.OPENAI_API_KEY = "test-key";

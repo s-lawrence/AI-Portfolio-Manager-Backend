@@ -134,10 +134,11 @@ curl -X POST http://localhost:4000/api/dev/purge-demo-analytical-data \
 
 `POST /api/agent/chat` behavior:
 
-- Determines intent deterministically.
-- Executes approved backend tools through the agent tool registry/executor.
-- Builds compact synthesis context from tool summaries, warnings, and missing context.
-- Uses OpenAI synthesis only when enabled; otherwise returns deterministic synthesis.
+- Uses OpenAI planner first (when enabled) to interpret natural language and propose tool calls.
+- Validates planned tool names and inputs against backend registry and Zod schemas.
+- Executes approved backend tools only through the agent tool registry/executor.
+- Requires confirmation gates for refresh/mutation/high-impact tools.
+- Uses OpenAI synthesis on tool results after validated execution.
 - Tool execution remains backend-controlled and confirmation policy is unchanged.
 
 Agent chat request example:
@@ -148,8 +149,20 @@ curl -X POST http://localhost:4000/api/agent/chat \
   -d '{
     "message": "Research AAPL",
     "context": {
-      "source": "USER"
-    }
+      "source": "USER",
+      "portfolioId": "optional",
+      "watchlistId": "optional",
+      "ticker": "optional"
+    },
+    "confirmedToolExecutions": ["optional tool names"],
+    "confirmedToolInputs": {
+      "optionalToolName": {
+        "input": "override"
+      }
+    },
+    "allowRefresh": false,
+    "allowMutation": false,
+    "dryRun": false
   }'
 ```
 
@@ -161,11 +174,19 @@ OpenAI synthesis enablement:
 
 Fallback behavior:
 
-- If OpenAI is disabled, unavailable, or returns invalid output, deterministic synthesis is returned.
+- If planner fails, deterministic router fallback is used.
+- If synthesis fails after planning, deterministic answer fallback is used with tool summaries.
+- If OpenAI is disabled, deterministic router mode is used directly.
 - Chat metadata includes:
-  - `mode` (`OPENAI_SYNTHESIS` or `DETERMINISTIC_ROUTER`)
+  - `mode` (`OPENAI_PLANNED_SYNTHESIS`, `OPENAI_SYNTHESIS`, or `DETERMINISTIC_ROUTER`)
   - `modelName` when OpenAI path is attempted
   - `fallbackUsed`
+  - `plannerUsed`
+  - `plannerFallbackUsed`
+  - `plannedToolCount`
+  - `executedToolCount`
+  - `droppedToolCount`
+  - `fallbackReason` (optional)
 
 Non-production fallback diagnostics:
 

@@ -252,7 +252,7 @@ Behavior:
 - enforces execution mode (`CONFIRMATION_REQUIRED`, `DISABLED`)
 - executes via the tool executor and returns bounded result metadata
 
-## Agent Chat API (v1)
+## Agent Chat API (v2)
 
 ### Endpoint
 
@@ -267,8 +267,19 @@ Request:
     "source": "USER",
     "userId": "optional",
     "portfolioId": "optional",
+    "watchlistId": "optional",
+    "ticker": "optional",
     "requestId": "optional"
-  }
+  },
+  "confirmedToolExecutions": ["optional tool names"],
+  "confirmedToolInputs": {
+    "optionalToolName": {
+      "input": "override"
+    }
+  },
+  "allowRefresh": false,
+  "allowMutation": false,
+  "dryRun": false
 }
 ```
 
@@ -282,23 +293,40 @@ Response payload includes:
 - `missingContext`
 - `confidence` (`LOW | MEDIUM | HIGH`)
 - `metadata`:
-  - `mode` (`OPENAI_SYNTHESIS` or `DETERMINISTIC_ROUTER`)
+  - `mode` (`OPENAI_PLANNED_SYNTHESIS` | `OPENAI_SYNTHESIS` | `DETERMINISTIC_ROUTER`)
   - `modelName` (only populated when OpenAI synthesis is attempted)
   - `fallbackUsed`
+  - `plannerUsed`
+  - `plannerFallbackUsed`
+  - `plannedToolCount`
+  - `executedToolCount`
+  - `droppedToolCount`
+  - `fallbackReason` (optional)
   - `startedAt`
   - `finishedAt`
   - `durationMs`
 
-### Deterministic execution model
+### Planner-first execution model
 
-- Intent routing and tool execution are always backend-controlled and deterministic.
-- OpenAI is only used for final synthesis text when enabled.
-- OpenAI does not execute tools directly in Agent v1.
+- OpenAI first proposes a tool plan from natural-language input when enabled.
+- The backend validates every planned tool call against the registry and Zod input schemas.
+- OpenAI never executes tools directly.
 - Tool execution still goes through the registry/executor policy layer.
+
+### Backend validation and safety enforcement
+
+- Unknown tool names are dropped.
+- Invalid planned tool input is dropped.
+- Disabled tools are dropped and never executed.
+- Max tool calls are capped by `OPENAI_AGENT_MAX_TOOL_CALLS`.
+- Refresh/mutation/high-impact tools require confirmation and policy gates:
+  - refresh execution also requires `allowRefresh=true`
+  - mutation execution also requires `allowMutation=true`
+- Unconfirmed sensitive actions are returned as `suggestedActions` with `requiresConfirmation=true`.
 
 ### OpenAI enablement and fallback
 
-OpenAI synthesis is enabled only when both conditions are true:
+OpenAI planner+synthesis is enabled only when both conditions are true:
 
 - `OPENAI_AGENT_PROVIDER_ENABLED=true`
 - `OPENAI_API_KEY` is present
@@ -309,10 +337,23 @@ Optional model fallback:
 - Fallback is attempted only when the primary model is unavailable/unsupported.
 - Fallback usage is surfaced in metadata/warnings and is not silent.
 
-When OpenAI is disabled, fails, or returns invalid output:
+Planner-first flow when enabled:
 
-- the backend returns deterministic synthesis
-- `metadata.fallbackUsed=true` when OpenAI was attempted but fallback was used
+1. Planner proposes validated tool calls.
+2. Backend executes approved calls through the tool executor.
+3. Synthesis generates final response from tool summaries.
+
+Fallback behavior:
+
+- If planner fails, backend falls back to deterministic router behavior.
+- If synthesis fails after successful planning, backend returns deterministic answer using tool results.
+- Deterministic fallback preserves confirmation policy.
+- `metadata.fallbackReason` indicates planner/synthesis fallback stage.
+- `metadata.fallbackUsed=true` when fallback path is taken.
+
+When OpenAI is disabled:
+
+- the backend runs deterministic router behavior directly
 - confirmation policy for refresh/mutation tools remains unchanged
 
 ### Non-production diagnostics on fallback

@@ -10,23 +10,56 @@ import {
   agentToolNameParamsSchema,
 } from "../schemas/agent-tools.schemas";
 
+function hasConfiguredValue(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export async function agentToolsRoutes(app: FastifyInstance): Promise<void> {
   app.post("/chat", async (request, reply) => {
     const body = agentChatBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );
 
+    const canonical = {
+      ...body,
+      userId: body.userId ?? body.context.userId,
+      portfolioId: body.portfolioId ?? body.context.portfolioId,
+      watchlistId: body.watchlistId ?? body.context.watchlistId,
+      ticker: body.ticker ?? body.context.ticker,
+      context: {
+        ...body.context,
+        userId: body.userId ?? body.context.userId,
+        portfolioId: body.portfolioId ?? body.context.portfolioId,
+        watchlistId: body.watchlistId ?? body.context.watchlistId,
+        ticker: body.ticker ?? body.context.ticker,
+      },
+    };
+
+    const routeDiagnostics = {
+      routeReceivedTopLevelUserId: hasConfiguredValue(body.userId),
+      routeReceivedTopLevelPortfolioId: hasConfiguredValue(body.portfolioId),
+      routeReceivedTopLevelWatchlistId: hasConfiguredValue(body.watchlistId),
+      routeReceivedTopLevelTicker: hasConfiguredValue(body.ticker),
+      routeReceivedNestedUserId: hasConfiguredValue(body.context.userId),
+      routeReceivedNestedPortfolioId: hasConfiguredValue(body.context.portfolioId),
+      routeReceivedNestedWatchlistId: hasConfiguredValue(body.context.watchlistId),
+      routeReceivedNestedTicker: hasConfiguredValue(body.context.ticker),
+      canonicalUserIdConfigured: hasConfiguredValue(canonical.context.userId),
+      canonicalPortfolioIdConfigured: hasConfiguredValue(canonical.context.portfolioId),
+      canonicalWatchlistIdConfigured: hasConfiguredValue(canonical.context.watchlistId),
+      canonicalTickerConfigured: hasConfiguredValue(canonical.context.ticker),
+    };
+
     const result = await runService(() =>
-      runAgentChat({
-        message: body.message,
-        context: {
-          source: body.context.source,
-          userId: body.context.userId,
-          portfolioId: body.context.portfolioId,
-          requestId: body.context.requestId,
-        },
-      }),
+      runAgentChat(canonical),
     );
+
+    if (process.env.NODE_ENV !== "production") {
+      result.metadata = {
+        ...result.metadata,
+        ...routeDiagnostics,
+      };
+    }
 
     reply.send(ok(result));
   });

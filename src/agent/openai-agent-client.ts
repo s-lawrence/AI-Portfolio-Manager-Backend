@@ -1,8 +1,9 @@
 import OpenAI from "openai";
-import type { ZodSchema } from "zod";
+import type { ZodIssue, ZodSchema } from "zod";
 
 import { env } from "../config/env";
 import {
+  type AgentOpenAiValidationIssue,
   type OpenAiFailureStage,
   type OpenAiAgentSynthesisInput,
   type OpenAiAgentSynthesisOutput,
@@ -30,6 +31,8 @@ const OPENAI_TOOL_PLANNER_SYSTEM_PROMPT = [
   "Use only tools listed in the supplied catalog.",
   "Prefer read-only tools unless the user explicitly asks to refresh or change data.",
   "Refresh, mutation, and high-impact tools require confirmation.",
+  "For each planned tool call, use exactly this shape: { \"toolName\": \"...\", \"input\": {}, \"purpose\": \"...\" }.",
+  "Do not use name, arguments, args, parameters, or function-call style wrappers.",
   "When resolvedEntities.ticker is provided by backend with HIGH confidence, use that ticker and do not ask for ticker confirmation.",
   "Ask for ticker clarification only when backend resolution is AMBIGUOUS or LOW confidence.",
   "Do not invent unsupported tickers beyond backend-provided context and entities.",
@@ -50,6 +53,8 @@ export interface OpenAiFailureDiagnostic {
   status?: number;
   responsePreview?: string;
   modelName?: string;
+  validationIssues?: AgentOpenAiValidationIssue[];
+  validationIssueCount?: number;
 }
 
 export interface GenerateAgentSynthesisResult {
@@ -274,8 +279,123 @@ function parseSynthesisResponse(content: string, modelName: string): OpenAiAgent
   return validated.data;
 }
 
+function toValidationIssues(issues: ZodIssue[]): AgentOpenAiValidationIssue[] {
+  return issues
+    .slice(0, 20)
+    .map((issue) => ({
+      path: issue.path.length > 0 ? issue.path.join(".") : "$",
+      code: issue.code,
+      message: issue.message.slice(0, 300),
+    }));
+}
+
+function coerceBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") {
+      return true;
+    }
+
+    if (normalized === "false") {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizePlannerToolCall(value: unknown): unknown {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const call = value as Record<string, unknown>;
+  const rawPurpose = call.purpose;
+  const normalizedPurpose = typeof rawPurpose === "string" && rawPurpose.trim().length > 0
+    ? rawPurpose
+    : "Use tool for requested analysis";
+
+  return {
+    ...call,
+    toolName: call.toolName ?? call.name,
+    input: call.input ?? call.arguments ?? call.args ?? call.parameters ?? {},
+    purpose: normalizedPurpose,
+  };
+}
+
+function normalizeClarifyingQuestion(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function normalizePlannerOutputAliases(value: unknown): unknown {
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const output = value as Record<string, unknown>;
+  const normalizedToolCalls = Array.isArray(output.toolCalls)
+    ? output.toolCalls.map((toolCall) => normalizePlannerToolCall(toolCall))
+    : [];
+  const normalizedIntent = typeof output.intent === "string" && output.intent.trim().length > 0
+    ? output.intent.trim()
+    : "GENERAL";
+  const normalizedNeedsTools = coerceBoolean(output.needsTools) ?? (normalizedToolCalls.length > 0);
+  const normalizedMissingContext = Array.isArray(output.missingContext) ? output.missingContext : [];
+  const normalizedRequiresConfirmation = coerceBoolean(output.requiresConfirmation) ?? false;
+  const normalizedClarifyingQuestion = normalizeClarifyingQuestion(output.clarifyingQuestion);
+
+  return {
+    ...output,
+    intent: normalizedIntent,
+    needsTools: normalizedNeedsTools,
+    toolCalls: normalizedToolCalls,
+    missingContext: normalizedMissingContext,
+    requiresConfirmation: normalizedRequiresConfirmation,
+    clarifyingQuestion: normalizedClarifyingQuestion,
+  };
+}
+
 function parseToolPlanResponse(content: string, modelName: string): OpenAiToolPlanOutput {
-  return parseStructuredResponse(content, modelName, openAiToolPlanOutputSchema);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJsonCandidate(content));
+  } catch {
+    throw new OpenAiAgentClientError(
+      {
+        stage: "PARSE_FAILED",
+        responsePreview: previewText(content),
+        modelName,
+      },
+      "OpenAI returned invalid JSON.",
+    );
+  }
+
+  const normalized = normalizePlannerOutputAliases(parsed);
+  const validated = openAiToolPlanOutputSchema.safeParse(normalized);
+  if (!validated.success) {
+    const validationIssues = toValidationIssues(validated.error.issues);
+    throw new OpenAiAgentClientError(
+      {
+        stage: "VALIDATION_FAILED",
+        responsePreview: previewText(content),
+        modelName,
+        validationIssues,
+        validationIssueCount: validated.error.issues.length,
+      },
+      "OpenAI JSON did not match output schema.",
+    );
+  }
+
+  return validated.data;
 }
 
 function normalizeConfidence(value: unknown): OpenAiAgentSynthesisOutput["confidence"] {
