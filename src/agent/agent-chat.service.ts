@@ -315,6 +315,158 @@ function hasLowTickerCoverageSignals(result: AgentToolResult): boolean {
   return missingData.length > 0 || staleDataWarnings.length > 0;
 }
 
+function normalizeCoverageFieldName(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes("price")) {
+    return "price";
+  }
+  if (normalized.includes("technical")) {
+    return "technical";
+  }
+  if (normalized.includes("fundamental")) {
+    return "fundamental";
+  }
+  if (normalized.includes("analyst")) {
+    return "analyst";
+  }
+  if (normalized.includes("news") || normalized.includes("headline")) {
+    return "news";
+  }
+  if (normalized.includes("earnings")) {
+    return "earnings";
+  }
+  if (normalized.includes("report")) {
+    return "report";
+  }
+
+  return null;
+}
+
+function collectWatchlistCoverageWarnings(toolResults: AgentToolResult[]): string[] {
+  const scoreWatchlistResult = toolResults.find((result) => result.success && result.toolName === "scoreWatchlist");
+  if (!scoreWatchlistResult) {
+    return [];
+  }
+
+  const warnings: string[] = [
+    "Scores are relative across current watchlist items and are not absolute buy/sell signals.",
+    "Based on persisted backend snapshots, not live brokerage quotes.",
+  ];
+
+  let hasAnyPriceSnapshot = false;
+  let hasAnyFundamentalSnapshot = false;
+  const missingOrStaleFields = new Set<string>();
+
+  for (const result of toolResults) {
+    if (!result.success || !result.data || typeof result.data !== "object") {
+      continue;
+    }
+
+    const payload = result.data as Record<string, unknown>;
+
+    if (result.toolName === "getWatchlistResearchBundle") {
+      const items = Array.isArray(payload.items)
+        ? payload.items.filter((item): item is Record<string, unknown> =>
+          typeof item === "object" && item !== null)
+        : [];
+
+      for (const item of items) {
+        if (typeof item.latestPriceSnapshot === "object" && item.latestPriceSnapshot !== null) {
+          hasAnyPriceSnapshot = true;
+        }
+
+        if (typeof item.latestFundamentalSnapshot === "object" && item.latestFundamentalSnapshot !== null) {
+          hasAnyFundamentalSnapshot = true;
+        }
+
+        const missingResearchData = Array.isArray(item.missingResearchData)
+          ? item.missingResearchData
+          : [];
+        for (const missingField of missingResearchData) {
+          if (typeof missingField !== "string") {
+            continue;
+          }
+
+          const normalizedField = normalizeCoverageFieldName(missingField);
+          if (normalizedField) {
+            missingOrStaleFields.add(normalizedField);
+          }
+        }
+      }
+    }
+
+    if (result.toolName === "getWatchlistDataQuality") {
+      const perTickerQuality = Array.isArray(payload.perTickerQuality)
+        ? payload.perTickerQuality.filter((item): item is Record<string, unknown> =>
+          typeof item === "object" && item !== null)
+        : [];
+
+      for (const item of perTickerQuality) {
+        if (item.hasPrice === true) {
+          hasAnyPriceSnapshot = true;
+        }
+
+        if (item.hasFundamental === true) {
+          hasAnyFundamentalSnapshot = true;
+        }
+
+        const missingData = Array.isArray(item.missingData) ? item.missingData : [];
+        for (const missingField of missingData) {
+          if (typeof missingField !== "string") {
+            continue;
+          }
+
+          const normalizedField = normalizeCoverageFieldName(missingField);
+          if (normalizedField) {
+            missingOrStaleFields.add(normalizedField);
+          }
+        }
+
+        const staleDataWarnings = Array.isArray(item.staleDataWarnings) ? item.staleDataWarnings : [];
+        for (const staleWarning of staleDataWarnings) {
+          if (typeof staleWarning !== "string") {
+            continue;
+          }
+
+          const normalizedField = normalizeCoverageFieldName(staleWarning);
+          if (normalizedField) {
+            missingOrStaleFields.add(normalizedField);
+          }
+        }
+      }
+    }
+  }
+
+  if (missingOrStaleFields.size > 0) {
+    warnings.push(
+      `Data may be delayed or incomplete; missing/stale fields detected: ${[...missingOrStaleFields].sort().join(", ")}. Verify against your brokerage before acting.`,
+    );
+    return warnings;
+  }
+
+  if (!hasAnyPriceSnapshot && !hasAnyFundamentalSnapshot) {
+    warnings.push(
+      "Watchlist data currently lacks persisted price and fundamental snapshots for ranked items; verify against your brokerage before acting.",
+    );
+  } else if (!hasAnyPriceSnapshot) {
+    warnings.push(
+      "Watchlist data currently lacks persisted price snapshots for ranked items; verify against your brokerage before acting.",
+    );
+  } else if (!hasAnyFundamentalSnapshot) {
+    warnings.push(
+      "Watchlist data currently lacks persisted fundamental snapshots for ranked items; verify against your brokerage before acting.",
+    );
+  } else {
+    warnings.push("Data may be delayed or incomplete; verify against your brokerage before acting.");
+  }
+
+  return warnings;
+}
+
 function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): AgentSuggestedAction[] {
   const suggestedActions: AgentSuggestedAction[] = [];
 
@@ -374,6 +526,10 @@ function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): 
   }
 
   return suggestedActions;
+}
+
+function deriveWarningsFromToolResults(toolResults: AgentToolResult[]): string[] {
+  return collectWatchlistCoverageWarnings(toolResults);
 }
 
 function reconcilePlannerMissingContext(input: {
@@ -1550,6 +1706,9 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
 
   const dataDerivedSuggestedActions = deriveSuggestedActionsFromToolResults(toolResults);
   suggestedActions = mergeRequiredActions(dataDerivedSuggestedActions, suggestedActions);
+
+  const dataDerivedWarnings = deriveWarningsFromToolResults(toolResults);
+  warnings = dedupe([...warnings, ...dataDerivedWarnings]);
 
   let answer = deterministicAnswer({
     intent: planningIntent,

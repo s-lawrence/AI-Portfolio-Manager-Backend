@@ -1089,6 +1089,176 @@ describe("agent-chat.service planner flow", () => {
     }));
   });
 
+  it("watchlist synthesis warnings use snapshot wording and avoid false absent-price/fundamental claims", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "WATCHLIST_SCORE",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "scoreWatchlist",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Rank watchlist entries",
+          },
+          {
+            toolName: "getWatchlistResearchBundle",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Load persisted watchlist snapshots",
+          },
+          {
+            toolName: "getWatchlistDataQuality",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Assess watchlist data quality",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Watchlist ranked."));
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "scoreWatchlist") {
+        return mockToolResult("scoreWatchlist", {
+          watchlistId: "watchlist-1",
+          totalItems: 3,
+          activeItemsCount: 3,
+          scoredItemsCount: 3,
+          skippedItemsCount: 0,
+          rankedItems: [{ ticker: "NVDA", compositeScore: 82.1 }],
+        }) as never;
+      }
+
+      if (request.toolName === "getWatchlistResearchBundle") {
+        return mockToolResult("getWatchlistResearchBundle", {
+          watchlist: { id: "watchlist-1" },
+          itemCount: 3,
+          items: [
+            {
+              ticker: "NVDA",
+              latestPriceSnapshot: { price: 100 },
+              latestFundamentalSnapshot: { peRatio: 30 },
+              missingResearchData: [],
+            },
+          ],
+        }) as never;
+      }
+
+      if (request.toolName === "getWatchlistDataQuality") {
+        return mockToolResult("getWatchlistDataQuality", {
+          watchlistId: "watchlist-1",
+          perTickerQuality: [
+            {
+              ticker: "NVDA",
+              hasPrice: true,
+              hasFundamental: true,
+              missingData: [],
+              staleDataWarnings: [],
+            },
+          ],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, {}) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Are any of the items in my watchlist a good time to buy?",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    const warningsText = result.warnings.join(" ").toLowerCase();
+    expect(warningsText).toContain("persisted backend snapshots");
+    expect(warningsText).toContain("not live brokerage quotes");
+    expect(warningsText).not.toContain("no live market prices or fresh fundamentals were provided");
+    expect(warningsText).not.toContain("lacks persisted price and fundamental snapshots");
+  });
+
+  it("watchlist synthesis warnings mention specific missing/stale fields when reported", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "WATCHLIST_SCORE",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "scoreWatchlist",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Rank watchlist entries",
+          },
+          {
+            toolName: "getWatchlistDataQuality",
+            input: { watchlistId: "watchlist-1" },
+            purpose: "Assess watchlist data quality",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Watchlist ranked."));
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "scoreWatchlist") {
+        return mockToolResult("scoreWatchlist", {
+          watchlistId: "watchlist-1",
+          totalItems: 2,
+          activeItemsCount: 2,
+          scoredItemsCount: 1,
+          skippedItemsCount: 1,
+          rankedItems: [{ ticker: "NVDA", compositeScore: 75.5 }],
+        }) as never;
+      }
+
+      if (request.toolName === "getWatchlistDataQuality") {
+        return mockToolResult("getWatchlistDataQuality", {
+          watchlistId: "watchlist-1",
+          perTickerQuality: [
+            {
+              ticker: "NVDA",
+              hasPrice: true,
+              hasFundamental: false,
+              missingData: ["fundamental", "news"],
+              staleDataWarnings: ["Price snapshot appears stale (5 days old)."],
+            },
+          ],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, {}) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Are any of the items in my watchlist a good time to buy?",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    const warningsText = result.warnings.join(" ").toLowerCase();
+    expect(warningsText).toContain("missing/stale fields detected");
+    expect(warningsText).toContain("price");
+    expect(warningsText).toContain("fundamental");
+    expect(warningsText).toContain("news");
+  });
+
   it("watchlist refresh prompt suggests confirmation action for refreshWatchlistResearchData", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = false;
     env.OPENAI_API_KEY = undefined;
