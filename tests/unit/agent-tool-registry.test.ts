@@ -8,6 +8,7 @@ import {
 } from "../../src/agent/agent-tool-registry";
 import {
   AGENT_TOOL_EXECUTION_MODE,
+  AGENT_TOOL_NAMES,
   AGENT_TOOL_RISK_LEVEL,
   AgentToolExecutionError,
 } from "../../src/agent/agent-tool.types";
@@ -38,31 +39,23 @@ describe("agent tool registry and executor", () => {
     const registry = createAgentToolRegistry();
 
     const names = registry.listToolDescriptors().map((tool) => tool.name);
-    expect(names).toEqual(
-      expect.arrayContaining([
-        "getPortfolioOverview",
-        "getTickerResearchBundle",
-        "getWatchlistResearchBundle",
-        "getDiscoveryCandidates",
-        "getGeopoliticalSummary",
-        "getLatestAnalystContext",
-        "scoreTickerResearch",
-        "scoreWatchlist",
-        "compareTickers",
-        "getPortfolioRiskSnapshot",
-        "runPortfolioFullRefresh",
-        "refreshTickerAnalystData",
-        "refreshUsdCadFxRate",
-        "refreshWatchlistAnalystData",
-        "refreshWatchlistResearchData",
-        "refreshDiscoveryCategory",
-        "refreshGdeltRiskContext",
-        "addTickerToWatchlist",
-        "updateWatchlistItem",
-        "removeWatchlistItem",
-        "rebalancePaperPortfolio",
-      ]),
-    );
+    expect([...names].sort()).toEqual([...AGENT_TOOL_NAMES].sort());
+  });
+
+  it("every registered tool has required metadata and input schema", () => {
+    const registry = createAgentToolRegistry();
+    const tools = registry.listTools();
+
+    expect(tools.length).toBe(AGENT_TOOL_NAMES.length);
+
+    for (const tool of tools) {
+      expect(tool.name).toBeTruthy();
+      expect(tool.description.trim().length).toBeGreaterThan(0);
+      expect(tool.riskLevel).toBeTruthy();
+      expect(tool.executionMode).toBeTruthy();
+      expect(tool.inputSchema).toBeTruthy();
+      expect(typeof tool.inputSchema.safeParse).toBe("function");
+    }
   });
 
   it("rejects duplicate tool registration", () => {
@@ -152,6 +145,11 @@ describe("agent tool registry and executor", () => {
 
     expect(portfolioOverviewSpy).toHaveBeenCalledWith("portfolio-1");
     expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      portfolioId: "portfolio-1",
+      holdingsCount: 0,
+      missingFxOrCurrencyIssuesCount: 0,
+    });
   });
 
   it("getTickerResearchBundle tool calls existing stocks service", async () => {
@@ -168,6 +166,98 @@ describe("agent tool registry and executor", () => {
 
     expect(bundleSpy).toHaveBeenCalledWith("AAPL");
     expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      ticker: "AAPL",
+    });
+  });
+
+  it("getTickerDataQuality tool calls research scoring service", async () => {
+    const qualitySpy = vi
+      .spyOn(researchScoringService, "getTickerDataQuality")
+      .mockResolvedValue({
+        ticker: "AAPL",
+        hasPrice: true,
+        hasTechnical: true,
+        hasFundamental: true,
+        hasAnalyst: false,
+        hasNews: false,
+        hasEarnings: true,
+        hasReport: false,
+        missingData: ["analyst", "news", "report"],
+        staleDataWarnings: [],
+        suggestedRefreshActions: ["refreshTickerAnalystData"],
+      });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "getTickerDataQuality",
+      input: { ticker: "aapl" },
+      context: { source: "USER" },
+    });
+
+    expect(qualitySpy).toHaveBeenCalledWith("AAPL");
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      ticker: "AAPL",
+      missingDataCount: 3,
+    });
+  });
+
+  it("getWatchlistDataQuality tool calls research scoring service", async () => {
+    const qualitySpy = vi
+      .spyOn(researchScoringService, "getWatchlistDataQuality")
+      .mockResolvedValue({
+        watchlistId: "watchlist-1",
+        itemCount: 2,
+        completeItemsCount: 1,
+        partialItemsCount: 1,
+        emptyItemsCount: 0,
+        perTickerQuality: [],
+        suggestedRefreshActions: ["refreshWatchlistResearchData"],
+      });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "getWatchlistDataQuality",
+      input: { watchlistId: "watchlist-1" },
+      context: { source: "USER" },
+    });
+
+    expect(qualitySpy).toHaveBeenCalledWith("watchlist-1");
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      watchlistId: "watchlist-1",
+      itemCount: 2,
+    });
+  });
+
+  it("getPortfolioDataQuality tool calls research scoring service", async () => {
+    const qualitySpy = vi
+      .spyOn(researchScoringService, "getPortfolioDataQuality")
+      .mockResolvedValue({
+        portfolioId: "portfolio-1",
+        holdingCount: 3,
+        missingFxIssues: [{ ticker: "SHOP", currency: "USD" }],
+        missingCurrencyIssues: [],
+        missingPriceIssues: [{ ticker: "SHOP" }],
+        staleDataWarnings: ["Stale price snapshots detected: SHOP."],
+        suggestedRefreshActions: ["refreshUsdCadFxRate", "runPortfolioFullRefresh"],
+      });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "getPortfolioDataQuality",
+      input: { portfolioId: "portfolio-1" },
+      context: { source: "USER" },
+    });
+
+    expect(qualitySpy).toHaveBeenCalledWith("portfolio-1");
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      portfolioId: "portfolio-1",
+      missingFxIssuesCount: 1,
+      missingPriceIssuesCount: 1,
+    });
   });
 
   it("getWatchlistResearchBundle tool calls existing watchlist service", async () => {
@@ -184,6 +274,12 @@ describe("agent tool registry and executor", () => {
 
     expect(bundleSpy).toHaveBeenCalledWith("watchlist-1");
     expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      watchlistId: "watchlist-1",
+      itemCount: 0,
+      tickersWithUsefulResearch: [],
+      tickersMissingData: [],
+    });
   });
 
   it("getDiscoveryCandidates input schema rejects invalid filters", async () => {
@@ -294,6 +390,104 @@ describe("agent tool registry and executor", () => {
 
     expect(geopoliticalSpy).toHaveBeenCalledWith({ days: 14 });
     expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      totalEvents: 0,
+      topHeadlines: [],
+      topRisks: [],
+    });
+  });
+
+  it("dry-run refresh returns planned dataSummary without executing writes", async () => {
+    const refreshSpy = vi.spyOn(watchlistsService, "refreshWatchlistResearchData").mockResolvedValue({
+      watchlistId: "watchlist-1",
+      startedAt: new Date("2026-06-01T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-01T00:00:01.000Z").toISOString(),
+      durationMs: 1000,
+      tickersProcessed: 4,
+      tickersFailed: 0,
+      tickersSkipped: 1,
+      plannedTickers: ["NVDA", "AAPL", "MSFT", "TSLA", "AMD", "SHOP"],
+      perTickerResults: [],
+      warnings: [],
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "refreshWatchlistResearchData",
+      input: {
+        watchlistId: "watchlist-1",
+      },
+      context: { source: "USER", dryRun: true },
+      confirmed: true,
+    });
+
+    expect(refreshSpy).toHaveBeenCalledWith("watchlist-1", expect.objectContaining({ dryRun: true }));
+    expect(result.dataSummary).toMatchObject({
+      plannedOrExecuted: "planned",
+      toolName: "refreshWatchlistResearchData",
+      plannedAction: true,
+      watchlistId: "watchlist-1",
+      plannedTickersCount: 6,
+    });
+    expect((result.dataSummary?.plannedTickers as string[]).length).toBeLessThanOrEqual(5);
+  });
+
+  it("tool dataSummary remains bounded for large payloads", async () => {
+    const items = Array.from({ length: 200 }).map((_, index) => ({
+      ticker: `TK${index}`,
+    }));
+
+    vi.spyOn(discoveryService, "listDiscoveryCandidates").mockResolvedValue({
+      category: "GAINERS",
+      items,
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "getDiscoveryCandidates",
+      input: { category: "GAINERS" },
+      context: { source: "USER" },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      category: "GAINERS",
+      candidateCount: 200,
+    });
+    expect((result.dataSummary?.topTickers as string[]).length).toBeLessThanOrEqual(5);
+  });
+
+  it("tool errors are structured and secret-safe", async () => {
+    const registry = new AgentToolRegistry();
+
+    registry.registerTool({
+      name: "secretThrowTool",
+      description: "throws redaction test error",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({}),
+      notes: [],
+      execute: async () => {
+        throw new Error("upstream failed with api_key=sk-secret-12345\n    at FakeStack:10:2");
+      },
+    });
+
+    const executor = new AgentToolExecutor(registry);
+    const result = await executor.executeByName({
+      toolName: "secretThrowTool",
+      input: {},
+      context: { source: "SYSTEM" },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).not.toContain("sk-secret-12345");
+    expect(result.errors[0]).not.toContain("at FakeStack");
+    expect(result.errors[0]).toContain("api_key=[REDACTED]");
+    expect(result.dataSummary).toMatchObject({
+      toolName: "secretThrowTool",
+      failed: true,
+    });
   });
 
   it("refresh tools require confirmation", async () => {

@@ -9,6 +9,9 @@ export const AGENT_TOOL_NAMES = [
   "getLatestAnalystContext",
   "scoreTickerResearch",
   "scoreWatchlist",
+  "getTickerDataQuality",
+  "getWatchlistDataQuality",
+  "getPortfolioDataQuality",
   "compareTickers",
   "getPortfolioRiskSnapshot",
   "runPortfolioFullRefresh",
@@ -68,6 +71,7 @@ export interface AgentToolResult<TData = unknown> {
   toolName: string;
   success: boolean;
   data?: TData;
+  dataSummary?: Record<string, unknown>;
   warnings: string[];
   errors: string[];
   metadata: AgentToolMetadata;

@@ -7,6 +7,8 @@ import {
 
 import * as watchlistsService from "../../src/services/watchlists.service";
 import * as watchlistsRepository from "../../src/repositories/watchlists.repository";
+import * as watchlistItemsRepository from "../../src/repositories/watchlist-items.repository";
+import * as stocksRepository from "../../src/repositories/stocks.repository";
 import * as stocksService from "../../src/services/stocks.service";
 import * as realDataIngestionService from "../../src/services/real-data-ingestion.service";
 import * as analystIngestionService from "../../src/services/analyst-ingestion.service";
@@ -22,7 +24,14 @@ import * as technicalRepository from "../../src/repositories/technical-snapshots
 import * as geopoliticalService from "../../src/services/geopolitical-ingestion.service";
 
 function buildWatchlistWithItems(
-  items: Array<{ itemId: string; ticker: string; status: WatchlistItemStatus }>,
+  items: Array<{
+    itemId: string;
+    ticker: string;
+    status: WatchlistItemStatus;
+    source?: WatchlistItemSource;
+    tags?: string[];
+    thesis?: string | null;
+  }>,
 ): unknown {
   const now = new Date("2026-06-01T00:00:00.000Z");
 
@@ -40,13 +49,13 @@ function buildWatchlistWithItems(
       stockId: `stock-${item.ticker}`,
       status: item.status,
       priority: WatchlistItemPriority.MEDIUM,
-      source: WatchlistItemSource.USER,
-      thesis: null,
+      source: item.source ?? WatchlistItemSource.USER,
+      thesis: item.thesis ?? null,
       riskNotes: null,
       targetEntryPrice: null,
       targetExitPrice: null,
       targetAllocation: null,
-      tags: [],
+      tags: item.tags ?? [],
       addedReason: null,
       rejectionReason: null,
       convertedHoldingId: null,
@@ -246,6 +255,97 @@ describe("watchlists.service research bundle freshness", () => {
         "analystContext",
         "topHeadlines",
         "nextEarningsEvent",
+      ]),
+    );
+  });
+});
+
+describe("watchlists.service add/cleanup safeguards", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("addTickerToWatchlist rejects command-word ticker when unknown", async () => {
+    vi.spyOn(watchlistsRepository, "getWatchlistById").mockResolvedValue({
+      id: "watchlist-1",
+    } as never);
+    vi.spyOn(stocksRepository, "getStockByTicker").mockResolvedValue(null);
+
+    await expect(
+      watchlistsService.addTickerToWatchlist("watchlist-1", "ADD", {
+        status: WatchlistItemStatus.WATCHING,
+      }),
+    ).rejects.toThrow(/command word/i);
+  });
+
+  it("addTickerToWatchlist allows command-word ticker when already known", async () => {
+    vi.spyOn(watchlistsRepository, "getWatchlistById").mockResolvedValue({
+      id: "watchlist-1",
+    } as never);
+    vi.spyOn(stocksRepository, "getStockByTicker").mockResolvedValue({
+      id: "stock-add",
+      ticker: "ADD",
+    } as never);
+    vi.spyOn(stocksService, "ensureStockExists").mockResolvedValue({ id: "stock-add" } as never);
+    vi.spyOn(watchlistItemsRepository, "getWatchlistItemByWatchlistAndStock").mockResolvedValue(null);
+    vi.spyOn(watchlistItemsRepository, "createWatchlistItem").mockResolvedValue({
+      id: "item-1",
+      watchlistId: "watchlist-1",
+      stockId: "stock-add",
+      status: WatchlistItemStatus.WATCHING,
+      priority: WatchlistItemPriority.MEDIUM,
+      source: WatchlistItemSource.USER,
+      tags: [],
+    } as never);
+
+    const result = await watchlistsService.addTickerToWatchlist("watchlist-1", "ADD", {
+      status: WatchlistItemStatus.WATCHING,
+    });
+
+    expect(result.id).toBe("item-1");
+  });
+
+  it("cleanupWatchlistArtifacts removes only explicit demo/smoke artifacts", async () => {
+    vi.spyOn(watchlistsRepository, "getWatchlistWithItems").mockResolvedValue(
+      buildWatchlistWithItems([
+        { itemId: "item-add", ticker: "ADD", status: WatchlistItemStatus.WATCHING },
+        {
+          itemId: "item-smoke-tag",
+          ticker: "INTC",
+          status: WatchlistItemStatus.WATCHING,
+          tags: ["smoke-test"],
+        },
+        {
+          itemId: "item-smoke-thesis",
+          ticker: "WLTH",
+          status: WatchlistItemStatus.WATCHING,
+          source: WatchlistItemSource.AGENT,
+          thesis: "Smoke write verification for artifact cleanup",
+        },
+        { itemId: "item-nvda", ticker: "NVDA", status: WatchlistItemStatus.WATCHING },
+        { itemId: "item-aapl", ticker: "AAPL", status: WatchlistItemStatus.WATCHING },
+        { itemId: "item-msft", ticker: "MSFT", status: WatchlistItemStatus.WATCHING },
+      ]) as never,
+    );
+
+    const deleteSpy = vi
+      .spyOn(watchlistItemsRepository, "deleteWatchlistItem")
+      .mockResolvedValue({ id: "removed" } as never);
+
+    const result = await watchlistsService.cleanupWatchlistArtifacts("watchlist-1");
+
+    expect(deleteSpy).toHaveBeenCalledTimes(3);
+    expect(result.removedCount).toBe(3);
+    expect(result.keptCount).toBe(3);
+    expect(result.removedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ itemId: "item-add", ticker: "ADD", reason: "COMMAND_WORD_TICKER_ADD" }),
+        expect.objectContaining({ itemId: "item-smoke-tag", ticker: "INTC", reason: "SMOKE_TEST_TAG" }),
+        expect.objectContaining({
+          itemId: "item-smoke-thesis",
+          ticker: "WLTH",
+          reason: "SMOKE_WRITE_VERIFICATION_THESIS",
+        }),
       ]),
     );
   });

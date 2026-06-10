@@ -4,7 +4,7 @@ import { buildApp } from "../../src/app";
 import { fmpAnalystProvider } from "../../src/providers/fmp";
 import { gdeltProvider } from "../../src/providers/gdelt";
 import { recordPriceSnapshot } from "../../src/services/market-data.service";
-import { getUserByEmail, updateUser } from "../../src/repositories/users.repository";
+import { createUser, getUserByEmail, updateUser } from "../../src/repositories/users.repository";
 import { createTestStock } from "../../src/test/factories";
 import { testPrisma } from "../../src/test/test-db";
 
@@ -174,6 +174,94 @@ describe("API dev demo-context route", () => {
       method: "POST",
       url: "/api/dev/purge-demo-analytical-data",
       payload: {},
+    });
+
+    expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("cleanup-watchlist-artifacts removes smoke/demo artifacts and keeps legitimate items", async () => {
+    process.env.NODE_ENV = "test";
+
+    const token = Date.now().toString().slice(-6);
+    const app = buildApp();
+    const user = await createUser({
+      email: `test+auto-dev-cleanup-${token}@example.com`,
+      name: `[TEST] Dev Cleanup ${token}`,
+    });
+
+    const createWatchlistResponse = await app.inject({
+      method: "POST",
+      url: "/api/watchlists",
+      payload: {
+        userId: user.id,
+        name: `[TEST] Cleanup Watchlist ${token}`,
+      },
+    });
+
+    expect(createWatchlistResponse.statusCode).toBe(201);
+    const watchlistId = createWatchlistResponse.json().data.id as string;
+
+    const addItem = async (payload: Record<string, unknown>) => {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/watchlists/${watchlistId}/items`,
+        payload,
+      });
+      expect(response.statusCode).toBe(201);
+    };
+
+    await addItem({ ticker: "ADD" });
+    await addItem({ ticker: "INTC", tags: ["smoke-test"] });
+    await addItem({
+      ticker: "WLTH",
+      source: "AGENT",
+      thesis: "Smoke write verification artifact",
+    });
+    await addItem({ ticker: "NVDA" });
+    await addItem({ ticker: "AAPL" });
+    await addItem({ ticker: "MSFT" });
+
+    const cleanupResponse = await app.inject({
+      method: "POST",
+      url: `/api/dev/cleanup-watchlist-artifacts/${watchlistId}`,
+    });
+
+    expect(cleanupResponse.statusCode).toBe(200);
+    const cleanupBody = cleanupResponse.json();
+    expect(cleanupBody.success).toBe(true);
+    expect(cleanupBody.data.removedCount).toBe(3);
+    expect(cleanupBody.data.removedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ ticker: "ADD", reason: "COMMAND_WORD_TICKER_ADD" }),
+        expect.objectContaining({ ticker: "INTC", reason: "SMOKE_TEST_TAG" }),
+        expect.objectContaining({ ticker: "WLTH", reason: "SMOKE_WRITE_VERIFICATION_THESIS" }),
+      ]),
+    );
+
+    const watchlistResponse = await app.inject({
+      method: "GET",
+      url: `/api/watchlists/${watchlistId}`,
+    });
+
+    expect(watchlistResponse.statusCode).toBe(200);
+    const watchlistBody = watchlistResponse.json();
+    const remainingTickers = (watchlistBody.data.items as Array<{ stock: { ticker: string } }>)
+      .map((item) => item.stock.ticker)
+      .sort();
+
+    expect(remainingTickers).toEqual(["AAPL", "MSFT", "NVDA"]);
+
+    await app.close();
+  });
+
+  it("cleanup-watchlist-artifacts endpoint is unavailable in production", async () => {
+    process.env.NODE_ENV = "production";
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/dev/cleanup-watchlist-artifacts/cmaaaaaaa0000000000000000",
     });
 
     expect(response.statusCode).toBe(404);

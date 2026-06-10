@@ -29,6 +29,7 @@ import {
 import {
   collectMentionedTickers,
   isFxAmbiguousTickerToken,
+  isCommandWordTickerToken,
   isFxSemanticContextMessage,
   resolveTickerFromMessage,
 } from "./agent-entity-resolution";
@@ -259,8 +260,109 @@ function hasMissingFxSignals(result: AgentToolResult): boolean {
   return payload.holdingsMissingFx.length > 0;
 }
 
+function hasLowWatchlistCoverageSignals(result: AgentToolResult): boolean {
+  if (!result.success || !result.data || typeof result.data !== "object") {
+    return false;
+  }
+
+  const payload = result.data as Record<string, unknown>;
+
+  if (result.toolName === "scoreWatchlist") {
+    const activeItemsCount = typeof payload.activeItemsCount === "number"
+      ? payload.activeItemsCount
+      : null;
+    const scoredItemsCount = typeof payload.scoredItemsCount === "number"
+      ? payload.scoredItemsCount
+      : null;
+    const skippedItemsCount = typeof payload.skippedItemsCount === "number"
+      ? payload.skippedItemsCount
+      : null;
+
+    if (activeItemsCount != null && scoredItemsCount != null && activeItemsCount > scoredItemsCount) {
+      return true;
+    }
+
+    return (skippedItemsCount ?? 0) > 0;
+  }
+
+  if (result.toolName !== "getWatchlistDataQuality") {
+    return false;
+  }
+
+  const partialItemsCount = typeof payload.partialItemsCount === "number"
+    ? payload.partialItemsCount
+    : 0;
+  const emptyItemsCount = typeof payload.emptyItemsCount === "number"
+    ? payload.emptyItemsCount
+    : 0;
+
+  return partialItemsCount > 0 || emptyItemsCount > 0;
+}
+
+function hasLowTickerCoverageSignals(result: AgentToolResult): boolean {
+  if (!result.success || !result.data || typeof result.data !== "object") {
+    return false;
+  }
+
+  if (result.toolName !== "getTickerDataQuality") {
+    return false;
+  }
+
+  const payload = result.data as Record<string, unknown>;
+  const missingData = Array.isArray(payload.missingData) ? payload.missingData : [];
+  const staleDataWarnings = Array.isArray(payload.staleDataWarnings) ? payload.staleDataWarnings : [];
+
+  return missingData.length > 0 || staleDataWarnings.length > 0;
+}
+
 function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): AgentSuggestedAction[] {
   const suggestedActions: AgentSuggestedAction[] = [];
+
+  const watchlistRefreshTarget = toolResults
+    .filter((result) => hasLowWatchlistCoverageSignals(result))
+    .map((result) => {
+      if (!result.data || typeof result.data !== "object") {
+        return null;
+      }
+
+      const payload = result.data as Record<string, unknown>;
+      return typeof payload.watchlistId === "string" && payload.watchlistId.trim().length > 0
+        ? payload.watchlistId
+        : null;
+    })
+    .find((value): value is string => value != null);
+
+  if (watchlistRefreshTarget) {
+    suggestedActions.push({
+      label: "Refresh watchlist research data",
+      toolName: "refreshWatchlistResearchData",
+      input: { watchlistId: watchlistRefreshTarget },
+      requiresConfirmation: true,
+    });
+  }
+
+  const tickerRefreshTarget = toolResults
+    .filter((result) => hasLowTickerCoverageSignals(result))
+    .map((result) => {
+      if (!result.data || typeof result.data !== "object") {
+        return null;
+      }
+
+      const payload = result.data as Record<string, unknown>;
+      return typeof payload.ticker === "string" && payload.ticker.trim().length > 0
+        ? payload.ticker
+        : null;
+    })
+    .find((value): value is string => value != null);
+
+  if (tickerRefreshTarget) {
+    suggestedActions.push({
+      label: `Refresh analyst data for ${tickerRefreshTarget}`,
+      toolName: "refreshTickerAnalystData",
+      input: { ticker: tickerRefreshTarget },
+      requiresConfirmation: true,
+    });
+  }
 
   if (toolResults.some((result) => hasMissingFxSignals(result))) {
     suggestedActions.push({
@@ -1235,13 +1337,16 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
   const resolvedTickerForContext = tickerResolution.confidence === "HIGH"
     ? tickerResolution.ticker
     : undefined;
+  const shouldDropExplicitCommandWordTicker =
+    tickerResolution.confidence !== "HIGH" &&
+    isCommandWordTickerToken(request.context.ticker);
 
   const effectiveRequest: AgentChatRequest = {
     ...request,
     message,
     context: {
       ...request.context,
-      ticker: resolvedTickerForContext ?? request.context.ticker,
+      ticker: resolvedTickerForContext ?? (shouldDropExplicitCommandWordTicker ? undefined : request.context.ticker),
     },
   };
 

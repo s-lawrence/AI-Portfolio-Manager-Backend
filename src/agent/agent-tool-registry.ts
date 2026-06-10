@@ -328,6 +328,81 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       },
     },
     {
+      name: "getTickerDataQuality",
+      description:
+        "Returns data-coverage and staleness quality diagnostics for a ticker and suggested refresh actions.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        ticker: tickerSchema,
+      }),
+      notes: [
+        "Read-only diagnostics from persisted ticker research snapshots.",
+        "Includes missing-data flags, stale-data warnings, and refresh suggestions.",
+      ],
+      execute: async (input: { ticker: string }) => {
+        try {
+          return await researchScoringService.getTickerDataQuality(input.ticker);
+        } catch (error) {
+          if (error instanceof Error && /not found/i.test(error.message)) {
+            throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
+          }
+
+          throw error;
+        }
+      },
+    },
+    {
+      name: "getWatchlistDataQuality",
+      description:
+        "Returns coverage/quality diagnostics across watchlist items, including complete/partial/empty counts and suggested refresh actions.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        watchlistId: z.string().trim().min(1),
+      }),
+      notes: [
+        "Read-only diagnostics from persisted watchlist research bundles.",
+        "Helps identify stale or incomplete watchlist entries before ranking.",
+      ],
+      execute: async (input: { watchlistId: string }) => {
+        try {
+          return await researchScoringService.getWatchlistDataQuality(input.watchlistId);
+        } catch (error) {
+          if (error instanceof Error && /not found/i.test(error.message)) {
+            throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
+          }
+
+          throw error;
+        }
+      },
+    },
+    {
+      name: "getPortfolioDataQuality",
+      description:
+        "Returns portfolio data-quality diagnostics for FX/currency/price coverage and suggests refresh actions.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        portfolioId: z.string().trim().min(1),
+      }),
+      notes: [
+        "Read-only diagnostics from local holdings, pricing, and FX context.",
+        "Complements getPortfolioRiskSnapshot with explicit data-quality signals.",
+      ],
+      execute: async (input: { portfolioId: string }) => {
+        try {
+          return await researchScoringService.getPortfolioDataQuality(input.portfolioId);
+        } catch (error) {
+          if (error instanceof Error && /not found/i.test(error.message)) {
+            throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
+          }
+
+          throw error;
+        }
+      },
+    },
+    {
       name: "compareTickers",
       description:
         "Returns side-by-side deterministic scorecards and key differences for multiple tickers.",

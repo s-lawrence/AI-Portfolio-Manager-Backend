@@ -34,6 +34,13 @@ const TICKER_STOP_WORDS = new Set([
   "AT",
   "TODAY",
   "ADD",
+  "REMOVE",
+  "DELETE",
+  "BUY",
+  "SELL",
+  "HOLD",
+  "WATCH",
+  "RANK",
   "TO",
   "CONFIRM",
   "CHECK",
@@ -147,6 +154,15 @@ function normalizeTicker(value: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function isCommandWordTickerToken(value: string | undefined): boolean {
+  const normalized = normalizeTicker(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return TICKER_STOP_WORDS.has(normalized.replace(/[.-]/g, ""));
 }
 
 function toCandidate(stock: StockLookupRecord): AgentTickerResolutionCandidate {
@@ -526,6 +542,29 @@ export async function resolveTickerFromMessage(
 ): Promise<AgentTickerResolutionResult> {
   const explicit = normalizeTicker(explicitTicker);
   const hasFxSemanticContext = isFxSemanticContextMessage(message);
+  const searchStocks = options.searchStocksFn ?? searchStocksRepository;
+
+  if (explicit && isCommandWordTickerToken(explicit)) {
+    let knownInStockDb = false;
+
+    if (options.searchStockRecords !== false) {
+      try {
+        const matches = await searchStocks(explicit);
+        knownInStockDb = matches.some((match) => normalizeTicker(match.ticker) === explicit);
+      } catch {
+        knownInStockDb = false;
+      }
+    }
+
+    if (!knownInStockDb) {
+      return {
+        confidence: "LOW",
+        source: "AMBIGUOUS",
+        originalText: explicitTicker ?? explicit,
+        candidates: [{ ticker: explicit }],
+      };
+    }
+  }
 
   if (explicit && !(hasFxSemanticContext && isFxAmbiguousTickerToken(explicit))) {
     return {

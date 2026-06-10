@@ -5,6 +5,7 @@ import { notFound, runService } from "../errors";
 import { ok } from "../response";
 import { booleanQuerySchema } from "../schemas/common.schemas";
 import {
+  cleanupWatchlistArtifacts,
   getFmpAnalystAudit,
   getMarketDataAudit,
   purgeDemoAnalyticalData,
@@ -69,6 +70,10 @@ const purgePortfolioParamsSchema = z.object({
 
 const purgeTickerParamsSchema = z.object({
   ticker: z.string().trim().min(1),
+});
+
+const cleanupWatchlistArtifactsParamsSchema = z.object({
+  watchlistId: z.string().cuid(),
 });
 
 export async function devRoutes(app: FastifyInstance): Promise<void> {
@@ -219,6 +224,14 @@ export async function devRoutes(app: FastifyInstance): Promise<void> {
         allowLegacyDemoPurge: body.allowLegacyDemoPurge ?? false,
       }),
     );
+
+    return reply.send(ok(result));
+  });
+
+  app.post("/cleanup-watchlist-artifacts/:watchlistId", async (request, reply) => {
+    const params = cleanupWatchlistArtifactsParamsSchema.parse(request.params ?? {});
+
+    const result = await runService(() => cleanupWatchlistArtifacts(params.watchlistId));
 
     return reply.send(ok(result));
   });

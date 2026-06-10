@@ -90,4 +90,37 @@ describe("agent entity resolution", () => {
     expect(tickers).toContain("NVDA");
     expect(tickers).not.toContain("ADD");
   });
+
+  it("resolves NVDA from confirmation phrasing instead of ADD", async () => {
+    const result = await resolveTickerFromMessage("Confirm add NVDA to my watchlist", undefined, {
+      searchStockRecords: false,
+    });
+
+    expect(result.ticker).toBe("NVDA");
+    expect(result.source).toBe("TICKER_PATTERN");
+    expect(result.confidence).toBe("HIGH");
+  });
+
+  it("blocks command-word ticker tokens from mention extraction", () => {
+    const tickers = collectMentionedTickers(
+      "ADD REMOVE DELETE CONFIRM REFRESH BUY SELL HOLD WATCH RANK COMPARE",
+      undefined,
+      {
+        searchStockRecords: false,
+      },
+    );
+
+    expect(tickers).toEqual([]);
+  });
+
+  it("treats explicit ADD as ambiguous when no stock database confirmation is available", async () => {
+    const result = await resolveTickerFromMessage("please use ADD", "ADD", {
+      searchStockRecords: false,
+    });
+
+    expect(result.source).toBe("AMBIGUOUS");
+    expect(result.confidence).toBe("LOW");
+    expect(result.ticker).toBeUndefined();
+    expect(result.candidates?.[0]?.ticker).toBe("ADD");
+  });
 });

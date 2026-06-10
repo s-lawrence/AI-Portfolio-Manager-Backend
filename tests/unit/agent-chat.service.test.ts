@@ -983,6 +983,83 @@ describe("agent-chat.service planner flow", () => {
     expect(result.toolCalls[0]?.summary).toContain("NVDA");
   });
 
+  it("suggests watchlist refresh when scoreWatchlist indicates coverage gaps", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("scoreWatchlist", {
+        watchlistId: "watchlist-1",
+        totalItems: 4,
+        activeItemsCount: 4,
+        scoredItemsCount: 1,
+        skippedItemsCount: 3,
+        rankedItems: [{ ticker: "NVDA", compositeScore: 75.2 }],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Are any of the items in my watchlist a good time to buy?",
+      context: {
+        source: "USER",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    expect(result.suggestedActions.some((action) =>
+      action.toolName === "refreshWatchlistResearchData" && action.requiresConfirmation,
+    )).toBe(true);
+  });
+
+  it("suggests ticker analyst refresh when ticker data quality is weak", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "TICKER_DEEP_DIVE",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getTickerDataQuality",
+            input: { ticker: "NVDA" },
+            purpose: "Check ticker data quality",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(
+      mockSynthesis("Ticker quality reviewed."),
+    );
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("getTickerDataQuality", {
+        ticker: "NVDA",
+        missingData: ["analyst", "news"],
+        staleDataWarnings: [],
+        suggestedRefreshActions: ["refreshTickerAnalystData"],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "How complete is NVDA data?",
+      context: {
+        source: "USER",
+        ticker: "NVDA",
+      },
+    });
+
+    expect(result.suggestedActions.some((action) =>
+      action.toolName === "refreshTickerAnalystData" && action.requiresConfirmation,
+    )).toBe(true);
+  });
+
   it("deterministic watchlist intent handles buy-timing phrasing", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = false;
     env.OPENAI_API_KEY = undefined;

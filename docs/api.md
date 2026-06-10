@@ -132,6 +132,25 @@ curl -X POST http://localhost:4000/api/dev/purge-demo-analytical-data \
 - `POST /api/agent/tools/:toolName/execute`
 - `POST /api/agent/chat`
 
+Current data-quality and scoring tools include:
+
+- `scoreWatchlist` (returns `totalItems`, `activeItemsCount`, `scoredItemsCount`, `skippedItemsCount`, `skippedItems`, `rankedItems`)
+- `getTickerDataQuality`
+- `getWatchlistDataQuality`
+- `getPortfolioDataQuality`
+
+Refresh tools that require confirmation include:
+
+- `refreshWatchlistResearchData`
+- `refreshTickerAnalystData`
+- `refreshUsdCadFxRate`
+
+Agent suggested-action behavior includes:
+
+- Suggest `refreshWatchlistResearchData` when watchlist score/data-quality coverage is weak.
+- Suggest `refreshTickerAnalystData` when ticker data-quality indicates analyst/data gaps.
+- Prefer `refreshUsdCadFxRate` when portfolio outputs show missing FX coverage.
+
 `POST /api/agent/chat` behavior:
 
 - Uses OpenAI planner first (when enabled) to interpret natural language and propose tool calls.

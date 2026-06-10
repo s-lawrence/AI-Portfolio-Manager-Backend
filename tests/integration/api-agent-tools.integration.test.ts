@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../../src/app";
+import { AGENT_TOOL_NAMES } from "../../src/agent/agent-tool.types";
 import * as discoveryService from "../../src/services/market-discovery.service";
 import * as portfoliosService from "../../src/services/portfolios.service";
 import * as researchScoringService from "../../src/services/research-scoring.service";
@@ -23,7 +24,8 @@ describe("API agent tools routes", () => {
     const body = response.json();
     expect(body.success).toBe(true);
     expect(Array.isArray(body.data.tools)).toBe(true);
-    expect(body.data.tools.some((tool: { name: string }) => tool.name === "getTickerResearchBundle")).toBe(true);
+    const listedNames = body.data.tools.map((tool: { name: string }) => tool.name);
+    expect([...listedNames].sort()).toEqual([...AGENT_TOOL_NAMES].sort());
 
     await app.close();
   });
@@ -104,6 +106,9 @@ describe("API agent tools routes", () => {
     expect(body.success).toBe(true);
     expect(body.data.toolName).toBe("getTickerResearchBundle");
     expect(body.data.success).toBe(true);
+    expect(body.data.dataSummary).toMatchObject({
+      ticker: "AAPL",
+    });
     expect(bundleSpy).toHaveBeenCalledWith("AAPL");
 
     await app.close();

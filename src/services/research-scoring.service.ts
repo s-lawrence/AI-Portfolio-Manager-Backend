@@ -2,6 +2,7 @@ import { HoldingStatus, Sentiment, WatchlistItemStatus } from "@prisma/client";
 
 import {
   type CompareTickersResult,
+  type PortfolioDataQualityResult,
   type PortfolioFxIssue,
   type PortfolioConcentrationRisk,
   type PortfolioRiskExposure,
@@ -10,9 +11,12 @@ import {
   type PortfolioOverviewHoldingSummary,
   type SuggestedResearchStance,
   type TickerResearchComponentScores,
+  type TickerDataQualityResult,
   type TickerResearchScoreResult,
+  type WatchlistDataQualityResult,
   type WatchlistResearchScoreResult,
   type WatchlistResearchItemSummary,
+  type WatchlistTickerDataQualityResult,
   type WatchlistSkippedItem,
   type WatchlistScoredItem,
 } from "../types/services";
@@ -1042,6 +1046,183 @@ function toUnsupportedCurrencyList(values: PortfolioFxIssue[]): string {
     .join(", ");
 }
 
+function latestNewsPublishedAt(
+  headlines: Array<{ publishedAt?: Date | string | null }> | undefined,
+): Date | null {
+  if (!Array.isArray(headlines) || headlines.length === 0) {
+    return null;
+  }
+
+  const candidates = headlines
+    .map((headline) => toDate(headline.publishedAt ?? null))
+    .filter((value): value is Date => value != null)
+    .sort((left, right) => right.getTime() - left.getTime());
+
+  return candidates[0] ?? null;
+}
+
+function staleWarningForAge(
+  label: string,
+  ageDays: number | null,
+  thresholdDays: number,
+): string | null {
+  if (ageDays == null || ageDays <= thresholdDays) {
+    return null;
+  }
+
+  return `${label} appears stale (${ageDays} days old).`;
+}
+
+function deriveSuggestedRefreshActionsFromFlags(input: {
+  hasPrice: boolean;
+  hasTechnical: boolean;
+  hasFundamental: boolean;
+  hasAnalyst: boolean;
+  hasNews: boolean;
+  hasEarnings: boolean;
+  hasReport: boolean;
+  staleDataWarnings: string[];
+}): string[] {
+  const actions: string[] = [];
+  const hasCoverageGap =
+    !input.hasPrice ||
+    !input.hasTechnical ||
+    !input.hasFundamental ||
+    !input.hasNews ||
+    !input.hasEarnings ||
+    !input.hasReport;
+
+  if (hasCoverageGap || input.staleDataWarnings.length > 0) {
+    actions.push("refreshWatchlistResearchData");
+  }
+
+  if (!input.hasAnalyst || input.staleDataWarnings.some((warning) => warning.toLowerCase().includes("analyst"))) {
+    actions.push("refreshTickerAnalystData");
+  }
+
+  return dedupe(actions);
+}
+
+function evaluateWatchlistItemDataQuality(
+  item: WatchlistResearchItemSummary,
+  now: Date,
+): WatchlistTickerDataQualityResult {
+  const hasPrice = item.latestPriceSnapshot != null;
+  const hasTechnical = item.latestTechnicalSnapshot != null;
+  const hasFundamental = item.latestFundamentalSnapshot != null;
+  const hasAnalyst =
+    item.latestAnalystSnapshot != null ||
+    (Array.isArray(item.recentAnalystActions) && item.recentAnalystActions.length > 0);
+  const hasNews = Array.isArray(item.topHeadlines) && item.topHeadlines.length > 0;
+  const hasEarnings = item.nextEarningsEvent != null;
+  const hasReport = item.latestAIReport != null;
+
+  const missingData: string[] = [];
+  if (!hasPrice) {
+    missingData.push("price");
+  }
+  if (!hasTechnical) {
+    missingData.push("technical");
+  }
+  if (!hasFundamental) {
+    missingData.push("fundamental");
+  }
+  if (!hasAnalyst) {
+    missingData.push("analyst");
+  }
+  if (!hasNews) {
+    missingData.push("news");
+  }
+  if (!hasEarnings) {
+    missingData.push("earnings");
+  }
+  if (!hasReport) {
+    missingData.push("report");
+  }
+
+  const staleDataWarnings: string[] = [];
+
+  const priceWarning = staleWarningForAge(
+    "Price snapshot",
+    ageInDays(item.latestPriceSnapshot?.capturedAt ?? null, now),
+    3,
+  );
+  if (priceWarning) {
+    staleDataWarnings.push(priceWarning);
+  }
+
+  const technicalWarning = staleWarningForAge(
+    "Technical snapshot",
+    ageInDays(item.latestTechnicalSnapshot?.capturedAt ?? null, now),
+    10,
+  );
+  if (technicalWarning) {
+    staleDataWarnings.push(technicalWarning);
+  }
+
+  const fundamentalWarning = staleWarningForAge(
+    "Fundamental snapshot",
+    ageInDays(item.latestFundamentalSnapshot?.capturedAt ?? null, now),
+    120,
+  );
+  if (fundamentalWarning) {
+    staleDataWarnings.push(fundamentalWarning);
+  }
+
+  const analystWarning = staleWarningForAge(
+    "Analyst snapshot",
+    ageInDays(item.latestAnalystSnapshot?.capturedAt ?? null, now),
+    45,
+  );
+  if (analystWarning) {
+    staleDataWarnings.push(analystWarning);
+  }
+
+  const newsWarning = staleWarningForAge(
+    "Recent news",
+    ageInDays(latestNewsPublishedAt(item.topHeadlines), now),
+    7,
+  );
+  if (newsWarning) {
+    staleDataWarnings.push(newsWarning);
+  }
+
+  const reportWarning = staleWarningForAge(
+    "Latest report",
+    ageInDays(item.latestReportDate ?? null, now),
+    14,
+  );
+  if (reportWarning) {
+    staleDataWarnings.push(reportWarning);
+  }
+
+  return {
+    itemId: item.itemId,
+    ticker: item.ticker,
+    status: item.status,
+    priority: item.priority,
+    hasPrice,
+    hasTechnical,
+    hasFundamental,
+    hasAnalyst,
+    hasNews,
+    hasEarnings,
+    hasReport,
+    missingData,
+    staleDataWarnings,
+    suggestedRefreshActions: deriveSuggestedRefreshActionsFromFlags({
+      hasPrice,
+      hasTechnical,
+      hasFundamental,
+      hasAnalyst,
+      hasNews,
+      hasEarnings,
+      hasReport,
+      staleDataWarnings,
+    }),
+  };
+}
+
 function selectRiskScopedHoldings(
   holdings: PortfolioOverviewHoldingSummary[],
 ): PortfolioOverviewHoldingSummary[] {
@@ -1288,5 +1469,189 @@ export async function getPortfolioRiskSnapshot(
     missingData,
     topRisks,
     summary: summaryParts.join(" "),
+  };
+}
+
+export async function getTickerDataQuality(
+  ticker: string,
+): Promise<TickerDataQualityResult> {
+  const normalizedTicker = normalizeTicker(ticker);
+  const bundle = await getStockResearchBundle(normalizedTicker);
+  if (!bundle) {
+    throw new Error("Ticker research bundle not found.");
+  }
+
+  const now = new Date();
+  const hasPrice = bundle.latestPriceSnapshot != null;
+  const hasTechnical = bundle.latestTechnicalSnapshot != null;
+  const hasFundamental = bundle.latestFundamentalSnapshot != null;
+  const hasAnalyst =
+    bundle.latestAnalystSnapshot != null ||
+    (Array.isArray(bundle.recentAnalystActions) && bundle.recentAnalystActions.length > 0);
+  const hasNews = Array.isArray(bundle.recentNews) && bundle.recentNews.length > 0;
+  const hasEarnings = bundle.nextEarningsEvent != null;
+  const hasReport = bundle.latestAIReport != null;
+
+  const missingData: string[] = [];
+  if (!hasPrice) {
+    missingData.push("price");
+  }
+  if (!hasTechnical) {
+    missingData.push("technical");
+  }
+  if (!hasFundamental) {
+    missingData.push("fundamental");
+  }
+  if (!hasAnalyst) {
+    missingData.push("analyst");
+  }
+  if (!hasNews) {
+    missingData.push("news");
+  }
+  if (!hasEarnings) {
+    missingData.push("earnings");
+  }
+  if (!hasReport) {
+    missingData.push("report");
+  }
+
+  const staleDataWarnings = dedupe(
+    [
+      staleWarningForAge("Price snapshot", ageInDays(bundle.latestPriceSnapshot?.capturedAt ?? null, now), 3),
+      staleWarningForAge("Technical snapshot", ageInDays(bundle.latestTechnicalSnapshot?.capturedAt ?? null, now), 10),
+      staleWarningForAge("Fundamental snapshot", ageInDays(bundle.latestFundamentalSnapshot?.capturedAt ?? null, now), 120),
+      staleWarningForAge("Analyst snapshot", ageInDays(bundle.latestAnalystSnapshot?.capturedAt ?? null, now), 45),
+      staleWarningForAge("Recent news", ageInDays(latestNewsPublishedAt(bundle.recentNews), now), 7),
+      staleWarningForAge("Latest report", ageInDays(bundle.latestAIReport?.reportDate ?? null, now), 14),
+    ].filter((warning): warning is string => warning != null),
+  );
+
+  return {
+    ticker: normalizedTicker,
+    hasPrice,
+    hasTechnical,
+    hasFundamental,
+    hasAnalyst,
+    hasNews,
+    hasEarnings,
+    hasReport,
+    missingData,
+    staleDataWarnings,
+    suggestedRefreshActions: deriveSuggestedRefreshActionsFromFlags({
+      hasPrice,
+      hasTechnical,
+      hasFundamental,
+      hasAnalyst,
+      hasNews,
+      hasEarnings,
+      hasReport,
+      staleDataWarnings,
+    }),
+  };
+}
+
+export async function getWatchlistDataQuality(
+  watchlistId: string,
+): Promise<WatchlistDataQualityResult> {
+  const normalizedWatchlistId = assertNonBlank(watchlistId, "watchlistId");
+  const watchlistBundle = await getWatchlistResearchBundle(normalizedWatchlistId);
+  if (!watchlistBundle) {
+    throw new Error("Watchlist research bundle not found.");
+  }
+
+  const now = new Date();
+  const perTickerQuality = watchlistBundle.items.map((item) =>
+    evaluateWatchlistItemDataQuality(item, now),
+  );
+
+  let completeItemsCount = 0;
+  let partialItemsCount = 0;
+  let emptyItemsCount = 0;
+
+  for (const item of perTickerQuality) {
+    const coverageCount = [
+      item.hasPrice,
+      item.hasTechnical,
+      item.hasFundamental,
+      item.hasAnalyst,
+      item.hasNews,
+      item.hasEarnings,
+      item.hasReport,
+    ].filter(Boolean).length;
+
+    if (coverageCount === 7) {
+      completeItemsCount += 1;
+    } else if (coverageCount === 0) {
+      emptyItemsCount += 1;
+    } else {
+      partialItemsCount += 1;
+    }
+  }
+
+  const suggestedRefreshActions = dedupe([
+    ...(partialItemsCount > 0 || emptyItemsCount > 0 ? ["refreshWatchlistResearchData"] : []),
+    ...(perTickerQuality.some((item) => !item.hasAnalyst) ? ["refreshWatchlistAnalystData"] : []),
+  ]);
+
+  return {
+    watchlistId: watchlistBundle.watchlist.id,
+    itemCount: watchlistBundle.itemCount,
+    completeItemsCount,
+    partialItemsCount,
+    emptyItemsCount,
+    perTickerQuality,
+    suggestedRefreshActions,
+  };
+}
+
+export async function getPortfolioDataQuality(
+  portfolioId: string,
+): Promise<PortfolioDataQualityResult> {
+  const normalizedPortfolioId = assertNonBlank(portfolioId, "portfolioId");
+  const [overview, riskSnapshot] = await Promise.all([
+    getPortfolioOverview(normalizedPortfolioId),
+    getPortfolioRiskSnapshot(normalizedPortfolioId),
+  ]);
+
+  if (!overview) {
+    throw new Error("Portfolio not found.");
+  }
+
+  const scopedHoldings = selectRiskScopedHoldings(overview.holdings);
+  const missingPriceIssues = scopedHoldings
+    .filter((holding) => holding.latestPrice == null)
+    .map((holding) => ({ ticker: holding.ticker }));
+
+  const staleDataWarnings: string[] = [];
+
+  const stalePriceTickers = scopedHoldings
+    .filter((holding) => {
+      const age = ageInDays(holding.latestPriceCapturedAt ?? null, new Date());
+      return age != null && age > 3;
+    })
+    .map((holding) => holding.ticker);
+
+  if (stalePriceTickers.length > 0) {
+    staleDataWarnings.push(`Stale price snapshots detected: ${stalePriceTickers.join(", ")}.`);
+  }
+
+  const fxAge = ageInDays(riskSnapshot.fxRateUsed?.capturedAt ?? null, new Date());
+  if (fxAge != null && fxAge > 3) {
+    staleDataWarnings.push(`USD/CAD FX snapshot appears stale (${fxAge} days old).`);
+  }
+
+  const suggestedRefreshActions = dedupe([
+    ...(riskSnapshot.holdingsMissingFx.length > 0 ? ["refreshUsdCadFxRate"] : []),
+    ...(missingPriceIssues.length > 0 || stalePriceTickers.length > 0 ? ["runPortfolioFullRefresh"] : []),
+  ]);
+
+  return {
+    portfolioId: overview.portfolio.id,
+    holdingCount: scopedHoldings.length,
+    missingFxIssues: riskSnapshot.holdingsMissingFx,
+    missingCurrencyIssues: riskSnapshot.holdingsMissingCurrency,
+    missingPriceIssues,
+    staleDataWarnings,
+    suggestedRefreshActions,
   };
 }

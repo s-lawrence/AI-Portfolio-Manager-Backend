@@ -16,6 +16,7 @@ import {
   getWatchlistsByUserId,
   updateWatchlist as updateWatchlistRepository,
 } from "../repositories/watchlists.repository";
+import { getStockByTicker } from "../repositories/stocks.repository";
 import {
   createWatchlistItem,
   deleteWatchlistItem,
@@ -88,6 +89,25 @@ const DEFAULT_REFRESH_ACTIVE_STATUSES: WatchlistItemStatus[] = [
   WatchlistItemStatus.RESEARCHING,
   WatchlistItemStatus.CANDIDATE,
 ];
+
+const COMMAND_WORD_TICKER_BLOCKLIST = new Set([
+  "ADD",
+  "REMOVE",
+  "DELETE",
+  "CONFIRM",
+  "REFRESH",
+  "BUY",
+  "SELL",
+  "HOLD",
+  "WATCH",
+  "RANK",
+  "COMPARE",
+]);
+
+function isBlockedCommandWordTicker(ticker: string): boolean {
+  const normalized = ticker.trim().toUpperCase().replace(/[.-]/g, "");
+  return COMMAND_WORD_TICKER_BLOCKLIST.has(normalized);
+}
 
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
@@ -470,6 +490,15 @@ export async function addTickerToWatchlist(
   const normalizedWatchlistId = assertNonBlank(watchlistId, "watchlistId");
   const normalizedTicker = normalizeTickerOrThrow(ticker);
 
+  if (isBlockedCommandWordTicker(normalizedTicker)) {
+    const existingStock = await getStockByTicker(normalizedTicker);
+    if (!existingStock) {
+      throw new Error(
+        `Ticker '${normalizedTicker}' appears to be a command word and cannot be verified as a known stock. Please confirm the intended ticker.`,
+      );
+    }
+  }
+
   const watchlist = await getWatchlistById(normalizedWatchlistId);
   if (!watchlist) {
     throw new Error("Watchlist not found.");
@@ -542,6 +571,64 @@ export async function removeWatchlistItem(itemId: string): Promise<WatchlistItem
   }
 
   return deleteWatchlistItem(normalizedItemId);
+}
+
+export type CleanupWatchlistArtifactsResult = {
+  watchlistId: string;
+  removedCount: number;
+  removedItems: Array<{
+    itemId: string;
+    ticker: string;
+    reason: "COMMAND_WORD_TICKER_ADD" | "SMOKE_TEST_TAG" | "SMOKE_WRITE_VERIFICATION_THESIS";
+  }>;
+  keptCount: number;
+};
+
+export async function cleanupWatchlistArtifacts(
+  watchlistId: string,
+): Promise<CleanupWatchlistArtifactsResult> {
+  const normalizedWatchlistId = assertNonBlank(watchlistId, "watchlistId");
+  const watchlist = await getWatchlistWithItems(normalizedWatchlistId);
+
+  if (!watchlist) {
+    throw new Error("Watchlist not found.");
+  }
+
+  const removals: CleanupWatchlistArtifactsResult["removedItems"] = [];
+
+  for (const item of watchlist.items) {
+    const ticker = item.stock.ticker.trim().toUpperCase();
+    const tags = Array.isArray(item.tags) ? item.tags : [];
+    const thesis = (item.thesis ?? "").toLowerCase();
+
+    let reason: CleanupWatchlistArtifactsResult["removedItems"][number]["reason"] | null = null;
+
+    if (ticker === "ADD") {
+      reason = "COMMAND_WORD_TICKER_ADD";
+    } else if (tags.some((tag) => tag.toLowerCase().includes("smoke-test"))) {
+      reason = "SMOKE_TEST_TAG";
+    } else if (item.source === WatchlistItemSource.AGENT && thesis.includes("smoke write verification")) {
+      reason = "SMOKE_WRITE_VERIFICATION_THESIS";
+    }
+
+    if (!reason) {
+      continue;
+    }
+
+    await deleteWatchlistItem(item.id);
+    removals.push({
+      itemId: item.id,
+      ticker,
+      reason,
+    });
+  }
+
+  return {
+    watchlistId: normalizedWatchlistId,
+    removedCount: removals.length,
+    removedItems: removals,
+    keptCount: Math.max(0, watchlist.items.length - removals.length),
+  };
 }
 
 function sentimentCountsFromNews(news: { sentiment: Sentiment | null }[]): {

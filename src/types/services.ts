@@ -419,6 +419,46 @@ export interface PortfolioRiskSnapshotResult {
   summary: string;
 }
 
+export interface TickerDataQualityResult {
+  ticker: string;
+  hasPrice: boolean;
+  hasTechnical: boolean;
+  hasFundamental: boolean;
+  hasAnalyst: boolean;
+  hasNews: boolean;
+  hasEarnings: boolean;
+  hasReport: boolean;
+  missingData: string[];
+  staleDataWarnings: string[];
+  suggestedRefreshActions: string[];
+}
+
+export interface WatchlistTickerDataQualityResult extends TickerDataQualityResult {
+  itemId: string | null;
+  status?: WatchlistItemStatus;
+  priority?: WatchlistItemPriority;
+}
+
+export interface WatchlistDataQualityResult {
+  watchlistId: string;
+  itemCount: number;
+  completeItemsCount: number;
+  partialItemsCount: number;
+  emptyItemsCount: number;
+  perTickerQuality: WatchlistTickerDataQualityResult[];
+  suggestedRefreshActions: string[];
+}
+
+export interface PortfolioDataQualityResult {
+  portfolioId: string;
+  holdingCount: number;
+  missingFxIssues: PortfolioFxIssue[];
+  missingCurrencyIssues: Array<{ ticker: string }>;
+  missingPriceIssues: Array<{ ticker: string }>;
+  staleDataWarnings: string[];
+  suggestedRefreshActions: string[];
+}
+
 export interface GeopoliticalSummaryResult {
   from: string;
   to: string;

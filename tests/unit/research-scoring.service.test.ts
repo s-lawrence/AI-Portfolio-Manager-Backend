@@ -402,6 +402,81 @@ describe("research-scoring.service", () => {
     expect(result.rankedItems[0]?.score.componentScores.dataQualityScore).toBeLessThan(100);
   });
 
+  it("getTickerDataQuality reports missing coverage and suggested refresh actions", async () => {
+    vi.spyOn(stocksService, "getStockResearchBundle").mockResolvedValue(
+      buildBundle({
+        stock: { ticker: "NVDA" },
+        latestTechnicalSnapshot: null,
+        latestFundamentalSnapshot: null,
+        latestAnalystSnapshot: null,
+        recentAnalystActions: [],
+        recentNews: [],
+      }) as never,
+    );
+
+    const result = await researchScoringService.getTickerDataQuality("nvda");
+
+    expect(result.ticker).toBe("NVDA");
+    expect(result.missingData).toEqual(
+      expect.arrayContaining(["technical", "fundamental", "analyst", "news", "report"]),
+    );
+    expect(result.suggestedRefreshActions).toContain("refreshWatchlistResearchData");
+    expect(result.suggestedRefreshActions).toContain("refreshTickerAnalystData");
+  });
+
+  it("getWatchlistDataQuality reports complete/partial/empty counts", async () => {
+    vi.spyOn(watchlistsService, "getWatchlistResearchBundle").mockResolvedValue({
+      watchlist: { id: "watchlist-1", name: "Main" },
+      itemCount: 3,
+      items: [
+        buildWatchlistItem({
+          itemId: "item-1",
+          ticker: "AAA",
+          latestTechnicalSnapshot: { capturedAt: new Date() },
+          latestFundamentalSnapshot: { capturedAt: new Date() },
+          latestAnalystSnapshot: { capturedAt: new Date() },
+          recentAnalystActions: [{ actionType: "UPGRADE", eventDate: new Date() }],
+          topHeadlines: [{ publishedAt: new Date(), sentiment: "NEUTRAL" }],
+          nextEarningsEvent: { earningsDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+          latestAIReport: { id: "report-1" },
+          latestReportDate: new Date(),
+        }),
+        buildWatchlistItem({
+          itemId: "item-2",
+          ticker: "BBB",
+          latestTechnicalSnapshot: null,
+          latestFundamentalSnapshot: null,
+          latestAnalystSnapshot: null,
+          recentAnalystActions: [],
+          topHeadlines: [],
+          nextEarningsEvent: null,
+          latestAIReport: null,
+          latestReportDate: null,
+        }),
+        buildWatchlistItem({
+          itemId: "item-3",
+          ticker: "CCC",
+          latestPriceSnapshot: null,
+          latestTechnicalSnapshot: null,
+          latestFundamentalSnapshot: null,
+          latestAnalystSnapshot: null,
+          recentAnalystActions: [],
+          topHeadlines: [],
+          nextEarningsEvent: null,
+          latestAIReport: null,
+          latestReportDate: null,
+        }),
+      ],
+    } as never);
+
+    const result = await researchScoringService.getWatchlistDataQuality("watchlist-1");
+
+    expect(result.completeItemsCount).toBe(1);
+    expect(result.partialItemsCount).toBe(1);
+    expect(result.emptyItemsCount).toBe(1);
+    expect(result.suggestedRefreshActions).toContain("refreshWatchlistResearchData");
+  });
+
   it("compareTickers returns all requested tickers", async () => {
     vi.spyOn(stocksService, "getStockResearchBundle").mockImplementation(async (ticker: string) =>
       buildBundle({ stock: { ticker } }) as never,
@@ -614,5 +689,46 @@ describe("research-scoring.service", () => {
     const result = await researchScoringService.getPortfolioRiskSnapshot("portfolio-1");
 
     expect(result.fxRateUsed).toEqual(expectedFxRateUsed);
+  });
+
+  it("getPortfolioDataQuality reports missing fx/currency/price issues with refresh suggestions", async () => {
+    vi.spyOn(portfoliosService, "getPortfolioOverview").mockResolvedValue({
+      portfolio: { id: "portfolio-1" },
+      holdings: [
+        {
+          ticker: "AAPL",
+          marketValueCad: null,
+          latestPrice: 100,
+          latestPriceCapturedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "TECH",
+          status: HoldingStatus.OWNED,
+        },
+        {
+          ticker: "SHOP",
+          marketValueCad: null,
+          latestPrice: null,
+          latestPriceCapturedAt: null,
+          currency: null,
+          nativeCurrency: null,
+          sector: "TECH",
+          status: HoldingStatus.OWNED,
+        },
+      ],
+      holdingCount: 2,
+      fxRateUsed: null,
+      holdingsMissingFx: [],
+      holdingsUnsupportedCurrency: [],
+    } as never);
+
+    const result = await researchScoringService.getPortfolioDataQuality("portfolio-1");
+
+    expect(result.holdingCount).toBe(2);
+    expect(result.missingFxIssues.some((entry) => entry.ticker === "AAPL")).toBe(true);
+    expect(result.missingCurrencyIssues.some((entry) => entry.ticker === "SHOP")).toBe(true);
+    expect(result.missingPriceIssues.some((entry) => entry.ticker === "SHOP")).toBe(true);
+    expect(result.suggestedRefreshActions).toContain("refreshUsdCadFxRate");
+    expect(result.suggestedRefreshActions).toContain("runPortfolioFullRefresh");
   });
 });
