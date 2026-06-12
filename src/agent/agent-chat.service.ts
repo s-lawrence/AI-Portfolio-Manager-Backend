@@ -11,6 +11,7 @@ import { env } from "../config/env";
 import { agentToolExecutor, agentToolRegistry } from "./index";
 import {
   type AgentChatRequest,
+  type AgentRecommendationCard,
   type AgentChatResponse,
   type AgentConfidence,
   type AgentOpenAiDiagnostics,
@@ -26,6 +27,11 @@ import {
   generateToolPlan,
   normalizePlannerOutputAliases,
 } from "./openai-agent-client";
+import {
+  checkOpenAiUsageAllowance,
+  hasOpenAiUsageLimitsConfigured,
+  recordOpenAiUsage,
+} from "./openai-usage-limits";
 import {
   collectMentionedTickers,
   isFxAmbiguousTickerToken,
@@ -74,10 +80,40 @@ type PlanValidationResult = {
   clarifyingQuestion: string | null;
   plannedToolCount: number;
   droppedToolCount: number;
+  blockedToolCount: number;
+  blockedTools: Array<{
+    toolName: string;
+    reason: string;
+  }>;
   warnings: string[];
   suggestedActions: AgentSuggestedAction[];
   executableCalls: PlannedToolExecution[];
 };
+
+type ToolExecutionErrorDiagnostic = {
+  toolName: string;
+  code: string;
+  message: string;
+};
+
+type ExecutedToolResult = AgentToolResult & {
+  errorCode?: string;
+};
+
+const PORTFOLIO_SCOPED_TOOL_NAMES: AgentToolName[] = [
+  "getPortfolioOverview",
+  "getPortfolioRiskSnapshot",
+  "getPortfolioDataQuality",
+  "rankPortfolioHoldings",
+  "runPortfolioFullRefresh",
+];
+
+const SAFE_WARNING_PORTFOLIO_CONTEXT_MISSING = "Portfolio context was missing.";
+const SAFE_WARNING_PORTFOLIO_ACCESS_DENIED = "Portfolio access was denied.";
+const SAFE_WARNING_PORTFOLIO_NO_DATA = "Portfolio tools returned no data.";
+const SAFE_WARNING_TOOL_FAILED = "Tool execution failed.";
+const SAFE_WARNING_MODEL_FALLBACK_USED =
+  "Primary OpenAI model was unavailable; fallback model was used.";
 
 type DeterministicPlan = {
   intent: string;
@@ -93,6 +129,611 @@ function calculateDurationMs(startedAtDate: Date, finishedAtDate: Date): number 
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function asStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function asRecordList(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value
+      .map((item) => asRecord(item))
+      .filter((item): item is Record<string, unknown> => item != null)
+    : [];
+}
+
+function isPortfolioScopedTool(toolName: AgentToolName): boolean {
+  return PORTFOLIO_SCOPED_TOOL_NAMES.includes(toolName);
+}
+
+function asOptionalConfiguredString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function formatCadCurrency(value: number): string {
+  return new Intl.NumberFormat("en-CA", {
+    style: "currency",
+    currency: "CAD",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatPercent(value: number): string {
+  return `${value.toFixed(1)}%`;
+}
+
+function safeWarningForBlockedReason(reason: string): string {
+  const normalized = reason.toLowerCase();
+
+  if (normalized.includes("context was missing")) {
+    return SAFE_WARNING_PORTFOLIO_CONTEXT_MISSING;
+  }
+
+  if (normalized.includes("access was denied") || normalized.includes("ownership")) {
+    return SAFE_WARNING_PORTFOLIO_ACCESS_DENIED;
+  }
+
+  return SAFE_WARNING_TOOL_FAILED;
+}
+
+function safeWarningForExecutionError(error: ToolExecutionErrorDiagnostic): string {
+  if (error.code === "FORBIDDEN" || error.code === "AGENT_TOOL_PORTFOLIO_CONTEXT_MISMATCH") {
+    return SAFE_WARNING_PORTFOLIO_ACCESS_DENIED;
+  }
+
+  if (error.code === "NOT_FOUND" && isPortfolioScopedTool(error.toolName as AgentToolName)) {
+    return SAFE_WARNING_PORTFOLIO_NO_DATA;
+  }
+
+  return SAFE_WARNING_TOOL_FAILED;
+}
+
+type PortfolioRecommendationPresentation = {
+  answer: string;
+  recommendationCards: AgentRecommendationCard[];
+};
+
+function toActionLabelFromStance(input: {
+  stance: string;
+  missingDataCount: number;
+  staleWarningCount: number;
+  dataQualityScore: number | null;
+}): string {
+  const normalizedStance = input.stance.trim().toUpperCase();
+
+  if (
+    input.missingDataCount >= 2 ||
+    input.staleWarningCount >= 2 ||
+    (input.dataQualityScore != null && input.dataQualityScore < 45)
+  ) {
+    return "Data cleanup needed";
+  }
+
+  if (normalizedStance === "STRONG_CANDIDATE" || normalizedStance === "CANDIDATE") {
+    return "Review / Candidate";
+  }
+
+  if (normalizedStance === "WATCH") {
+    return "Hold / Monitor";
+  }
+
+  if (
+    normalizedStance === "HOLD_OFF" ||
+    normalizedStance === "AVOID" ||
+    normalizedStance === "REDUCE"
+  ) {
+    return "Trim / Risk review";
+  }
+
+  return "Hold / Monitor";
+}
+
+function toConfidenceFromDataQuality(input: {
+  dataQualityScore: number | null;
+  missingDataCount: number;
+  staleWarningCount: number;
+}): AgentConfidence | undefined {
+  if (input.dataQualityScore == null) {
+    return undefined;
+  }
+
+  if (
+    input.dataQualityScore >= 75 &&
+    input.missingDataCount <= 1 &&
+    input.staleWarningCount <= 1
+  ) {
+    return "HIGH";
+  }
+
+  if (input.dataQualityScore >= 55) {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function toRecommendationNextStep(input: {
+  actionLabel: string;
+  ticker: string;
+  hasConcentrationRisk: boolean;
+}): string {
+  if (input.actionLabel === "Data cleanup needed") {
+    return `Refresh missing price/FX/fundamental data for ${input.ticker} and rerun ranking before any allocation decision.`;
+  }
+
+  if (input.actionLabel === "Trim / Risk review") {
+    return `Run a position-risk review for ${input.ticker} and decide whether exposure should be reduced.`;
+  }
+
+  if (input.actionLabel === "Hold / Monitor") {
+    return `Keep ${input.ticker} on monitor and reassess on the next refreshed snapshot.`;
+  }
+
+  if (input.hasConcentrationRisk) {
+    return `Treat ${input.ticker} as a potential swap candidate and avoid increasing overall concentration.`;
+  }
+
+  return `Validate the thesis for ${input.ticker} and define position-size and risk limits before any change.`;
+}
+
+function buildPortfolioRecommendationsPresentation(
+  toolResults: AgentToolResult[],
+): PortfolioRecommendationPresentation | null {
+  const byToolName = new Map<string, AgentToolResult>();
+  for (const result of toolResults) {
+    byToolName.set(result.toolName, result);
+  }
+
+  const rankingPayload = asRecord(byToolName.get("rankPortfolioHoldings")?.data);
+  if (!rankingPayload) {
+    return null;
+  }
+
+  const rankedHoldings = asRecordList(rankingPayload.rankedHoldings);
+  const qualityPayload = asRecord(byToolName.get("getPortfolioDataQuality")?.data);
+  const riskPayload = asRecord(byToolName.get("getPortfolioRiskSnapshot")?.data);
+
+  if (rankedHoldings.length === 0) {
+    const skippedCount = asNumber(rankingPayload.skippedHoldingsCount) ?? 0;
+    if (skippedCount > 0) {
+      const missingFxCount = asRecordList(qualityPayload?.missingFxIssues).length;
+      const missingPriceCount = asRecordList(qualityPayload?.missingPriceIssues).length;
+      const missingCurrencyCount = asRecordList(qualityPayload?.missingCurrencyIssues).length;
+      const caveatParts: string[] = [];
+
+      if (missingPriceCount > 0) {
+        caveatParts.push(`missing prices for ${missingPriceCount} holding(s)`);
+      }
+      if (missingCurrencyCount > 0) {
+        caveatParts.push(`missing currency metadata for ${missingCurrencyCount} holding(s)`);
+      }
+      if (missingFxCount > 0) {
+        caveatParts.push(`missing FX conversion for ${missingFxCount} holding(s)`);
+      }
+
+      const caveatSuffix = caveatParts.length > 0
+        ? ` Key caveats: ${caveatParts.join(", ")}.`
+        : "";
+
+      return {
+        answer:
+          "Snapshot-based decision support from persisted backend scoring could not rank holdings because metrics are insufficient right now. " +
+          "Refresh pricing/fundamental/FX data and rerun this ranking." +
+          caveatSuffix +
+          " Decision support only, not a buy/sell instruction.",
+        recommendationCards: [],
+      };
+    }
+
+    return null;
+  }
+
+  const topThree = rankedHoldings.slice(0, 3);
+  const topRisks = asStringList(riskPayload?.topRisks);
+  const hasConcentrationRisk =
+    asRecordList(riskPayload?.concentrationRisks).length > 0 ||
+    topRisks.some((risk) => risk.toLowerCase().includes("concentration"));
+
+  const recommendationCards: AgentRecommendationCard[] = topThree.map((item, index) => {
+    const ticker = asString(item.ticker) ?? "UNKNOWN";
+    const companyName = asString(item.companyName) ?? undefined;
+    const score = asNumber(item.compositeScore) ?? 0;
+    const stance = asString(item.suggestedStance) ?? "WATCH";
+    const bullishFactors = asStringList(item.bullishFactors);
+    const bearishFactors = asStringList(item.bearishFactors);
+    const missingData = asStringList(item.missingData);
+    const staleDataWarnings = asStringList(item.staleDataWarnings);
+    const dataQualityScore = asNumber(asRecord(item.componentScores)?.dataQualityScore);
+
+    const actionLabel = toActionLabelFromStance({
+      stance,
+      missingDataCount: missingData.length,
+      staleWarningCount: staleDataWarnings.length,
+      dataQualityScore,
+    });
+
+    const why = bullishFactors.slice(0, 2);
+    if (why.length === 0) {
+      why.push("Composite score reflects relative strength across persisted technical, fundamental, and analyst signals.");
+    }
+
+    const cautions: string[] = [];
+    if (bearishFactors.length > 0) {
+      cautions.push(bearishFactors[0]);
+    } else if (missingData.length > 0) {
+      cautions.push(`Missing data: ${missingData.slice(0, 2).join(", ")}.`);
+    } else if (staleDataWarnings.length > 0) {
+      cautions.push(staleDataWarnings[0]);
+    } else {
+      cautions.push("Risk signals are mixed; validate against latest brokerage-side data before acting.");
+    }
+
+    return {
+      rank: index + 1,
+      ticker,
+      companyName,
+      actionLabel,
+      score: Number(score.toFixed(1)),
+      stance,
+      confidence: toConfidenceFromDataQuality({
+        dataQualityScore,
+        missingDataCount: missingData.length,
+        staleWarningCount: staleDataWarnings.length,
+      }),
+      why,
+      cautions,
+      nextStep: toRecommendationNextStep({
+        actionLabel,
+        ticker,
+        hasConcentrationRisk,
+      }),
+    };
+  });
+
+  const caveats: string[] = [];
+  const concentrationRisks = asRecordList(riskPayload?.concentrationRisks);
+  const sectorExposure = asRecordList(riskPayload?.sectorExposure)
+    .sort((left, right) => (asNumber(right.sharePercent) ?? -1) - (asNumber(left.sharePercent) ?? -1));
+  const topSector = sectorExposure[0] ?? null;
+  const missingFxCount = asRecordList(qualityPayload?.missingFxIssues).length;
+  const missingCurrencyCount = asRecordList(qualityPayload?.missingCurrencyIssues).length;
+  const missingPriceCount = asRecordList(qualityPayload?.missingPriceIssues).length;
+  const staleCount = asStringList(qualityPayload?.staleDataWarnings).length;
+
+  if (concentrationRisks.length > 0) {
+    const topConcentrationMessage = asString(concentrationRisks[0]?.message);
+    caveats.push(topConcentrationMessage ?? "Concentration risk is elevated.");
+  } else {
+    caveats.push("No severe concentration threshold breach detected in current snapshot.");
+  }
+
+  if (topSector) {
+    const sectorName = asString(topSector.key) ?? "Unknown";
+    const sectorShare = asNumber(topSector.sharePercent);
+    if (sectorShare != null) {
+      caveats.push(`Sector concentration: ${sectorName} at ${formatPercent(sectorShare)} of portfolio market value.`);
+    } else {
+      caveats.push(`Sector concentration: ${sectorName} is currently the largest sector exposure.`);
+    }
+  }
+
+  if (missingPriceCount > 0 || staleCount > 0) {
+    caveats.push(
+      `Missing/stale data: missing prices=${missingPriceCount}, stale warnings=${staleCount}.`,
+    );
+  } else {
+    caveats.push("Missing/stale data: no major price staleness flagged.");
+  }
+
+  if (missingFxCount > 0 || missingCurrencyCount > 0) {
+    caveats.push(`FX/currency issues: missing FX conversions=${missingFxCount}, missing currency metadata=${missingCurrencyCount}.`);
+  } else {
+    caveats.push("FX/currency issues: no major conversion gaps flagged.");
+  }
+
+  if (hasConcentrationRisk) {
+    caveats.push(
+      "Reconciliation note: treat Review / Candidate names as replacement/sizing candidates, not automatic net additions.",
+    );
+  }
+
+  if (topRisks.length > 0) {
+    caveats.push(`Additional risk notes: ${topRisks.slice(0, 2).join(" ")}`);
+  }
+
+  const scoreValues = topThree
+    .map((item) => asNumber(item.compositeScore))
+    .filter((value): value is number => value != null);
+  const scoreSpread =
+    scoreValues.length >= 2
+      ? Math.max(...scoreValues) - Math.min(...scoreValues)
+      : null;
+
+  const closeRankingsNote =
+    scoreSpread != null && scoreSpread <= 3
+      ? ` Scores are close (spread ${scoreSpread.toFixed(1)}), so rank order should not be treated as a conviction gap.`
+      : "";
+
+  const scoredCount = asNumber(rankingPayload.scoredHoldingsCount) ?? rankedHoldings.length;
+  const summaryLine =
+    `Snapshot-based decision support from persisted backend scoring across ${scoredCount} scored holding(s).` +
+    (closeRankingsNote.length > 0 ? ` ${closeRankingsNote}` : "");
+
+  const lines: string[] = [summaryLine, "", "Top 3 recommendations:"];
+
+  for (const card of recommendationCards) {
+    const companyText = card.companyName ? ` (${card.companyName})` : "";
+    const confidenceText = card.confidence ? ` | Confidence: ${card.confidence}` : "";
+
+    lines.push(`${card.rank}. ${card.ticker}${companyText}`);
+    lines.push(`Action: ${card.actionLabel}`);
+    lines.push(`Score: ${card.score.toFixed(1)}${confidenceText}`);
+    lines.push("Why it ranks here:");
+    for (const reason of card.why.slice(0, 2)) {
+      lines.push(`- ${reason}`);
+    }
+    lines.push("Main caution:");
+    lines.push(`- ${card.cautions[0] ?? "Risk profile is mixed and should be reviewed."}`);
+    lines.push(`Suggested next step: ${card.nextStep}`);
+    lines.push("");
+  }
+
+  lines.push("Portfolio-level caveats:");
+  for (const caveat of caveats) {
+    lines.push(`- ${caveat}`);
+  }
+  lines.push("");
+  lines.push("Decision support only, not a buy/sell instruction.");
+
+  return {
+    answer: lines.join("\n").trim(),
+    recommendationCards,
+  };
+}
+
+function buildPortfolioReviewAnswer(
+  intent: string,
+  toolResults: AgentToolResult[],
+): string | null {
+  if (intent !== "PORTFOLIO_REVIEW" && intent !== "DAILY_RISK_CHECK") {
+    return null;
+  }
+
+  const byToolName = new Map<string, AgentToolResult>();
+  for (const result of toolResults) {
+    byToolName.set(result.toolName, result);
+  }
+
+  const overviewPayload = asRecord(byToolName.get("getPortfolioOverview")?.data);
+  const riskPayload = asRecord(byToolName.get("getPortfolioRiskSnapshot")?.data);
+  const qualityPayload = asRecord(byToolName.get("getPortfolioDataQuality")?.data);
+
+  if (!overviewPayload && !riskPayload && !qualityPayload) {
+    return null;
+  }
+
+  const holdingCount = asNumber(overviewPayload?.holdingCount)
+    ?? (Array.isArray(overviewPayload?.holdings) ? overviewPayload.holdings.length : null);
+  const totalValueCad = asNumber(overviewPayload?.totalMarketValueCad);
+  const topRisks = asStringList(riskPayload?.topRisks).slice(0, 3);
+  const riskMissingData = asStringList(riskPayload?.missingData).slice(0, 2);
+  const missingFxIssuesCount = Array.isArray(qualityPayload?.missingFxIssues)
+    ? qualityPayload.missingFxIssues.length
+    : 0;
+  const missingCurrencyIssuesCount = Array.isArray(qualityPayload?.missingCurrencyIssues)
+    ? qualityPayload.missingCurrencyIssues.length
+    : 0;
+  const missingPriceIssuesCount = Array.isArray(qualityPayload?.missingPriceIssues)
+    ? qualityPayload.missingPriceIssues.length
+    : 0;
+  const staleWarnings = asStringList(qualityPayload?.staleDataWarnings).slice(0, 2);
+  const suggestedRefreshActions = asStringList(qualityPayload?.suggestedRefreshActions);
+
+  const summaryParts: string[] = [];
+
+  if (holdingCount != null && totalValueCad != null) {
+    summaryParts.push(`Portfolio snapshot: ${holdingCount} holding(s), total value ${formatCadCurrency(totalValueCad)}.`);
+  } else if (holdingCount != null) {
+    summaryParts.push(`Portfolio snapshot: ${holdingCount} holding(s).`);
+  }
+
+  if (topRisks.length > 0) {
+    summaryParts.push(`Major risks: ${topRisks.join(" ")}`);
+  } else if (riskMissingData.length > 0) {
+    summaryParts.push(`Risk coverage notes: ${riskMissingData.join(" ")}`);
+  } else {
+    summaryParts.push("Major risks: no severe concentration thresholds were flagged in the current snapshot.");
+  }
+
+  const qualityIssues: string[] = [];
+  if (missingFxIssuesCount > 0) {
+    qualityIssues.push(`missing FX for ${missingFxIssuesCount} holding(s)`);
+  }
+  if (missingCurrencyIssuesCount > 0) {
+    qualityIssues.push(`missing currency metadata for ${missingCurrencyIssuesCount} holding(s)`);
+  }
+  if (missingPriceIssuesCount > 0) {
+    qualityIssues.push(`missing prices for ${missingPriceIssuesCount} holding(s)`);
+  }
+  if (staleWarnings.length > 0) {
+    qualityIssues.push("stale pricing/FX snapshots detected");
+  }
+
+  if (qualityIssues.length > 0) {
+    summaryParts.push(`Data quality issues: ${qualityIssues.join(", ")}.`);
+  } else if (qualityPayload) {
+    summaryParts.push("Data quality: no major FX/currency/price coverage gaps detected.");
+  }
+
+  if (suggestedRefreshActions.length > 0) {
+    summaryParts.push(`Suggested refresh actions: ${suggestedRefreshActions.join(", ")}.`);
+  }
+
+  return summaryParts.join(" ").trim();
+}
+
+type DiscoveryCandidatePresentation = {
+  answer: string;
+  topTickers: string[];
+};
+
+function buildDiscoveryCandidatesPresentation(toolResults: AgentToolResult[]): DiscoveryCandidatePresentation | null {
+  const byToolName = new Map<string, AgentToolResult>();
+  for (const result of toolResults) {
+    byToolName.set(result.toolName, result);
+  }
+
+  const rankingPayload = asRecord(byToolName.get("rankDiscoveryCandidates")?.data);
+  if (!rankingPayload) {
+    return null;
+  }
+
+  const rankedCandidates = asRecordList(rankingPayload.rankedCandidates);
+  const recommendedCandidates = asRecordList(rankingPayload.recommendedCandidates);
+  const monitorCandidates = asRecordList(rankingPayload.monitorCandidates);
+  const bestAvailableButBelowThreshold = asRecordList(rankingPayload.bestAvailableButBelowThreshold);
+  const warnings = asStringList(rankingPayload.warnings);
+  const category = asString(rankingPayload.category) ?? "UNKNOWN";
+  const noQualifiedCandidates = asBoolean(rankingPayload.noQualifiedCandidates) === true;
+  const reasonNoQualifiedCandidates = asString(rankingPayload.reasonNoQualifiedCandidates);
+  const minimumRecommendationScore = asNumber(asRecord(rankingPayload.recommendationThreshold)?.minimumRecommendationScore) ?? 60;
+
+  if (rankedCandidates.length === 0) {
+    const totalCandidates = asNumber(rankingPayload.totalCandidates) ?? 0;
+    const skippedCount = asNumber(rankingPayload.skippedCandidatesCount) ?? 0;
+
+    return {
+      answer: [
+        `Persisted discovery data exists for ${category} but no candidate could be ranked from current backend coverage.`,
+        `Total candidates seen: ${totalCandidates}. Skipped: ${skippedCount}.`,
+        warnings.length > 0 ? `Caveats: ${warnings.slice(0, 2).join(" ")}` : "Refresh data and retry ranking to improve coverage.",
+        "Decision support only, not a buy/sell instruction.",
+      ].join(" "),
+      topTickers: [],
+    };
+  }
+
+  const topQualifiedCandidates = recommendedCandidates.length > 0
+    ? recommendedCandidates.slice(0, 5)
+    : rankedCandidates.filter((candidate) => asBoolean(candidate.qualifiesForRecommendation) === true).slice(0, 5);
+  const screenedButBelowThreshold = bestAvailableButBelowThreshold.length > 0
+    ? bestAvailableButBelowThreshold
+    : rankedCandidates.filter((candidate) => asBoolean(candidate.qualifiesForRecommendation) !== true).slice(0, 5);
+
+  const topTickers = topQualifiedCandidates
+    .map((candidate) => asString(candidate.ticker))
+    .filter((ticker): ticker is string => ticker != null);
+
+  const lines: string[] = [];
+  if (noQualifiedCandidates) {
+    lines.push(
+      "I screened the available discovery candidates, but none met the minimum score/quality threshold for a new holding.",
+    );
+    lines.push(
+      reasonNoQualifiedCandidates
+        ? `Reason: ${reasonNoQualifiedCandidates}`
+        : `Minimum recommendation threshold: composite score >= ${minimumRecommendationScore.toFixed(0)} and non-HOLD_OFF stance.`,
+    );
+    lines.push("");
+    lines.push("Best available but below threshold:");
+
+    for (const candidate of screenedButBelowThreshold.slice(0, 5)) {
+      const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+      const companyName = asString(candidate.companyName);
+      const score = asNumber(candidate.compositeScore);
+      const actionLabel = asString(candidate.actionLabel) ?? "Not recommended from current snapshot";
+      const caution = asStringList(candidate.cautions)[0]
+        ?? asStringList(candidate.bearishFactors)[0]
+        ?? asStringList(candidate.staleDataWarnings)[0]
+        ?? "Signals are mixed; validate with refreshed data before action.";
+
+      const scoreText = score == null ? "n/a" : score.toFixed(1);
+      const companyText = companyName ? ` (${companyName})` : "";
+      lines.push(`- ${ticker}${companyText} | Score ${scoreText} | ${actionLabel}`);
+      lines.push(`  Caution: ${caution}`);
+    }
+
+    if (screenedButBelowThreshold.length === 0) {
+      lines.push("- No scored names were available in the current snapshot.");
+    }
+  } else {
+    lines.push(`Qualified new-holding recommendations from persisted ${category} discovery data:`);
+    lines.push("");
+
+    for (const candidate of topQualifiedCandidates) {
+      const rank = asNumber(candidate.rank) ?? 0;
+      const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+      const companyName = asString(candidate.companyName);
+      const score = asNumber(candidate.compositeScore);
+      const stance = asString(candidate.suggestedStance) ?? "WATCH";
+      const actionLabel = asString(candidate.actionLabel) ?? "Review candidate";
+      const why = asStringList(candidate.why);
+      const caution = asStringList(candidate.cautions)[0]
+        ?? asStringList(candidate.bearishFactors)[0]
+        ?? asStringList(candidate.staleDataWarnings)[0]
+        ?? "Signals are mixed; validate with refreshed data before action.";
+
+      const scoreText = score == null ? "n/a" : score.toFixed(1);
+      const companyText = companyName ? ` (${companyName})` : "";
+      lines.push(`${rank}. ${ticker}${companyText} | Score ${scoreText} | ${stance}`);
+      lines.push(`Action: ${actionLabel}`);
+      if (why.length > 0) {
+        lines.push(`Why: ${why.slice(0, 2).join(" ")}`);
+      }
+      lines.push(`Caution: ${caution}`);
+      lines.push("");
+    }
+
+    if (monitorCandidates.length > 0) {
+      lines.push("Monitor only:");
+      for (const candidate of monitorCandidates.slice(0, 3)) {
+        const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+        const score = asNumber(candidate.compositeScore);
+        const scoreText = score == null ? "n/a" : score.toFixed(1);
+        lines.push(`- ${ticker} | Score ${scoreText} | Monitor only`);
+      }
+      lines.push("");
+    }
+  }
+
+  if (warnings.length > 0) {
+    lines.push(`Additional caveats: ${warnings.slice(0, 2).join(" ")}`);
+  }
+
+  if (noQualifiedCandidates) {
+    lines.push("Suggested next step: refresh discovery candidates and re-run ranking.");
+  }
+
+  lines.push("Decision support only, not a buy/sell instruction.");
+
+  return {
+    answer: lines.join("\n").trim(),
+    topTickers,
+  };
 }
 
 function buildFullRefreshInput(portfolioId: string): Record<string, unknown> {
@@ -120,6 +761,32 @@ function redactDiagnosticText(value: string | undefined): string | undefined {
     .trim();
 
   return redacted.length > 0 ? redacted.slice(0, 200) : undefined;
+}
+
+function toPrimaryFailureReason(input: {
+  stage?: string;
+  errorCode?: string;
+  status?: number;
+} | undefined): string | undefined {
+  if (!input) {
+    return undefined;
+  }
+
+  const normalizedErrorCode = input.errorCode?.trim().toLowerCase();
+  if (normalizedErrorCode) {
+    return normalizedErrorCode;
+  }
+
+  const normalizedStage = input.stage?.trim().toLowerCase();
+  if (normalizedStage && normalizedStage.length > 0) {
+    return normalizedStage;
+  }
+
+  if (typeof input.status === "number") {
+    return `http_${input.status}`;
+  }
+
+  return undefined;
 }
 
 function previewPlannerPayload(value: unknown): string | undefined {
@@ -201,7 +868,47 @@ function collectReceivedContextKeys(
 }
 
 function isPortfolioContextIntent(intent: string): boolean {
-  return intent === "DAILY_RISK_CHECK" || intent === "PORTFOLIO_REVIEW" || intent === "PORTFOLIO_RISK_SNAPSHOT";
+  return (
+    intent === "DAILY_RISK_CHECK" ||
+    intent === "PORTFOLIO_REVIEW" ||
+    intent === "PORTFOLIO_RISK_SNAPSHOT" ||
+    intent === "PORTFOLIO_RECOMMENDATIONS"
+  );
+}
+
+function isPortfolioRecommendationRequest(message: string): boolean {
+  const normalized = message.toLowerCase();
+  const recommendationSignals = [
+    "top three recommendation",
+    "top 3 recommendation",
+    "top recommendations",
+    "best holdings",
+    "buy/sell/trim",
+    "buy sell trim",
+    "which positions look strongest",
+    "strongest positions",
+    "rank my portfolio",
+    "recommendation for my portfolio",
+    "based on current metrics",
+  ];
+
+  const hasRecommendationSignal = recommendationSignals.some((signal) => normalized.includes(signal));
+  if (hasRecommendationSignal) {
+    return true;
+  }
+
+  const hasTopThree =
+    (normalized.includes("top 3") || normalized.includes("top three")) &&
+    (normalized.includes("portfolio") || normalized.includes("holding") || normalized.includes("position"));
+
+  if (hasTopThree) {
+    return true;
+  }
+
+  return (
+    normalized.includes("rank") &&
+    (normalized.includes("portfolio") || normalized.includes("holding") || normalized.includes("position"))
+  );
 }
 
 function isGeopoliticalContextMessage(message: string): boolean {
@@ -525,6 +1232,49 @@ function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): 
     });
   }
 
+  const discoveryRankingResult = toolResults.find(
+    (result) => result.success && result.toolName === "rankDiscoveryCandidates" && result.data,
+  );
+
+  if (discoveryRankingResult?.data && typeof discoveryRankingResult.data === "object") {
+    const payload = discoveryRankingResult.data as Record<string, unknown>;
+    const refreshActions = asStringList(payload.suggestedRefreshActions);
+    const rankedCandidates = asRecordList(payload.rankedCandidates);
+    const recommendedCandidates = asRecordList(payload.recommendedCandidates);
+    const monitorCandidates = asRecordList(payload.monitorCandidates);
+
+    if (refreshActions.includes("refreshDiscoveryCategory")) {
+      const category = asString(payload.category);
+      suggestedActions.push({
+        label: "Refresh discovery candidates",
+        toolName: "refreshDiscoveryCategory",
+        input: { category: category ?? "GAINERS" },
+        requiresConfirmation: true,
+      });
+    }
+
+    if (refreshActions.includes("refreshTickerAnalystData")) {
+      const targeted = [...recommendedCandidates, ...monitorCandidates, ...rankedCandidates]
+        .find((candidate) =>
+          (asString(candidate.suggestedStance)?.toUpperCase() ?? "") !== "HOLD_OFF" &&
+          asStringList(candidate.missingData)
+            .map((value) => value.toLowerCase())
+            .some((value) => value.includes("analyst")),
+        )
+        ?? null;
+      const ticker = asString(targeted?.ticker);
+
+      if (ticker) {
+        suggestedActions.push({
+          label: `Refresh analyst data for ${ticker}`,
+          toolName: "refreshTickerAnalystData",
+          input: { ticker },
+          requiresConfirmation: true,
+        });
+      }
+    }
+  }
+
   return suggestedActions;
 }
 
@@ -591,6 +1341,18 @@ function determineIntent(message: string, tickers: string[]): string {
     return "WATCHLIST_ADD";
   }
 
+  const newHoldingSignals =
+    (normalized.includes("new holding") || normalized.includes("new position") || normalized.includes("candidate ticker") || normalized.includes("candidate stock")) &&
+    (normalized.includes("find") || normalized.includes("suggest") || normalized.includes("recommend") || normalized.includes("rank"));
+
+  const discoverySignals =
+    (normalized.includes("discovery") || normalized.includes("gainers") || normalized.includes("losers") || normalized.includes("analyst upgrades") || normalized.includes("market movers")) &&
+    (normalized.includes("candidate") || normalized.includes("holding") || normalized.includes("rank") || normalized.includes("best"));
+
+  if (newHoldingSignals || discoverySignals) {
+    return "MARKET_CANDIDATE_DISCOVERY";
+  }
+
   if (
     normalized.includes("watchlist") &&
     (
@@ -609,6 +1371,10 @@ function determineIntent(message: string, tickers: string[]): string {
 
   if (normalized.includes("worried") || (normalized.includes("risk") && normalized.includes("today"))) {
     return "DAILY_RISK_CHECK";
+  }
+
+  if (isPortfolioRecommendationRequest(message)) {
+    return "PORTFOLIO_RECOMMENDATIONS";
   }
 
   if (normalized.includes("review") && normalized.includes("portfolio")) {
@@ -704,6 +1470,55 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
       : "";
 
     return `Watchlist scoring processed total=${totalItems}, active=${activeItemsCount}, scored=${scoredItemsCount}, skipped=${skippedItemsCount}.${topSummary}`.trim();
+  }
+
+  if (toolName === "rankPortfolioHoldings") {
+    const rankedHoldings = asRecordList(payload.rankedHoldings);
+    const topThree = rankedHoldings.slice(0, 3).map((item) => {
+      const ticker = asString(item.ticker) ?? "?";
+      const score = asNumber(item.compositeScore);
+      const stance = asString(item.suggestedStance) ?? "WATCH";
+      const dataQualityScore = asNumber(asRecord(item.componentScores)?.dataQualityScore);
+      const actionLabel = toActionLabelFromStance({
+        stance,
+        missingDataCount: asStringList(item.missingData).length,
+        staleWarningCount: asStringList(item.staleDataWarnings).length,
+        dataQualityScore,
+      });
+      const scoreText = score == null ? "n/a" : score.toFixed(1);
+      return `${ticker} (${scoreText}) ${actionLabel}`;
+    });
+
+    const scoredCount = typeof payload.scoredHoldingsCount === "number"
+      ? payload.scoredHoldingsCount
+      : rankedHoldings.length;
+    const skippedCount = typeof payload.skippedHoldingsCount === "number"
+      ? payload.skippedHoldingsCount
+      : 0;
+
+    return `Portfolio ranking scored=${scoredCount}, skipped=${skippedCount}. Top recommendations: ${topThree.join("; ")}`.trim();
+  }
+
+  if (toolName === "rankDiscoveryCandidates") {
+    const rankedCandidates = asRecordList(payload.rankedCandidates);
+    const recommendedCandidates = asRecordList(payload.recommendedCandidates);
+    const noQualifiedCandidates = asBoolean(payload.noQualifiedCandidates) === true;
+    const top = rankedCandidates.slice(0, 3).map((item) => {
+      const ticker = asString(item.ticker) ?? "?";
+      const score = asNumber(item.compositeScore);
+      const stance = asString(item.suggestedStance) ?? "WATCH";
+      const scoreText = score == null ? "n/a" : score.toFixed(1);
+      return `${ticker} (${scoreText}) ${stance}`;
+    });
+
+    const scoredCount = asNumber(payload.scoredCandidatesCount) ?? rankedCandidates.length;
+    const qualifiedCount = recommendedCandidates.length;
+    const skippedCount = asNumber(payload.skippedCandidatesCount) ?? 0;
+    if (noQualifiedCandidates) {
+      return `Discovery ranking scored=${scoredCount}, skipped=${skippedCount}. No candidates met recommendation threshold. Best available: ${top.join("; ")}`.trim();
+    }
+
+    return `Discovery ranking scored=${scoredCount}, qualified=${qualifiedCount}, skipped=${skippedCount}. Top recommendations: ${top.join("; ")}`.trim();
   }
 
   if (toolName === "getPortfolioOverview") {
@@ -886,10 +1701,14 @@ function mergeRequiredActions(
 function deterministicAnswer(input: {
   intent: string;
   toolCalls: AgentToolCallSummary[];
+  toolResults: AgentToolResult[];
+  recommendationPresentation: PortfolioRecommendationPresentation | null;
+  discoveryPresentation: DiscoveryCandidatePresentation | null;
   missingContext: string[];
   clarifyingQuestion: string | null;
   warnings: string[];
   suggestedActions: AgentSuggestedAction[];
+  isProduction: boolean;
 }): string {
   if (input.clarifyingQuestion) {
     return input.clarifyingQuestion;
@@ -911,12 +1730,49 @@ function deterministicAnswer(input: {
     return "I prepared the watchlist update action. Please confirm before I execute it.";
   }
 
+  if (input.intent === "CONFIRM_TOOL_EXECUTION" && input.toolCalls.length === 0) {
+    const actionableWarning = input.warnings.find((warning) =>
+      warning.toLowerCase().includes("missing") ||
+      warning.toLowerCase().includes("invalid") ||
+      warning.toLowerCase().includes("confirm"),
+    );
+
+    return actionableWarning
+      ?? "I could not execute the confirmed action because required input was missing or invalid.";
+  }
+
   if (input.toolCalls.length === 0) {
     return "I can help with portfolio risk, watchlist scoring, ticker research, and refresh planning. Tell me what you want to review.";
   }
 
+  if (input.intent === "PORTFOLIO_RECOMMENDATIONS") {
+    if (input.recommendationPresentation) {
+      return input.recommendationPresentation.answer;
+    }
+  }
+
+  if (input.intent === "MARKET_CANDIDATE_DISCOVERY") {
+    if (input.discoveryPresentation) {
+      return input.discoveryPresentation.answer;
+    }
+  }
+
+  const portfolioAnswer = buildPortfolioReviewAnswer(input.intent, input.toolResults);
+  if (portfolioAnswer) {
+    return portfolioAnswer;
+  }
+
   const firstFailure = input.toolCalls.find((call) => !call.success);
   if (firstFailure) {
+    if (input.intent === "CONFIRM_TOOL_EXECUTION") {
+      const failureMessage = firstFailure.errors[0] ?? "Tool execution failed.";
+      return `I could not execute the confirmed action '${firstFailure.toolName}': ${failureMessage}`;
+    }
+
+    if (input.isProduction) {
+      return "I ran part of the plan, but tool execution failed.";
+    }
+
     return `I ran part of the plan, but '${firstFailure.toolName}' failed: ${firstFailure.errors.join(" ")}`;
   }
 
@@ -926,6 +1782,10 @@ function deterministicAnswer(input: {
 
   if (input.intent === "WATCHLIST_SCORE") {
     return "I reviewed your watchlist and generated ranking signals.";
+  }
+
+  if (input.intent === "MARKET_CANDIDATE_DISCOVERY") {
+    return "I reviewed persisted discovery snapshots and ranked candidate tickers for potential new holdings.";
   }
 
   if (input.intent === "RESEARCH_TICKER") {
@@ -1034,13 +1894,111 @@ function canExecuteConfirmedTool(toolName: AgentToolName, request: AgentChatRequ
   return true;
 }
 
+function toNormalizedConfirmedToolInputs(
+  rawInputs: unknown,
+): Partial<Record<AgentToolName, Record<string, unknown>>> {
+  if (!rawInputs || typeof rawInputs !== "object") {
+    return {};
+  }
+
+  const normalized: Partial<Record<AgentToolName, Record<string, unknown>>> = {};
+
+  if (Array.isArray(rawInputs)) {
+    for (const item of rawInputs) {
+      const entry = asRecord(item);
+      const toolName = asString(entry?.toolName);
+      const input = asRecord(entry?.input);
+      if (!toolName || !input) {
+        continue;
+      }
+
+      if (AGENT_TOOL_NAMES.includes(toolName as AgentToolName)) {
+        normalized[toolName as AgentToolName] = input;
+      }
+    }
+
+    return normalized;
+  }
+
+  const record = asRecord(rawInputs) ?? {};
+  const directToolName = asString(record.toolName);
+  const directInput = asRecord(record.input);
+  if (directToolName && directInput && AGENT_TOOL_NAMES.includes(directToolName as AgentToolName)) {
+    normalized[directToolName as AgentToolName] = directInput;
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    if (!AGENT_TOOL_NAMES.includes(key as AgentToolName)) {
+      continue;
+    }
+
+    const input = asRecord(value);
+    if (input) {
+      normalized[key as AgentToolName] = input;
+    }
+  }
+
+  return normalized;
+}
+
+function inferDiscoveryCategoryFromMessage(message: string): string | undefined {
+  const upper = message.toUpperCase();
+
+  if (upper.includes("ANALYST_UPGRADES") || upper.includes("ANALYST UPGRADES")) {
+    return "ANALYST_UPGRADES";
+  }
+  if (upper.includes("ANALYST_DOWNGRADES") || upper.includes("ANALYST DOWNGRADES")) {
+    return "ANALYST_DOWNGRADES";
+  }
+  if (upper.includes("LOSERS")) {
+    return "LOSERS";
+  }
+  if (upper.includes("ACTIVE")) {
+    return "ACTIVE";
+  }
+  if (upper.includes("GAINERS")) {
+    return "GAINERS";
+  }
+
+  return undefined;
+}
+
 function resolveConfirmedToolInput(
   toolName: AgentToolName,
   request: AgentChatRequest,
   tickers: string[],
 ): Record<string, unknown> | undefined {
-  const explicitInput = request.confirmedToolInputs?.[toolName];
+  const normalizedInputs = toNormalizedConfirmedToolInputs(request.confirmedToolInputs);
+  const explicitInput = normalizedInputs[toolName];
   if (explicitInput && typeof explicitInput === "object") {
+    if (toolName === "refreshDiscoveryCategory") {
+      const explicitCategory = asString(explicitInput.category);
+      return {
+        ...explicitInput,
+        category:
+          explicitCategory ??
+          inferDiscoveryCategoryFromMessage(request.message) ??
+          "GAINERS",
+      };
+    }
+
+    if (toolName === "refreshTickerAnalystData") {
+      const explicitTicker = asString(explicitInput.ticker);
+      if (explicitTicker) {
+        return explicitInput;
+      }
+
+      const fallbackTicker = request.context.ticker?.toUpperCase() ?? tickers[0];
+      if (!fallbackTicker) {
+        return undefined;
+      }
+
+      return {
+        ...explicitInput,
+        ticker: fallbackTicker,
+      };
+    }
+
     return explicitInput;
   }
 
@@ -1077,6 +2035,29 @@ function resolveConfirmedToolInput(
     return buildWatchlistRefreshInput(request.context.watchlistId);
   }
 
+  if (toolName === "refreshDiscoveryCategory") {
+    return {
+      category: inferDiscoveryCategoryFromMessage(request.message) ?? "GAINERS",
+    };
+  }
+
+  if (toolName === "refreshTickerAnalystData") {
+    const ticker = request.context.ticker?.toUpperCase() ?? tickers[0];
+    if (!ticker) {
+      return undefined;
+    }
+
+    return { ticker };
+  }
+
+  if (toolName === "refreshWatchlistAnalystData") {
+    if (!request.context.watchlistId) {
+      return undefined;
+    }
+
+    return { watchlistId: request.context.watchlistId };
+  }
+
   return {};
 }
 
@@ -1099,11 +2080,15 @@ function validateAndPrepareToolCalls(input: {
   missingContext: string[];
   clarifyingQuestion: string | null;
   request: AgentChatRequest;
+  maxToolCalls: number;
 }): PlanValidationResult {
-  const cappedToolCalls = input.toolCalls.slice(0, env.OPENAI_AGENT_MAX_TOOL_CALLS);
+  const cappedToolCalls = input.toolCalls.slice(0, input.maxToolCalls);
+  const missingContext = dedupe(input.missingContext);
   const executableCalls: PlannedToolExecution[] = [];
   const warnings: string[] = [];
   const suggestedActions: AgentSuggestedAction[] = [];
+  const blockedTools: Array<{ toolName: string; reason: string }> = [];
+  let blockedToolCount = 0;
   let droppedToolCount = Math.max(0, input.toolCalls.length - cappedToolCalls.length);
 
   for (const planned of cappedToolCalls) {
@@ -1135,8 +2120,61 @@ function validateAndPrepareToolCalls(input: {
       const message = error instanceof AgentToolExecutionError
         ? error.message
         : "Invalid planner tool input.";
-      warnings.push(`Dropped invalid planned input for '${toolName}': ${message}`);
+
+      if (error instanceof AgentToolExecutionError && error.code === "AGENT_TOOL_INVALID_INPUT") {
+        const flattened = asRecord(error.details);
+        const fieldErrors = asRecord(flattened?.fieldErrors) ?? {};
+        const normalizedFieldErrors: Record<string, string[] | undefined> = {};
+
+        for (const [field, value] of Object.entries(fieldErrors)) {
+          normalizedFieldErrors[field] = Array.isArray(value)
+            ? value.filter((item): item is string => typeof item === "string")
+            : undefined;
+        }
+
+        if (toolName === "refreshDiscoveryCategory") {
+          warnings.push("The refresh action was missing category input. Try again with category GAINERS.");
+        } else {
+          warnings.push(
+            `Dropped invalid planned input for '${toolName}': ${summaryFromFieldErrors(normalizedFieldErrors)}`,
+          );
+        }
+      } else {
+        warnings.push(`Dropped invalid planned input for '${toolName}': ${message}`);
+      }
+
       continue;
+    }
+
+    if (isPortfolioScopedTool(toolName)) {
+      const canonicalPortfolioId = asOptionalConfiguredString(input.request.context.portfolioId);
+      const plannedPortfolioId = asOptionalConfiguredString(normalizedInput.portfolioId);
+
+      if (!canonicalPortfolioId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Portfolio context was missing; portfolio-scoped tool cannot run.",
+        });
+        missingContext.push("portfolioId");
+        warnings.push(`Blocked tool '${toolName}' because portfolio context was missing.`);
+        continue;
+      }
+
+      if (plannedPortfolioId && plannedPortfolioId !== canonicalPortfolioId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Portfolio access was denied because planned portfolioId did not match canonical context.",
+        });
+        warnings.push(`Blocked tool '${toolName}' because planned portfolioId did not match canonical context.`);
+        continue;
+      }
+
+      normalizedInput = {
+        ...normalizedInput,
+        portfolioId: canonicalPortfolioId,
+      };
     }
 
     if (toolName === "refreshGdeltRiskContext" && !isGeopoliticalContextMessage(input.request.message)) {
@@ -1189,8 +2227,115 @@ function validateAndPrepareToolCalls(input: {
     });
   }
 
-  const missingContext = dedupe(input.missingContext);
-  const hasOpenQuestions = missingContext.length > 0 || Boolean(input.clarifyingQuestion);
+  if (input.intent === "PORTFOLIO_RECOMMENDATIONS") {
+    const canonicalPortfolioId = asOptionalConfiguredString(input.request.context.portfolioId);
+
+    if (!canonicalPortfolioId) {
+      missingContext.push("portfolioId");
+      warnings.push("Portfolio recommendation request requires portfolio context.");
+    } else {
+      const requiredToolCalls: PlannedToolExecution[] = [
+        {
+          toolName: "rankPortfolioHoldings",
+          input: {
+            portfolioId: canonicalPortfolioId,
+            limit: 3,
+            includeWatchlist: false,
+          },
+          purpose: "Rank top portfolio holdings using persisted scoring metrics",
+          confirmed: false,
+        },
+        {
+          toolName: "getPortfolioRiskSnapshot",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Assess concentration and risk caveats for ranked holdings",
+          confirmed: false,
+        },
+        {
+          toolName: "getPortfolioDataQuality",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Assess data quality caveats for recommendation confidence",
+          confirmed: false,
+        },
+      ];
+
+      for (const requiredCall of requiredToolCalls) {
+        const alreadyPlanned = executableCalls.some((call) => call.toolName === requiredCall.toolName);
+        if (alreadyPlanned) {
+          continue;
+        }
+
+        executableCalls.push(requiredCall);
+        warnings.push(`Planner under-tooled recommendation intent; auto-added '${requiredCall.toolName}'.`);
+      }
+
+      const hasOverview = executableCalls.some((call) => call.toolName === "getPortfolioOverview");
+      if (!hasOverview) {
+        executableCalls.push({
+          toolName: "getPortfolioOverview",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Provide holdings context for ranked recommendation response",
+          confirmed: false,
+        });
+      }
+    }
+  }
+
+  if (input.intent === "MARKET_CANDIDATE_DISCOVERY") {
+    const canonicalPortfolioId = asOptionalConfiguredString(input.request.context.portfolioId);
+    const canonicalWatchlistId = asOptionalConfiguredString(input.request.context.watchlistId);
+
+    if (!canonicalPortfolioId) {
+      missingContext.push("portfolioId");
+      warnings.push("Market candidate discovery request requires portfolio context.");
+    } else {
+      const requiredToolCalls: PlannedToolExecution[] = [
+        {
+          toolName: "getPortfolioOverview",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Provide portfolio context for candidate-fit analysis",
+          confirmed: false,
+        },
+        {
+          toolName: "getPortfolioRiskSnapshot",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Provide portfolio risk caveats for candidate selection",
+          confirmed: false,
+        },
+        {
+          toolName: "getPortfolioDataQuality",
+          input: { portfolioId: canonicalPortfolioId },
+          purpose: "Provide data quality caveats for candidate confidence",
+          confirmed: false,
+        },
+        {
+          toolName: "rankDiscoveryCandidates",
+          input: {
+            portfolioId: canonicalPortfolioId,
+            watchlistId: canonicalWatchlistId,
+            limit: 5,
+            excludeExistingHoldings: true,
+            excludeExistingWatchlistItems: true,
+          },
+          purpose: "Rank new-holding discovery candidates using persisted data",
+          confirmed: false,
+        },
+      ];
+
+      for (const requiredCall of requiredToolCalls) {
+        const alreadyPlanned = executableCalls.some((call) => call.toolName === requiredCall.toolName);
+        if (alreadyPlanned) {
+          continue;
+        }
+
+        executableCalls.push(requiredCall);
+        warnings.push(`Planner under-tooled discovery intent; auto-added '${requiredCall.toolName}'.`);
+      }
+    }
+  }
+
+  const normalizedMissingContext = dedupe(missingContext);
+  const hasOpenQuestions = normalizedMissingContext.length > 0 || Boolean(input.clarifyingQuestion);
 
   if (hasOpenQuestions) {
     const contextFreeCalls = executableCalls.filter((call) => isContextFreeReadOnly(call.toolName));
@@ -1203,10 +2348,12 @@ function validateAndPrepareToolCalls(input: {
 
     return {
       intent: input.intent,
-      missingContext,
+      missingContext: normalizedMissingContext,
       clarifyingQuestion: input.clarifyingQuestion,
       plannedToolCount: cappedToolCalls.length,
       droppedToolCount,
+      blockedToolCount,
+      blockedTools,
       warnings,
       suggestedActions: addConfirmationPolicy(suggestedActions),
       executableCalls: contextFreeCalls,
@@ -1215,10 +2362,12 @@ function validateAndPrepareToolCalls(input: {
 
   return {
     intent: input.intent,
-    missingContext,
+    missingContext: normalizedMissingContext,
     clarifyingQuestion: input.clarifyingQuestion,
     plannedToolCount: cappedToolCalls.length,
     droppedToolCount,
+    blockedToolCount,
+    blockedTools,
     warnings,
     suggestedActions: addConfirmationPolicy(suggestedActions),
     executableCalls,
@@ -1311,6 +2460,52 @@ function buildDeterministicPlan(
           input: { portfolioId: request.context.portfolioId },
           purpose: "Review portfolio risk summary",
         },
+        {
+          toolName: "getPortfolioDataQuality",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Review portfolio data quality and staleness",
+        },
+      );
+
+      if (isGeopoliticalContextMessage(request.message)) {
+        toolCalls.push({
+          toolName: "getGeopoliticalSummary",
+          input: {},
+          purpose: "Review geopolitical risk backdrop",
+        });
+      }
+    }
+  }
+
+  if (intent === "PORTFOLIO_RECOMMENDATIONS") {
+    if (!request.context.portfolioId) {
+      missingContext.push("portfolioId");
+    } else {
+      toolCalls.push(
+        {
+          toolName: "rankPortfolioHoldings",
+          input: {
+            portfolioId: request.context.portfolioId,
+            limit: 3,
+            includeWatchlist: false,
+          },
+          purpose: "Rank top portfolio holdings using persisted metrics",
+        },
+        {
+          toolName: "getPortfolioRiskSnapshot",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Assess concentration and risk caveats for recommendations",
+        },
+        {
+          toolName: "getPortfolioDataQuality",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Assess data quality caveats for recommendation confidence",
+        },
+        {
+          toolName: "getPortfolioOverview",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Provide portfolio context for ranked recommendations",
+        },
       );
     }
   }
@@ -1373,6 +2568,41 @@ function buildDeterministicPlan(
         },
         purpose: "Add ticker to watchlist",
       });
+    }
+  }
+
+  if (intent === "MARKET_CANDIDATE_DISCOVERY") {
+    if (!request.context.portfolioId) {
+      missingContext.push("portfolioId");
+    } else {
+      toolCalls.push(
+        {
+          toolName: "getPortfolioOverview",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Load portfolio context for candidate fit",
+        },
+        {
+          toolName: "getPortfolioRiskSnapshot",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Load concentration/risk caveats for new holdings",
+        },
+        {
+          toolName: "getPortfolioDataQuality",
+          input: { portfolioId: request.context.portfolioId },
+          purpose: "Load portfolio data quality caveats",
+        },
+        {
+          toolName: "rankDiscoveryCandidates",
+          input: {
+            portfolioId: request.context.portfolioId,
+            watchlistId: request.context.watchlistId,
+            limit: 5,
+            excludeExistingHoldings: true,
+            excludeExistingWatchlistItems: true,
+          },
+          purpose: "Rank persisted discovery candidates for potential new holdings",
+        },
+      );
     }
   }
 
@@ -1439,10 +2669,18 @@ function toExecutionErrorMessage(error: unknown): string {
   return "Tool execution failed.";
 }
 
+function toExecutionErrorCode(error: unknown): string {
+  if (error instanceof AgentToolExecutionError) {
+    return error.code;
+  }
+
+  return "TOOL_EXECUTION_FAILED";
+}
+
 async function executePlannedTool(
   planned: PlannedToolExecution,
   context: AgentToolContext,
-): Promise<AgentToolResult> {
+): Promise<ExecutedToolResult> {
   const startedAtDate = new Date();
 
   try {
@@ -1456,6 +2694,7 @@ async function executePlannedTool(
     const finishedAtDate = new Date();
     const tool = agentToolRegistry.getTool(planned.toolName);
     const message = toExecutionErrorMessage(error);
+    const errorCode = toExecutionErrorCode(error);
     const warnings =
       error instanceof AgentToolExecutionError && error.statusCode === 404
         ? [message]
@@ -1466,6 +2705,7 @@ async function executePlannedTool(
       success: false,
       warnings,
       errors: [message],
+      errorCode,
       metadata: {
         startedAt: startedAtDate.toISOString(),
         finishedAt: finishedAtDate.toISOString(),
@@ -1481,6 +2721,11 @@ async function executePlannedTool(
 export async function runAgentChat(request: AgentChatRequest): Promise<AgentChatResponse> {
   const startedAtDate = new Date();
   const message = request.message.trim();
+  const requestedMaxToolCalls = request.maxToolCalls ?? env.OPENAI_AGENT_MAX_TOOL_CALLS;
+  const effectiveMaxToolCalls = Math.max(
+    1,
+    Math.min(requestedMaxToolCalls, env.OPENAI_AGENT_MAX_TOOL_CALLS),
+  );
   const receivedContextKeys = collectReceivedContextKeys(request.context);
   const receivedPortfolioIdConfigured = hasConfiguredContextString(request.context.portfolioId);
   const receivedWatchlistIdConfigured = hasConfiguredContextString(request.context.watchlistId);
@@ -1526,12 +2771,22 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
   };
 
   let modelName: string | undefined;
+  const primaryModelName = env.OPENAI_AGENT_MODEL;
+  const fallbackModelName = env.OPENAI_AGENT_MODEL_FALLBACK || undefined;
+  let modelUsedForPlanning: string | undefined;
+  let modelUsedForSynthesis: string | undefined;
+  let primaryFailureReason: string | undefined;
   let openAiDiagnostics: AgentOpenAiDiagnostics | undefined;
   let plannerUsed = false;
   let plannerFallbackUsed = false;
   let fallbackUsed = false;
   let fallbackReason: string | undefined;
-  let plannerSkipReason: "PROVIDER_DISABLED" | "API_KEY_MISSING" | undefined;
+  let plannerSkipReason: "PROVIDER_DISABLED" | "API_KEY_MISSING" | "REQUEST_LIMIT_REACHED" | undefined;
+  const openAiUsageLimitsConfigured = hasOpenAiUsageLimitsConfigured();
+  const openAiUsageAllowance = checkOpenAiUsageAllowance({
+    userId: effectiveRequest.context.userId,
+  });
+  let openAiUsageLimitReason: "DAILY_USER_LIMIT" | "MONTHLY_GLOBAL_LIMIT" | undefined;
 
   let planningIntent = "GENERAL_QA";
   let planningMissingContext: string[] = [];
@@ -1539,19 +2794,35 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
   let planningWarnings: string[] = [];
   let plannedToolCount = 0;
   let droppedToolCount = 0;
+  let blockedToolCount = 0;
+  let blockedTools: Array<{ toolName: string; reason: string }> = [];
   let suggestedActions: AgentSuggestedAction[] = [];
   let executableCalls: PlannedToolExecution[] = [];
 
   const openAiProviderEnabled = env.OPENAI_AGENT_PROVIDER_ENABLED;
   const openAiKeyConfigured = Boolean(env.OPENAI_API_KEY && env.OPENAI_API_KEY.trim().length > 0);
-  const shouldAttemptPlanner = openAiProviderEnabled && openAiKeyConfigured;
+  const shouldAttemptPlanner =
+    openAiProviderEnabled && openAiKeyConfigured && openAiUsageAllowance.allowed;
 
   if (!shouldAttemptPlanner) {
-    plannerSkipReason = !openAiProviderEnabled ? "PROVIDER_DISABLED" : "API_KEY_MISSING";
+    if (!openAiProviderEnabled) {
+      plannerSkipReason = "PROVIDER_DISABLED";
+    } else if (!openAiKeyConfigured) {
+      plannerSkipReason = "API_KEY_MISSING";
+    } else {
+      plannerSkipReason = "REQUEST_LIMIT_REACHED";
+      openAiUsageLimitReason = openAiUsageAllowance.reason;
+      fallbackUsed = true;
+      fallbackReason = "OPENAI_REQUEST_LIMIT_REACHED";
+      planningWarnings.push("OpenAI request limit reached; deterministic fallback was used.");
+    }
   }
 
   if (shouldAttemptPlanner) {
     plannerUsed = true;
+    recordOpenAiUsage({
+      userId: effectiveRequest.context.userId,
+    });
 
     try {
       const planResult = await generateToolPlan({
@@ -1570,6 +2841,11 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       });
 
       modelName = planResult.modelName;
+      modelUsedForPlanning = planResult.modelName;
+
+      if (planResult.primaryModelFailure) {
+        primaryFailureReason = toPrimaryFailureReason(planResult.primaryModelFailure) ?? primaryFailureReason;
+      }
 
       const parsedPlan = openAiToolPlanOutputSchema.safeParse(
         normalizePlannerOutputAliases(planResult.plan),
@@ -1599,8 +2875,15 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
         planningWarnings.push("Primary OpenAI model was unavailable; fallback model was used for planning.");
       }
 
+      const normalizedPlannerIntent =
+        isPortfolioRecommendationRequest(message) &&
+        (parsedPlan.data.intent === "PORTFOLIO_REVIEW" ||
+          parsedPlan.data.intent === "PORTFOLIO_RISK_SNAPSHOT")
+          ? "PORTFOLIO_RECOMMENDATIONS"
+          : parsedPlan.data.intent;
+
       const reconciledMissingContext = reconcilePlannerMissingContext({
-        intent: parsedPlan.data.intent,
+        intent: normalizedPlannerIntent,
         missingContext: parsedPlan.data.missingContext,
         request: effectiveRequest,
       });
@@ -1614,11 +2897,12 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       }
 
       const validatedPlan = validateAndPrepareToolCalls({
-        intent: parsedPlan.data.intent,
+        intent: normalizedPlannerIntent,
         toolCalls: parsedPlan.data.toolCalls,
         missingContext: reconciledMissingContext,
         clarifyingQuestion: reconciledClarifyingQuestion,
         request: effectiveRequest,
+        maxToolCalls: effectiveMaxToolCalls,
       });
 
       planningIntent = validatedPlan.intent;
@@ -1627,6 +2911,8 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       planningWarnings = dedupe([...planningWarnings, ...validatedPlan.warnings]);
       plannedToolCount = validatedPlan.plannedToolCount;
       droppedToolCount = validatedPlan.droppedToolCount;
+      blockedToolCount = validatedPlan.blockedToolCount;
+      blockedTools = validatedPlan.blockedTools;
       suggestedActions = validatedPlan.suggestedActions;
       executableCalls = validatedPlan.executableCalls;
     } catch (error) {
@@ -1637,6 +2923,7 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
 
       if (env.NODE_ENV !== "production") {
         if (error instanceof OpenAiAgentClientError) {
+          primaryFailureReason = toPrimaryFailureReason(error.failure) ?? primaryFailureReason;
           openAiDiagnostics = {
             openAiAttempted: true,
             openAiFailureStage: error.failure.stage,
@@ -1671,6 +2958,7 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       missingContext: deterministicPlan.missingContext,
       clarifyingQuestion: deterministicPlan.clarifyingQuestion,
       request: effectiveRequest,
+      maxToolCalls: effectiveMaxToolCalls,
     });
 
     planningIntent = validatedPlan.intent;
@@ -1683,21 +2971,31 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
     ]);
     plannedToolCount = validatedPlan.plannedToolCount;
     droppedToolCount = validatedPlan.droppedToolCount;
+    blockedToolCount = validatedPlan.blockedToolCount;
+    blockedTools = validatedPlan.blockedTools;
     suggestedActions = mergeRequiredActions(validatedPlan.suggestedActions, suggestedActions);
     executableCalls = validatedPlan.executableCalls;
   }
 
-  const cappedExecutableCalls = executableCalls.slice(0, env.OPENAI_AGENT_MAX_TOOL_CALLS);
+  const cappedExecutableCalls = executableCalls.slice(0, effectiveMaxToolCalls);
   if (executableCalls.length > cappedExecutableCalls.length) {
     droppedToolCount += executableCalls.length - cappedExecutableCalls.length;
   }
 
-  const toolResults = await Promise.all(
+  const toolResults: ExecutedToolResult[] = await Promise.all(
     cappedExecutableCalls.map((planned) => executePlannedTool(planned, executionContext)),
   );
 
   const toolCalls = toolResults.map((result) => toToolCallSummary(result));
   const executedToolCount = toolCalls.length;
+
+  const toolExecutionErrors: ToolExecutionErrorDiagnostic[] = toolResults
+    .filter((result) => !result.success)
+    .map((result) => ({
+      toolName: result.toolName,
+      code: result.errorCode ?? "TOOL_EXECUTION_FAILED",
+      message: result.errors[0] ?? SAFE_WARNING_TOOL_FAILED,
+    }));
 
   let warnings = dedupe([
     ...planningWarnings,
@@ -1710,13 +3008,75 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
   const dataDerivedWarnings = deriveWarningsFromToolResults(toolResults);
   warnings = dedupe([...warnings, ...dataDerivedWarnings]);
 
+  const recommendationPresentation =
+    planningIntent === "PORTFOLIO_RECOMMENDATIONS"
+      ? buildPortfolioRecommendationsPresentation(toolResults)
+      : null;
+
+  const discoveryPresentation =
+    planningIntent === "MARKET_CANDIDATE_DISCOVERY"
+      ? buildDiscoveryCandidatesPresentation(toolResults)
+      : null;
+
+  if (planningIntent === "MARKET_CANDIDATE_DISCOVERY" && discoveryPresentation) {
+    const watchlistId = asOptionalConfiguredString(effectiveRequest.context.watchlistId);
+    if (watchlistId) {
+      const rankPayload = asRecord(
+        toolResults.find((result) => result.success && result.toolName === "rankDiscoveryCandidates")?.data,
+      );
+
+      const rankedCandidates = asRecordList(rankPayload?.rankedCandidates);
+      const recommendedCandidates = asRecordList(rankPayload?.recommendedCandidates);
+      const actionableCandidates =
+        recommendedCandidates.length > 0
+          ? recommendedCandidates
+          : rankedCandidates.filter((candidate) => asBoolean(candidate.qualifiesForRecommendation) === true);
+
+      const candidatesToSuggest = actionableCandidates
+        .filter((candidate) => candidate.alreadyInWatchlist !== true)
+        .slice(0, 3);
+
+      for (const candidate of candidatesToSuggest) {
+        const ticker = asString(candidate.ticker);
+        if (!ticker) {
+          continue;
+        }
+
+        const actionExists = suggestedActions.some((action) =>
+          action.toolName === "addTickerToWatchlist" &&
+          asString(action.input?.ticker)?.toUpperCase() === ticker.toUpperCase(),
+        );
+
+        if (actionExists) {
+          continue;
+        }
+
+        suggestedActions.push({
+          label: `Add ${ticker} to watchlist`,
+          toolName: "addTickerToWatchlist",
+          input: {
+            watchlistId,
+            ticker,
+            status: "CANDIDATE",
+            source: "AGENT",
+          },
+          requiresConfirmation: true,
+        });
+      }
+    }
+  }
+
   let answer = deterministicAnswer({
     intent: planningIntent,
     toolCalls,
+    toolResults,
+    recommendationPresentation,
+    discoveryPresentation,
     missingContext: planningMissingContext,
     clarifyingQuestion: planningClarifyingQuestion,
     warnings,
     suggestedActions,
+    isProduction: env.NODE_ENV === "production",
   });
 
   let confidence = deterministicConfidence(toolCalls, warnings, planningMissingContext);
@@ -1742,11 +3102,22 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
       const sanitized = sanitizeSuggestedActions(synthesis.synthesis.suggestedActions, message);
 
       answer = synthesis.synthesis.answer;
+      if (planningIntent === "PORTFOLIO_RECOMMENDATIONS" && recommendationPresentation) {
+        answer = recommendationPresentation.answer;
+      }
+      if (planningIntent === "MARKET_CANDIDATE_DISCOVERY" && discoveryPresentation) {
+        answer = discoveryPresentation.answer;
+      }
       confidence = synthesis.synthesis.confidence;
       warnings = dedupe([...warnings, ...synthesis.synthesis.warnings, ...sanitized.warnings]);
       suggestedActions = mergeRequiredActions(suggestedActions, sanitized.actions);
       mode = "OPENAI_PLANNED_SYNTHESIS";
       modelName = synthesis.modelName;
+      modelUsedForSynthesis = synthesis.modelName;
+
+      if (synthesis.primaryModelFailure) {
+        primaryFailureReason = toPrimaryFailureReason(synthesis.primaryModelFailure) ?? primaryFailureReason;
+      }
 
       if (synthesis.usedFallbackModel) {
         warnings = dedupe([
@@ -1777,6 +3148,7 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
 
       if (env.NODE_ENV !== "production") {
         if (error instanceof OpenAiAgentClientError) {
+          primaryFailureReason = toPrimaryFailureReason(error.failure) ?? primaryFailureReason;
           openAiDiagnostics = {
             openAiAttempted: true,
             openAiFailureStage: error.failure.stage,
@@ -1798,6 +3170,51 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
     }
   }
 
+  let responseWarnings = warnings;
+
+  if (env.NODE_ENV === "production") {
+    const safeWarnings = new Set<string>();
+
+    if (planningMissingContext.includes("portfolioId")) {
+      safeWarnings.add(SAFE_WARNING_PORTFOLIO_CONTEXT_MISSING);
+    }
+
+    for (const blockedTool of blockedTools) {
+      safeWarnings.add(safeWarningForBlockedReason(blockedTool.reason));
+    }
+
+    for (const executionError of toolExecutionErrors) {
+      safeWarnings.add(safeWarningForExecutionError(executionError));
+    }
+
+    const portfolioToolResults = toolResults
+      .filter((result) => isPortfolioScopedTool(result.toolName as AgentToolName));
+
+    const hasPortfolioToolNoData =
+      isPortfolioContextIntent(planningIntent) &&
+      planningMissingContext.length === 0 &&
+      portfolioToolResults.length > 0 &&
+      portfolioToolResults.every((result) => !result.success || result.data == null);
+
+    if (hasPortfolioToolNoData) {
+      safeWarnings.add(SAFE_WARNING_PORTFOLIO_NO_DATA);
+    }
+
+    if (warnings.some((warning) =>
+      warning.toLowerCase().includes("openai planner failed") ||
+      warning.toLowerCase().includes("openai synthesis failed") ||
+      warning.toLowerCase().includes("tool execution failed"),
+    )) {
+      safeWarnings.add(SAFE_WARNING_TOOL_FAILED);
+    }
+
+    if (warnings.some((warning) => warning.toLowerCase().includes("fallback model was used"))) {
+      safeWarnings.add(SAFE_WARNING_MODEL_FALLBACK_USED);
+    }
+
+    responseWarnings = [...safeWarnings];
+  }
+
   const finishedAtDate = new Date();
 
   return {
@@ -1805,22 +3222,36 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
     intent: planningIntent,
     toolCalls,
     suggestedActions: addConfirmationPolicy(suggestedActions),
-    warnings,
+    recommendationCards: recommendationPresentation?.recommendationCards,
+    warnings: responseWarnings,
     missingContext: planningMissingContext,
     confidence,
     metadata: {
       mode,
       modelName,
+      primaryModelName,
+      fallbackModelName,
+      modelUsedForPlanning,
+      modelUsedForSynthesis,
+      primaryFailureReason: env.NODE_ENV !== "production" ? primaryFailureReason : undefined,
       fallbackUsed,
       plannerUsed,
       plannerFallbackUsed,
       plannedToolCount,
       executedToolCount,
       droppedToolCount,
+      effectiveMaxToolCalls,
       fallbackReason,
       openAiProviderEnabled: env.NODE_ENV !== "production" ? openAiProviderEnabled : undefined,
       openAiKeyConfigured: env.NODE_ENV !== "production" ? openAiKeyConfigured : undefined,
       plannerSkipReason: env.NODE_ENV !== "production" ? plannerSkipReason : undefined,
+      openAiRequestLimitsConfigured:
+        env.NODE_ENV !== "production" ? openAiUsageLimitsConfigured : undefined,
+      openAiRequestLimitReason:
+        env.NODE_ENV !== "production" ? openAiUsageLimitReason : undefined,
+      blockedToolCount: env.NODE_ENV !== "production" ? blockedToolCount : undefined,
+      blockedTools: env.NODE_ENV !== "production" ? blockedTools : undefined,
+      toolExecutionErrors: env.NODE_ENV !== "production" ? toolExecutionErrors : undefined,
       receivedContextKeys: env.NODE_ENV !== "production" ? receivedContextKeys : undefined,
       receivedPortfolioIdConfigured: env.NODE_ENV !== "production" ? receivedPortfolioIdConfigured : undefined,
       receivedWatchlistIdConfigured: env.NODE_ENV !== "production" ? receivedWatchlistIdConfigured : undefined,

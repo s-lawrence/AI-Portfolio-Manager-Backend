@@ -1277,6 +1277,14 @@ describe("real-data-ingestion.service", () => {
           },
         ],
         failedTickers: [],
+        analystWarningsSummary: {
+          entitlementIssuesCount: 0,
+          noDataCount: 0,
+          noRecordsCount: 0,
+          affectedTickers: [],
+          examples: [],
+        },
+        rawWarnings: [],
         warnings: [],
       });
 
@@ -1291,6 +1299,60 @@ describe("real-data-ingestion.service", () => {
     expect(analystSpy).toHaveBeenCalledWith(portfolio.id);
     expect(result.analystData).toBeDefined();
     expect(result.analystData?.snapshotsCreated).toBe(1);
+  });
+
+  it("full-refresh keeps analyst warnings bounded and exposes aggregated summary plus raw detail", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRANSUM");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    vi.spyOn(analystIngestionService, "ingestPortfolioAnalystData").mockResolvedValue({
+      portfolioId: portfolio.id,
+      startedAt: new Date("2026-06-20T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-20T00:00:01.000Z").toISOString(),
+      durationMs: 1000,
+      tickersProcessed: 1,
+      tickersFailed: 0,
+      snapshotsCreated: 0,
+      snapshotsUpdated: 0,
+      actionsCreated: 0,
+      actionsUpdated: 0,
+      results: [],
+      failedTickers: [],
+      analystWarningsSummary: {
+        entitlementIssuesCount: 3,
+        noDataCount: 4,
+        noRecordsCount: 2,
+        affectedTickers: [stock.ticker],
+        examples: [
+          `${stock.ticker}: Price-target summary entitlement/configuration issue: Financial Modeling Prep endpoint is not available for the current plan.`,
+        ],
+      },
+      rawWarnings: Array.from({ length: 18 }, (_, index) => `${stock.ticker}: raw-warning-${index + 1}`),
+      warnings: [
+        "Analyst data unavailable for some tickers under current FMP plan.",
+        "Analyst provider returned no data for 4 ticker/category combination(s).",
+        "Analyst provider returned no records for 2 ticker/category combination(s).",
+      ],
+    });
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeAnalystData: true,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(result.analystData).toBeDefined();
+    expect(result.analystData?.warnings.length).toBeLessThanOrEqual(5);
+    expect(result.analystData?.rawWarnings.length).toBe(18);
+    expect(result.analystWarningsSummary?.entitlementIssuesCount).toBe(3);
+    expect(result.analystWarningsSummary?.noDataCount).toBe(4);
+    expect(result.analystWarningsSummary?.noRecordsCount).toBe(2);
+    expect(result.warnings.some((warning) => warning.includes("Analyst-data ingestion"))).toBe(true);
   });
 
   it("full-refresh omits analyst data and skips analyst ingestion when includeAnalystData=false", async () => {
@@ -1379,6 +1441,34 @@ describe("real-data-ingestion.service", () => {
 
     expect(geopoliticalSpy).not.toHaveBeenCalled();
     expect(result.geopolitical).toBeUndefined();
+  });
+
+  it("full-refresh remains non-blocking when GDELT ingestion throws", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTFMPFRGDX");
+
+    await createTestHolding(portfolio.id, stock.id);
+    mockSuccessfulFullRefreshProviders(stock.ticker);
+
+    vi.spyOn(geopoliticalIngestionService, "ingestDefaultGdeltRiskSet").mockRejectedValue(
+      new Error("GDELT provider unavailable"),
+    );
+
+    const result = await ingestPortfolioFmpFullRefresh(portfolio.id, {
+      includeGdelt: true,
+      includeEconomics: false,
+      includeBankOfCanada: false,
+      includeFred: false,
+      runAnalysis: false,
+    });
+
+    expect(result.marketData).toBeDefined();
+    expect(result.fundamentals).toBeDefined();
+    expect(result.earnings).toBeDefined();
+    expect(result.news).toBeDefined();
+    expect(result.geopolitical).toBeDefined();
+    expect(result.geopolitical?.queriesFailed).toBe(1);
+    expect(result.geopolitical?.failedQueries[0]?.query).toBe("DEFAULT_GLOBAL_RISK_SET");
   });
 
   it("full-refresh omits economics and does not call economics ingestion when includeEconomics=false", async () => {

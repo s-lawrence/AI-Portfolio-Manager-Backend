@@ -57,6 +57,36 @@ async function createPortfolioWithTickers(tickers: string[]): Promise<{
 }
 
 describe("API reports routes", () => {
+  it("accepts extended generate options and returns report metadata", async () => {
+    const { app, portfolioId } = await createPortfolioWithTickers(["NVDA"]);
+
+    const generateResponse = await app.inject({
+      method: "POST",
+      url: "/api/reports/NVDA/generate",
+      payload: {
+        portfolioId,
+        useOpenAi: false,
+        refreshBeforeGenerate: false,
+        includeMacro: false,
+        includeGeopolitical: false,
+        includeNews: true,
+        includeAnalyst: true,
+        includeScore: true,
+        createPredictions: false,
+      },
+    });
+
+    expect(generateResponse.statusCode).toBe(201);
+    const body = generateResponse.json();
+    expect(body.success).toBe(true);
+    expect(body.data.report.id).toBeDefined();
+    expect(body.data.reportMode).toBeDefined();
+    expect(Array.isArray(body.data.predictions)).toBe(true);
+    expect(body.data.predictions).toHaveLength(0);
+
+    await app.close();
+  });
+
   it("filters report list by ticker and includes stock metadata", async () => {
     const { app } = await createPortfolioWithTickers(["AAPL", "MSFT"]);
 

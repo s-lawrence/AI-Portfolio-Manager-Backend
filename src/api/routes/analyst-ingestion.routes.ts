@@ -1,5 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 
+import {
+  assertPortfolioOwnership,
+  assertWatchlistOwnership,
+  isAuthEnabled,
+  requireAuth,
+} from "../../auth";
 import {
   getLatestTickerAnalystSnapshot,
   ingestPortfolioAnalystData,
@@ -17,8 +23,31 @@ import {
   analystWatchlistParamsSchema,
 } from "../schemas/analyst-ingestion.schemas";
 
+async function enforceAnalystRefreshAccess(
+  request: FastifyRequest,
+  options: {
+    portfolioId?: string;
+    watchlistId?: string;
+  } = {},
+): Promise<void> {
+  if (!isAuthEnabled()) {
+    return;
+  }
+
+  await requireAuth(request);
+
+  if (options.portfolioId) {
+    await assertPortfolioOwnership(request, options.portfolioId);
+  }
+
+  if (options.watchlistId) {
+    await assertWatchlistOwnership(request, options.watchlistId);
+  }
+}
+
 export async function analystIngestionRoutes(app: FastifyInstance): Promise<void> {
   app.post("/ingestion/fmp/ticker/:ticker/analyst", async (request, reply) => {
+    await runService(() => enforceAnalystRefreshAccess(request));
     const params = analystTickerParamsSchema.parse(request.params);
     analystIngestionBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
@@ -31,6 +60,9 @@ export async function analystIngestionRoutes(app: FastifyInstance): Promise<void
 
   app.post("/ingestion/fmp/portfolio/:portfolioId/analyst", async (request, reply) => {
     const params = analystPortfolioParamsSchema.parse(request.params);
+    await runService(() =>
+      enforceAnalystRefreshAccess(request, { portfolioId: params.portfolioId }),
+    );
     analystIngestionBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );
@@ -42,6 +74,9 @@ export async function analystIngestionRoutes(app: FastifyInstance): Promise<void
 
   app.post("/ingestion/fmp/watchlist/:watchlistId/analyst", async (request, reply) => {
     const params = analystWatchlistParamsSchema.parse(request.params);
+    await runService(() =>
+      enforceAnalystRefreshAccess(request, { watchlistId: params.watchlistId }),
+    );
     analystIngestionBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );

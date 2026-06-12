@@ -26,6 +26,8 @@ function optionalUrlWithDefault(defaultUrl: string) {
   return z.preprocess(blankToUndefined, z.string().url().default(defaultUrl));
 }
 
+const optionalUrl = z.preprocess(blankToUndefined, z.string().url().optional());
+
 const booleanFlag = z.preprocess((value) => {
   if (typeof value === "boolean") {
     return value;
@@ -52,7 +54,19 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   HOST: z.string().trim().min(1).default("0.0.0.0"),
   DATABASE_URL: z.string().trim().min(1, "DATABASE_URL is required"),
+  APP_BASE_URL: optionalUrl,
+  BACKEND_BASE_URL: optionalUrl,
+  FRONTEND_BASE_URL: z.string().url().default("http://localhost:3000"),
   FRONTEND_ORIGIN: z.string().url().default("http://localhost:3000"),
+  CORS_ALLOWED_ORIGINS: optionalNonEmptyString,
+  AUTH_ENABLED: booleanFlag.default(false),
+  AUTH_SESSION_SECRET: optionalSecretString,
+  AUTH_COOKIE_SECURE: booleanFlag.optional(),
+  AUTH_COOKIE_SAME_SITE: z
+    .preprocess(blankToUndefined, z.enum(["strict", "lax", "none"]).optional()),
+  GOOGLE_CLIENT_ID: optionalNonEmptyString,
+  GOOGLE_CLIENT_SECRET: optionalSecretString,
+  GOOGLE_REDIRECT_URI: z.preprocess(blankToUndefined, z.string().url().optional()),
   FMP_API_KEY: optionalSecretString,
   FMP_BASE_URL: optionalUrlWithDefault("https://financialmodelingprep.com/stable"),
   PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(20000),
@@ -71,8 +85,11 @@ const envSchema = z.object({
   OPENAI_DEEP_RESEARCH_MODEL: z.string().trim().min(1).default("gpt-5.5"),
   OPENAI_AGENT_ENABLE_ESCALATION: booleanFlag.default(false),
   OPENAI_AGENT_MAX_TOOL_CALLS: z.coerce.number().int().positive().max(20).default(5),
+  OPENAI_AGENT_MAX_COMPLETION_TOKENS: z.coerce.number().int().positive().max(16384).optional(),
   OPENAI_AGENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   OPENAI_AGENT_PROVIDER_ENABLED: booleanFlag.default(false),
+  OPENAI_DAILY_REQUEST_LIMIT_PER_USER: z.coerce.number().int().positive().optional(),
+  OPENAI_MONTHLY_REQUEST_LIMIT_GLOBAL: z.coerce.number().int().positive().optional(),
   PRINT_ROUTES_ON_STARTUP: booleanFlag.default(false),
 });
 
@@ -86,5 +103,14 @@ if (!parsed.success) {
 }
 
 export const env = parsed.data;
+
+if (!env.APP_BASE_URL && !env.BACKEND_BASE_URL) {
+  env.APP_BASE_URL = "http://localhost:4000";
+  env.BACKEND_BASE_URL = "http://localhost:4000";
+} else if (!env.APP_BASE_URL && env.BACKEND_BASE_URL) {
+  env.APP_BASE_URL = env.BACKEND_BASE_URL;
+} else if (env.APP_BASE_URL && !env.BACKEND_BASE_URL) {
+  env.BACKEND_BASE_URL = env.APP_BASE_URL;
+}
 
 export type Env = typeof env;

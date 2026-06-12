@@ -17,6 +17,12 @@ export const createPortfolioBodySchema = z.object({
   baseCurrency: z.string().trim().min(1).max(10).optional(),
 });
 
+// Route-level create schema used by auth-aware handlers. Keep userId optional here
+// and enforce auth-mode-specific requirements in route logic.
+export const createPortfolioRouteBodySchema = createPortfolioBodySchema.partial({
+  userId: true,
+});
+
 export const updatePortfolioBodySchema = z
   .object({
     name: z.string().trim().min(1).optional(),

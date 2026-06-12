@@ -27,10 +27,12 @@ function mockToolResult(toolName: string, data: Record<string, unknown> = {}) {
 describe("API agent chat route", () => {
   const originalProviderEnabled = env.OPENAI_AGENT_PROVIDER_ENABLED;
   const originalApiKey = env.OPENAI_API_KEY;
+  const originalNodeEnv = env.NODE_ENV;
 
   afterEach(() => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = originalProviderEnabled;
     env.OPENAI_API_KEY = originalApiKey;
+    env.NODE_ENV = originalNodeEnv;
     vi.restoreAllMocks();
   });
 
@@ -93,6 +95,62 @@ describe("API agent chat route", () => {
     const body = response.json();
     expect(body.success).toBe(false);
     expect(body.error.code).toBe("VALIDATION_ERROR");
+
+    await app.close();
+  });
+
+  it("normalizes array-form confirmedToolInputs before invoking runAgentChat", async () => {
+    const runChatSpy = vi.spyOn(agentChatService, "runAgentChat").mockResolvedValue({
+      answer: "normalized",
+      intent: "CONFIRM_TOOL_EXECUTION",
+      toolCalls: [],
+      suggestedActions: [],
+      warnings: [],
+      missingContext: [],
+      confidence: "MEDIUM",
+      metadata: {
+        mode: "DETERMINISTIC_ROUTER",
+        fallbackUsed: false,
+        plannerUsed: false,
+        plannerFallbackUsed: false,
+        plannedToolCount: 0,
+        executedToolCount: 0,
+        droppedToolCount: 0,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 3,
+      },
+    });
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/chat",
+      payload: {
+        message: "Confirm refresh",
+        context: {
+          source: "USER",
+        },
+        confirmedToolExecutions: ["refreshDiscoveryCategory"],
+        confirmedToolInputs: [
+          {
+            toolName: "refreshDiscoveryCategory",
+            input: {
+              category: "LOSERS",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(runChatSpy).toHaveBeenCalledWith(expect.objectContaining({
+      confirmedToolInputs: expect.objectContaining({
+        refreshDiscoveryCategory: expect.objectContaining({
+          category: "LOSERS",
+        }),
+      }),
+    }));
 
     await app.close();
   });
@@ -303,6 +361,65 @@ describe("API agent chat route", () => {
     expect(body.success).toBe(true);
     expect(body.data.missingContext).toContain("portfolioId");
     expect(body.data.metadata.canonicalPortfolioIdConfigured).toBe(false);
+
+    await app.close();
+  });
+
+  it("hides OpenAI diagnostics/debug metadata in production responses", async () => {
+    env.NODE_ENV = "production";
+
+    vi.spyOn(agentChatService, "runAgentChat").mockResolvedValue({
+      answer: "Deterministic summary",
+      intent: "RESEARCH_TICKER",
+      toolCalls: [],
+      suggestedActions: [],
+      warnings: [],
+      missingContext: [],
+      confidence: "MEDIUM",
+      metadata: {
+        mode: "DETERMINISTIC_ROUTER",
+        fallbackUsed: true,
+        plannerUsed: false,
+        plannerFallbackUsed: false,
+        plannedToolCount: 0,
+        executedToolCount: 0,
+        droppedToolCount: 0,
+        effectiveMaxToolCalls: 5,
+        openAiProviderEnabled: true,
+        openAiKeyConfigured: true,
+        plannerSkipReason: "API_KEY_MISSING",
+        openAiRequestLimitsConfigured: true,
+        openAiRequestLimitReason: "DAILY_USER_LIMIT",
+        openAiDiagnostics: {
+          openAiAttempted: true,
+          openAiFailureStage: "REQUEST_FAILED",
+          openAiErrorCode: "mock-error",
+        },
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 5,
+      },
+    });
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/chat",
+      payload: {
+        message: "Research AAPL",
+        context: {
+          source: "USER",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.metadata.openAiDiagnostics).toBeUndefined();
+    expect(body.data.metadata.openAiProviderEnabled).toBeUndefined();
+    expect(body.data.metadata.openAiKeyConfigured).toBeUndefined();
+    expect(body.data.metadata.plannerSkipReason).toBeUndefined();
 
     await app.close();
   });

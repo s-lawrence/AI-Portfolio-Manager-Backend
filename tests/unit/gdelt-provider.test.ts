@@ -138,7 +138,7 @@ describe("gdelt.provider", () => {
       maxRecords: 20,
     });
 
-    expect(calledQueries.length).toBeGreaterThan(3);
+    expect(calledQueries.length).toBe(2);
     expect(events.length).toBeGreaterThan(0);
   });
 

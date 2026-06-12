@@ -25,6 +25,51 @@ export async function listStocks(): Promise<Stock[]> {
   });
 }
 
+export async function listStocksByTickers(tickers: string[]): Promise<Stock[]> {
+  const normalizedTickers = Array.from(new Set(
+    tickers
+      .map((ticker) => ticker.trim())
+      .filter((ticker) => ticker.length > 0)
+      .map((ticker) => normalizeTickerOrThrow(ticker)),
+  ));
+
+  if (normalizedTickers.length === 0) {
+    return [];
+  }
+
+  return prisma.stock.findMany({
+    where: {
+      ticker: {
+        in: normalizedTickers,
+      },
+    },
+    orderBy: { ticker: "asc" },
+  });
+}
+
+export async function searchStocksByIdentity(
+  query: string,
+  limit?: number,
+): Promise<Stock[]> {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  const take = normalizeListLimit(limit);
+
+  return prisma.stock.findMany({
+    where: {
+      OR: [
+        { ticker: { contains: trimmedQuery, mode: "insensitive" } },
+        { companyName: { contains: trimmedQuery, mode: "insensitive" } },
+      ],
+    },
+    orderBy: { ticker: "asc" },
+    take,
+  });
+}
+
 export async function searchStocks(query: string): Promise<Stock[]> {
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {

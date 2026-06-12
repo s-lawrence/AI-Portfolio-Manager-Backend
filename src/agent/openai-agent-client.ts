@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { ZodIssue, ZodSchema } from "zod";
+import { z, type ZodIssue, type ZodSchema } from "zod";
 
 import { env } from "../config/env";
 import {
@@ -28,6 +28,23 @@ const OPENAI_SYNTHESIS_SYSTEM_PROMPT = [
   "If tool results indicate missing FX rates or USD/CAD conversion gaps, prefer suggesting refreshUsdCadFxRate.",
   "Never suggest refreshTickerAnalystData for FX, USD, CAD, or USD/CAD pseudo-tickers.",
   "Use refreshGdeltRiskContext suggestions only for explicitly geopolitical/headline-risk follow-ups.",
+  "For portfolio recommendation/ranking questions, prioritize rankPortfolioHoldings results when present.",
+  "If rankPortfolioHoldings returned rankedHoldings, do not claim metrics are unavailable.",
+  "For new-holding discovery requests, prioritize rankDiscoveryCandidates results when present.",
+  "If rankDiscoveryCandidates returned rankedCandidates, do not claim you cannot name candidates.",
+  "When rankDiscoveryCandidates includes portfolio-fit notes or caveats, surface them clearly and succinctly.",
+  "When rankDiscoveryCandidates includes suggestedRefreshActions, suggest them as confirmation-required actions.",
+  "For portfolio recommendation/ranking output, avoid one dense inline paragraph.",
+  "Use concise numbered sections for top three names.",
+  "For each ranked holding include ticker, optional company name, translated action label, score to 1 decimal, and concise reasons/caution.",
+  "Translate stance labels: CANDIDATE/STRONG_CANDIDATE => Review candidate; WATCH => Hold/monitor; HOLD_OFF/AVOID/REDUCE => Risk review / avoid adding.",
+  "If missing/stale data is material, label the item as data cleanup needed.",
+  "Mention when top scores are close and rank order is not a conviction guarantee.",
+  "Include portfolio-level caveats for concentration, sector concentration, missing data, and FX/currency issues when present.",
+  "Explain reconciliation when concentration risk is high: candidates may be swaps/re-sizing ideas, not automatic net additions.",
+  "Always end with: Decision support only, not a buy/sell instruction.",
+  "Never imply guaranteed buy/sell outcomes.",
+  "Frame output as decision support, not financial advice.",
   "Keep the answer concise and actionable.",
   "Return strict JSON with keys: answer, confidence, warnings, suggestedActions.",
 ].join(" ");
@@ -46,10 +63,80 @@ const OPENAI_TOOL_PLANNER_SYSTEM_PROMPT = [
   "Never plan refreshTickerAnalystData with ticker values FX, USD, CAD, or USD/CAD.",
   "Use refreshUsdCadFxRate when the user asks to refresh USD/CAD or missing FX conversion data.",
   "Use refreshGdeltRiskContext only for explicitly geopolitical risk/news requests.",
+  "For portfolio recommendation/ranking prompts, plan rankPortfolioHoldings (limit 3), getPortfolioRiskSnapshot, and getPortfolioDataQuality.",
+  "For portfolio recommendation/ranking prompts, do not return a plan that only calls getPortfolioOverview.",
+  "For new-holding discovery prompts, plan rankDiscoveryCandidates plus getPortfolioOverview, getPortfolioRiskSnapshot, and getPortfolioDataQuality when portfolio context exists.",
+  "For new-holding discovery prompts, include watchlistId in rankDiscoveryCandidates input when available.",
   "Ask for missing portfolio/watchlist/ticker context when needed.",
   "Do not invent data, tools, or provider/API calls.",
   "Return only JSON matching keys: intent, needsTools, toolCalls, missingContext, requiresConfirmation, clarifyingQuestion.",
 ].join(" ");
+
+const OPENAI_TICKER_REPORT_SYSTEM_PROMPT = [
+  "You are generating a structured ticker research report for a portfolio research backend.",
+  "Use only supplied context fields. Never fabricate prices, targets, ratings, earnings, macro, geopolitical, or portfolio/watchlist facts.",
+  "Clearly separate observed data from interpretation.",
+  "If data is missing or stale, mention it in dataGaps and lower conviction.",
+  "If data quality is poor, conviction must be LOW.",
+  "Treat deterministic score as one signal, not absolute truth.",
+  "Do not provide direct financial advice or guaranteed outcomes.",
+  "Do not issue imperatives like 'you should buy now'.",
+  "Do not invent price targets; only mention targets when present in analyst context.",
+  "If evidence is mixed, recommendation should usually be WATCH or HOLD.",
+  "If portfolio context is present, include concise portfolio-fit notes.",
+  "All arrays must have at most 5 concise items.",
+  "Return strict JSON matching the required schema.",
+].join(" ");
+
+const reportNoteSchema = z.string().trim().min(1).max(280);
+const reportNotesArraySchema = z.array(reportNoteSchema).max(5).default([]);
+const nullableScoreSchema = z.number().finite().nullable();
+
+export const openAiTickerReportOutputSchema = z.object({
+  ticker: z.string().trim().min(1).max(20),
+  asOf: z.string().trim().min(1).max(80),
+  executiveSummary: z.string().trim().min(1).max(1400),
+  recommendation: z.enum(["BUY", "HOLD", "SELL", "WATCH", "AVOID"]),
+  conviction: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  timeHorizon: z.enum(["SHORT", "MEDIUM", "LONG"]),
+  scoreSummary: z.object({
+    compositeScore: nullableScoreSchema,
+    technicalScore: nullableScoreSchema,
+    fundamentalScore: nullableScoreSchema,
+    valuationScore: nullableScoreSchema,
+    analystScore: nullableScoreSchema,
+    newsScore: nullableScoreSchema,
+    dataQualityScore: nullableScoreSchema,
+  }),
+  bullCase: reportNotesArraySchema,
+  bearCase: reportNotesArraySchema,
+  keyCatalysts: reportNotesArraySchema,
+  keyRisks: reportNotesArraySchema,
+  valuationNotes: reportNotesArraySchema,
+  technicalNotes: reportNotesArraySchema,
+  analystNotes: reportNotesArraySchema,
+  newsSentimentNotes: reportNotesArraySchema,
+  earningsNotes: reportNotesArraySchema,
+  macroGeopoliticalNotes: reportNotesArraySchema,
+  portfolioFit: reportNotesArraySchema,
+  dataGaps: reportNotesArraySchema,
+  watchItems: reportNotesArraySchema,
+  suggestedNextActions: reportNotesArraySchema,
+  disclaimer: z.string().trim().min(1).max(500),
+});
+
+export type OpenAiTickerReportOutput = z.infer<typeof openAiTickerReportOutputSchema>;
+
+export interface OpenAiTickerReportInput {
+  context: unknown;
+}
+
+export interface GenerateTickerReportResult {
+  report: OpenAiTickerReportOutput;
+  modelName: string;
+  usedFallbackModel: boolean;
+  primaryModelFailure?: OpenAiFailureDiagnostic;
+}
 
 const openAiClient = env.OPENAI_API_KEY
   ? new OpenAI({
@@ -163,6 +250,40 @@ function isUnsupportedModelError(error: unknown): boolean {
     (status === 400 || status === 404) &&
     (code.includes("model") || message.includes("model"))
   );
+}
+
+function isUnsupportedParameterError(error: unknown): boolean {
+  if (error == null || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    status?: number;
+    code?: string;
+    message?: string;
+    error?: { code?: string; message?: string };
+  };
+
+  const status = candidate.status;
+  const code = (candidate.code ?? candidate.error?.code ?? "").toLowerCase();
+  const message = (candidate.message ?? candidate.error?.message ?? "").toLowerCase();
+
+  return (
+    status === 400 &&
+    (
+      code.includes("unsupported_parameter") ||
+      message.includes("unsupported parameter") ||
+      message.includes("unknown parameter")
+    )
+  );
+}
+
+function shouldFallbackOnPrimaryFailure(error: OpenAiAgentClientError): boolean {
+  if (error.failure.stage === "UNSUPPORTED_MODEL") {
+    return true;
+  }
+
+  return (error.failure.errorCode ?? "").toLowerCase() === "unsupported_parameter";
 }
 
 function isTransientOpenAiError(error: unknown): boolean {
@@ -530,31 +651,60 @@ async function requestJsonCompletion(
   const timeoutHandle = setTimeout(() => timeoutController.abort(), env.OPENAI_AGENT_TIMEOUT_MS);
 
   try {
-    const response = await openAiClient.chat.completions.create(
-      {
-        model: modelName,
-        temperature: input.temperature,
-        response_format: {
-          type: "json_object",
+    const requestPayload: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
+      model: modelName,
+      temperature: input.temperature,
+      response_format: {
+        type: "json_object",
+      },
+      messages: [
+        {
+          role: "system",
+          content: input.systemPrompt,
         },
-        messages: [
-          {
-            role: "system",
-            content: input.systemPrompt,
-          },
-          {
-            role: "user",
-            content: [
-              "Return only JSON. Do not wrap in markdown fences.",
-              JSON.stringify(input.payload),
-            ].join("\n\n"),
-          },
-        ],
-      },
-      {
-        signal: timeoutController.signal,
-      },
-    );
+        {
+          role: "user",
+          content: [
+            "Return only JSON. Do not wrap in markdown fences.",
+            JSON.stringify(input.payload),
+          ].join("\n\n"),
+        },
+      ],
+    };
+
+    if (typeof env.OPENAI_AGENT_MAX_COMPLETION_TOKENS === "number") {
+      requestPayload.max_tokens = env.OPENAI_AGENT_MAX_COMPLETION_TOKENS;
+    }
+
+    let response: Awaited<ReturnType<typeof openAiClient.chat.completions.create>>;
+    try {
+      response = await openAiClient.chat.completions.create(
+        requestPayload,
+        {
+          signal: timeoutController.signal,
+        },
+      );
+    } catch (error) {
+      const canRetryWithoutMaxTokens =
+        typeof requestPayload.max_tokens === "number" &&
+        isUnsupportedParameterError(error);
+
+      if (!canRetryWithoutMaxTokens) {
+        throw error;
+      }
+
+      const fallbackPayload: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
+        ...requestPayload,
+      };
+      delete fallbackPayload.max_tokens;
+
+      response = await openAiClient.chat.completions.create(
+        fallbackPayload,
+        {
+          signal: timeoutController.signal,
+        },
+      );
+    }
 
     const content = readAssistantContent(response);
     if (!content) {
@@ -597,6 +747,19 @@ async function requestJsonCompletion(
           modelName,
         },
         "OpenAI model is unavailable for this account.",
+      );
+    }
+
+    if (isUnsupportedParameterError(error)) {
+      const { errorCode, status } = readErrorCodeAndStatus(error);
+      throw new OpenAiAgentClientError(
+        {
+          stage: "REQUEST_FAILED",
+          errorCode: errorCode ?? "unsupported_parameter",
+          status,
+          modelName,
+        },
+        "OpenAI rejected an unsupported request parameter.",
       );
     }
 
@@ -657,6 +820,22 @@ async function requestToolPlan(
   return parseToolPlanResponse(content, modelName);
 }
 
+async function requestTickerReport(
+  input: OpenAiTickerReportInput,
+  modelName: string,
+): Promise<OpenAiTickerReportOutput> {
+  const content = await requestJsonCompletion({
+    systemPrompt: OPENAI_TICKER_REPORT_SYSTEM_PROMPT,
+    payload: {
+      context: input.context,
+    },
+    modelName,
+    temperature: 0.1,
+  });
+
+  return parseStructuredResponse(content, modelName, openAiTickerReportOutputSchema);
+}
+
 async function requestWithRetry<T>(operation: () => Promise<T>): Promise<T> {
   const maxAttempts = 2;
 
@@ -706,7 +885,7 @@ async function requestWithFallbackModel<T>(
   } catch (error) {
     if (
       error instanceof OpenAiAgentClientError &&
-      error.failure.stage === "UNSUPPORTED_MODEL" &&
+      shouldFallbackOnPrimaryFailure(error) &&
       fallbackModel &&
       fallbackModel !== primaryModel
     ) {
@@ -727,6 +906,53 @@ async function requestWithFallbackModel<T>(
       {
         stage: "UNKNOWN",
         modelName: primaryModel,
+      },
+      "Unknown OpenAI failure.",
+    );
+  }
+}
+
+async function requestWithNamedModels<T>(input: {
+  requester: (modelName: string) => Promise<T>;
+  primaryModel: string;
+  fallbackModel?: string;
+}): Promise<{
+  data: T;
+  modelName: string;
+  usedFallbackModel: boolean;
+  primaryModelFailure?: OpenAiFailureDiagnostic;
+}> {
+  try {
+    const data = await requestWithRetry(() => input.requester(input.primaryModel));
+    return {
+      data,
+      modelName: input.primaryModel,
+      usedFallbackModel: false,
+    };
+  } catch (error) {
+    if (
+      error instanceof OpenAiAgentClientError &&
+      shouldFallbackOnPrimaryFailure(error) &&
+      input.fallbackModel &&
+      input.fallbackModel !== input.primaryModel
+    ) {
+      const data = await requestWithRetry(() => input.requester(input.fallbackModel!));
+      return {
+        data,
+        modelName: input.fallbackModel,
+        usedFallbackModel: true,
+        primaryModelFailure: error.failure,
+      };
+    }
+
+    if (error instanceof OpenAiAgentClientError) {
+      throw error;
+    }
+
+    throw new OpenAiAgentClientError(
+      {
+        stage: "UNKNOWN",
+        modelName: input.primaryModel,
       },
       "Unknown OpenAI failure.",
     );
@@ -757,13 +983,19 @@ export async function generateToolPlan(
   };
 }
 
-export async function generateTickerReport(): Promise<never> {
-  throw new OpenAiAgentClientError(
-    {
-      stage: "REQUEST_FAILED",
-      errorCode: "OPENAI_NOT_IMPLEMENTED",
-      modelName: env.OPENAI_REPORT_MODEL,
-    },
-    "OpenAI ticker report generation is not implemented in this pass.",
-  );
+export async function generateTickerReport(
+  input: OpenAiTickerReportInput,
+): Promise<GenerateTickerReportResult> {
+  const result = await requestWithNamedModels({
+    requester: (modelName) => requestTickerReport(input, modelName),
+    primaryModel: env.OPENAI_REPORT_MODEL,
+    fallbackModel: env.OPENAI_AGENT_MODEL_FALLBACK || undefined,
+  });
+
+  return {
+    report: result.data,
+    modelName: result.modelName,
+    usedFallbackModel: result.usedFallbackModel,
+    primaryModelFailure: result.primaryModelFailure,
+  };
 }

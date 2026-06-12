@@ -488,6 +488,199 @@ describe("research-scoring.service", () => {
     expect(result.scores.map((entry) => entry.ticker)).toEqual(["AAPL", "MSFT", "NVDA"]);
   });
 
+  it("rankPortfolioHoldings scores multiple holdings and returns top three", async () => {
+    vi.spyOn(portfoliosService, "getPortfolioOverview").mockResolvedValue({
+      portfolio: { id: "portfolio-1" },
+      holdings: [
+        {
+          ticker: "AAA",
+          companyName: "AAA Corp",
+          shares: 10,
+          marketValueNative: 1000,
+          marketValueCad: 1000,
+          latestPrice: 100,
+          latestPriceCapturedAt: new Date(),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "TECH",
+          latestRecommendation: "BUY",
+          latestReportDate: new Date(),
+          status: HoldingStatus.OWNED,
+        },
+        {
+          ticker: "BBB",
+          companyName: "BBB Corp",
+          shares: 10,
+          marketValueNative: 900,
+          marketValueCad: 900,
+          latestPrice: 90,
+          latestPriceCapturedAt: new Date(),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "INDUSTRIALS",
+          latestRecommendation: "HOLD",
+          latestReportDate: new Date(),
+          status: HoldingStatus.OWNED,
+        },
+        {
+          ticker: "CCC",
+          companyName: "CCC Corp",
+          shares: 10,
+          marketValueNative: 800,
+          marketValueCad: 800,
+          latestPrice: 80,
+          latestPriceCapturedAt: new Date(),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "ENERGY",
+          latestRecommendation: "HOLD",
+          latestReportDate: new Date(),
+          status: HoldingStatus.OWNED,
+        },
+        {
+          ticker: "DDD",
+          companyName: "DDD Corp",
+          shares: 10,
+          marketValueNative: 700,
+          marketValueCad: 700,
+          latestPrice: 70,
+          latestPriceCapturedAt: new Date(),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "FINANCIALS",
+          latestRecommendation: "HOLD",
+          latestReportDate: new Date(),
+          status: HoldingStatus.OWNED,
+        },
+      ],
+      holdingCount: 4,
+      fxRateUsed: null,
+      holdingsMissingFx: [],
+      holdingsUnsupportedCurrency: [],
+    } as never);
+
+    vi.spyOn(stocksService, "getStockResearchBundle").mockImplementation(async (ticker: string) => {
+      if (ticker === "AAA") {
+        return buildBundle({
+          stock: { ticker: "AAA" },
+          latestAnalystSnapshot: {
+            upsidePercent: 25,
+            ratingConsensus: "Strong Buy",
+            strongBuyCount: 12,
+            buyCount: 8,
+            holdCount: 1,
+            sellCount: 0,
+            strongSellCount: 0,
+            capturedAt: new Date(),
+          },
+        }) as never;
+      }
+
+      if (ticker === "CCC") {
+        return buildBundle({
+          stock: { ticker: "CCC" },
+          latestTechnicalSnapshot: {
+            sma50: 210,
+            sma200: 230,
+            rsi14: 82,
+            macd: -0.8,
+            trendDirection: "DOWNTREND",
+            capturedAt: new Date(),
+          },
+          latestAnalystSnapshot: {
+            upsidePercent: -18,
+            ratingConsensus: "Sell",
+            strongBuyCount: 0,
+            buyCount: 1,
+            holdCount: 4,
+            sellCount: 6,
+            strongSellCount: 3,
+            capturedAt: new Date(),
+          },
+          recentNews: [
+            {
+              sentiment: "BEARISH",
+              sentimentScore: -0.8,
+              materialityScore: 0.9,
+              publishedAt: new Date(),
+            },
+          ],
+        }) as never;
+      }
+
+      return buildBundle({ stock: { ticker } }) as never;
+    });
+
+    const result = await researchScoringService.rankPortfolioHoldings("portfolio-1", {
+      limit: 3,
+    });
+
+    expect(result.portfolioId).toBe("portfolio-1");
+    expect(result.totalHoldings).toBe(4);
+    expect(result.scoredHoldingsCount).toBe(4);
+    expect(result.rankedHoldings).toHaveLength(3);
+    expect(result.rankedHoldings[0]?.ticker).toBe("AAA");
+    expect(result.rankedHoldings[0]?.marketValueNative).toBe(1000);
+    expect(result.rankedHoldings[0]?.portfolioWeight).toBeCloseTo(29.41, 2);
+    expect(result.rankedHoldings[0]?.compositeScore).toBeGreaterThanOrEqual(
+      result.rankedHoldings[1]?.compositeScore ?? 0,
+    );
+  });
+
+  it("rankPortfolioHoldings records skipped holdings with reason and missingData", async () => {
+    vi.spyOn(portfoliosService, "getPortfolioOverview").mockResolvedValue({
+      portfolio: { id: "portfolio-1" },
+      holdings: [
+        {
+          ticker: "NODATA",
+          companyName: "No Data Inc",
+          shares: null,
+          marketValueCad: null,
+          latestPrice: null,
+          latestPriceCapturedAt: null,
+          currency: null,
+          nativeCurrency: null,
+          sector: null,
+          latestRecommendation: null,
+          latestReportDate: null,
+          status: HoldingStatus.OWNED,
+        },
+        {
+          ticker: "GOOD",
+          companyName: "Good Inc",
+          shares: 5,
+          marketValueCad: 500,
+          latestPrice: 100,
+          latestPriceCapturedAt: new Date(),
+          currency: "USD",
+          nativeCurrency: "USD",
+          sector: "TECH",
+          latestRecommendation: "BUY",
+          latestReportDate: new Date(),
+          status: HoldingStatus.OWNED,
+        },
+      ],
+      holdingCount: 2,
+      fxRateUsed: null,
+      holdingsMissingFx: [],
+      holdingsUnsupportedCurrency: [],
+    } as never);
+
+    vi.spyOn(stocksService, "getStockResearchBundle").mockImplementation(async (ticker: string) =>
+      buildBundle({ stock: { ticker } }) as never,
+    );
+
+    const result = await researchScoringService.rankPortfolioHoldings("portfolio-1", {
+      limit: 3,
+    });
+
+    expect(result.scoredHoldingsCount).toBe(1);
+    expect(result.skippedHoldingsCount).toBe(1);
+    expect(result.skippedHoldings[0]?.ticker).toBe("NODATA");
+    expect(result.skippedHoldings[0]?.reason.length).toBeGreaterThan(0);
+    expect(result.skippedHoldings[0]?.missingData.length).toBeGreaterThan(0);
+  });
+
   it("getPortfolioRiskSnapshot identifies concentration risk", async () => {
     vi.spyOn(portfoliosService, "getPortfolioOverview").mockResolvedValue({
       portfolio: { id: "portfolio-1" },

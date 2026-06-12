@@ -1,8 +1,11 @@
 import type { FastifyInstance } from "fastify";
 
+import { env } from "../../config/env";
+
 import { agentToolsRoutes } from "./agent-tools.routes";
 import { analystIngestionRoutes } from "./analyst-ingestion.routes";
 import { alertsRoutes } from "./alerts.routes";
+import { authRoutes } from "./auth.routes";
 import { devRoutes } from "./dev.routes";
 import { discoveryRoutes } from "./discovery.routes";
 import { economicsIngestionRoutes } from "./economics-ingestion.routes";
@@ -23,6 +26,8 @@ import { watchlistsRoutes } from "./watchlists.routes";
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(healthRoutes, { prefix: "/health" });
+  await app.register(healthRoutes, { prefix: "/api/health" });
+  await app.register(authRoutes, { prefix: "/api/auth" });
   await app.register(portfoliosRoutes, { prefix: "/api/portfolios" });
   await app.register(holdingsRoutes, { prefix: "/api/holdings" });
   await app.register(stocksRoutes, { prefix: "/api/stocks" });
@@ -44,7 +49,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(analystIngestionRoutes, { prefix: "/api" });
   await app.register(geopoliticalRoutes, { prefix: "/api" });
 
-  if (process.env.NODE_ENV !== "production") {
+  const isProduction = env.NODE_ENV === "production" || process.env.NODE_ENV === "production";
+
+  if (!isProduction) {
     await app.register(devRoutes, { prefix: "/api/dev" });
   }
 }

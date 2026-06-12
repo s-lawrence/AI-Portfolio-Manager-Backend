@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../../src/app";
+import { env } from "../../src/config/env";
 import { createUser } from "../../src/repositories/users.repository";
 
 let sequence = 0;
@@ -11,6 +12,16 @@ function nextToken(): string {
 }
 
 describe("API portfolio workflow routes", () => {
+  const originalAuthEnabled = env.AUTH_ENABLED;
+
+  beforeEach(() => {
+    env.AUTH_ENABLED = false;
+  });
+
+  afterEach(() => {
+    env.AUTH_ENABLED = originalAuthEnabled;
+  });
+
   it("creates portfolio, adds holding, and generates mock report", async () => {
     const app = buildApp();
     const token = nextToken();
@@ -100,6 +111,49 @@ describe("API portfolio workflow routes", () => {
     const body = response.json();
     expect(body.success).toBe(false);
     expect(body.error.code).toBe("VALIDATION_ERROR");
+
+    await app.close();
+  });
+
+  it("flags ambiguous one-character ticker on holding creation", async () => {
+    const app = buildApp();
+    const token = nextToken();
+
+    const user = await createUser({
+      email: `test+auto-api-ambiguous-${token}@example.com`,
+      name: `[TEST] API Ambiguous User ${token}`,
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: `[TEST] API Ambiguous Portfolio ${token}`,
+        baseCurrency: "USD",
+      },
+    });
+
+    expect(createPortfolioResponse.statusCode).toBe(201);
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    const addHoldingResponse = await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker: "E",
+        status: "OWNED",
+        shares: 3,
+      },
+    });
+
+    expect(addHoldingResponse.statusCode).toBe(201);
+
+    const body = addHoldingResponse.json();
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data.warnings)).toBe(true);
+    expect(body.data.warnings).toContain("Ticker E is ambiguous; verify security mapping.");
 
     await app.close();
   });

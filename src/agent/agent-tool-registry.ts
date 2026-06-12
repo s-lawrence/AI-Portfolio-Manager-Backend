@@ -22,6 +22,7 @@ import * as analystService from "../services/analyst-ingestion.service";
 import * as realDataIngestionService from "../services/real-data-ingestion.service";
 import * as researchScoringService from "../services/research-scoring.service";
 import * as macroIngestionService from "../services/macro-ingestion.service";
+import * as aiReportsService from "../services/ai-reports.service";
 
 const tickerSchema = z
   .string()
@@ -229,6 +230,41 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
         }),
     },
     {
+      name: "rankDiscoveryCandidates",
+      description:
+        "Ranks persisted discovery candidates for potential new holdings using deterministic local scoring and portfolio/watchlist context.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        category: discoveryCategorySchema.optional(),
+        portfolioId: z.string().trim().min(1).optional(),
+        watchlistId: z.string().trim().min(1).optional(),
+        limit: z.coerce.number().int().positive().max(25).optional(),
+        excludeExistingHoldings: z.boolean().optional(),
+        excludeExistingWatchlistItems: z.boolean().optional(),
+      }),
+      notes: [
+        "Uses persisted discovery snapshots and deterministic scoreTickerResearch output only.",
+        "Designed for new-holding candidate discovery; no provider calls or LLM scoring.",
+      ],
+      execute: async (input: {
+        category?: string;
+        portfolioId?: string;
+        watchlistId?: string;
+        limit?: number;
+        excludeExistingHoldings?: boolean;
+        excludeExistingWatchlistItems?: boolean;
+      }) =>
+        discoveryService.rankDiscoveryCandidates({
+          category: input.category,
+          portfolioId: input.portfolioId,
+          watchlistId: input.watchlistId,
+          limit: input.limit,
+          excludeExistingHoldings: input.excludeExistingHoldings,
+          excludeExistingWatchlistItems: input.excludeExistingWatchlistItems,
+        }),
+    },
+    {
       name: "getGeopoliticalSummary",
       description:
         "Returns a bounded geopolitical summary from stored events, including sentiment mix and top headlines.",
@@ -393,6 +429,40 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       execute: async (input: { portfolioId: string }) => {
         try {
           return await researchScoringService.getPortfolioDataQuality(input.portfolioId);
+        } catch (error) {
+          if (error instanceof Error && /not found/i.test(error.message)) {
+            throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
+          }
+
+          throw error;
+        }
+      },
+    },
+    {
+      name: "rankPortfolioHoldings",
+      description:
+        "Ranks portfolio holdings deterministically using persisted backend scoring metrics and returns top candidates.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        portfolioId: z.string().trim().min(1),
+        limit: z.coerce.number().int().positive().max(25).optional().default(3),
+        includeWatchlist: z.boolean().optional().default(false),
+      }),
+      notes: [
+        "Deterministic aid only; not investment advice.",
+        "Uses persisted backend scoring data and does not call external LLMs.",
+      ],
+      execute: async (input: {
+        portfolioId: string;
+        limit?: number;
+        includeWatchlist?: boolean;
+      }) => {
+        try {
+          return await researchScoringService.rankPortfolioHoldings(input.portfolioId, {
+            limit: input.limit,
+            includeWatchlist: input.includeWatchlist,
+          });
         } catch (error) {
           if (error instanceof Error && /not found/i.test(error.message)) {
             throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
@@ -650,6 +720,140 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
           from: new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000),
           to: new Date(),
         });
+      },
+      dryRunPlan: async (input: {
+        mode?: "quick" | "full";
+        maxRecordsPerQuery?: number;
+        lookbackDays?: number;
+      }) => {
+        const lookbackDays = input.lookbackDays ?? 7;
+        const plannedProfiles = geopoliticalService.buildGdeltQueryProfiles({
+          lookbackDays,
+          maxRecordsPerQuery: input.maxRecordsPerQuery,
+          includePortfolioRisk: true,
+          includeMacroRisk: input.mode === "quick" || input.mode === "full" || input.mode == null,
+        });
+
+        return {
+          plannedAction: true,
+          toolName: "refreshGdeltRiskContext",
+          mode: input.mode ?? "quick",
+          lookbackDays,
+          queryProfiles: plannedProfiles,
+          message:
+            "Dry-run planned GDELT risk refresh query profiles. No provider call or data write was performed.",
+        };
+      },
+    },
+    {
+      name: "generateTickerReport",
+      description:
+        "Generates and persists a ticker report from backend research context with optional OpenAI structured mode and deterministic fallback.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.MUTATION,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.CONFIRMATION_REQUIRED,
+      inputSchema: z.object({
+        ticker: tickerSchema,
+        holdingId: z.string().trim().min(1).optional(),
+        portfolioId: z.string().trim().min(1).optional(),
+        watchlistId: z.string().trim().min(1).optional(),
+        useOpenAi: z.boolean().optional(),
+        refreshBeforeGenerate: z.boolean().optional(),
+        includeMacro: z.boolean().optional(),
+        includeGeopolitical: z.boolean().optional(),
+        includeNews: z.boolean().optional(),
+        includeAnalyst: z.boolean().optional(),
+        includeScore: z.boolean().optional(),
+        createPredictions: z.boolean().optional(),
+      }),
+      notes: [
+        "Mutation tool: confirmation required.",
+        "Dry-run returns the built report context and selected options without persisting report/predictions.",
+        "When OpenAI is enabled in input, runtime may still fallback deterministically based on policy or failures.",
+      ],
+      execute: async (input: {
+        ticker: string;
+        holdingId?: string;
+        portfolioId?: string;
+        watchlistId?: string;
+        useOpenAi?: boolean;
+        refreshBeforeGenerate?: boolean;
+        includeMacro?: boolean;
+        includeGeopolitical?: boolean;
+        includeNews?: boolean;
+        includeAnalyst?: boolean;
+        includeScore?: boolean;
+        createPredictions?: boolean;
+      }) =>
+        aiReportsService.generateTickerReport(input.ticker, {
+          holdingId: input.holdingId,
+          portfolioId: input.portfolioId,
+          watchlistId: input.watchlistId,
+          useOpenAi: input.useOpenAi,
+          refreshBeforeGenerate: input.refreshBeforeGenerate,
+          includeMacro: input.includeMacro,
+          includeGeopolitical: input.includeGeopolitical,
+          includeNews: input.includeNews,
+          includeAnalyst: input.includeAnalyst,
+          includeScore: input.includeScore,
+          createPredictions: input.createPredictions,
+        }),
+      dryRunPlan: async (input: {
+        ticker: string;
+        holdingId?: string;
+        portfolioId?: string;
+        watchlistId?: string;
+        useOpenAi?: boolean;
+        refreshBeforeGenerate?: boolean;
+        includeMacro?: boolean;
+        includeGeopolitical?: boolean;
+        includeNews?: boolean;
+        includeAnalyst?: boolean;
+        includeScore?: boolean;
+        createPredictions?: boolean;
+      }) => {
+        const context = await aiReportsService.buildTickerReportContext(input.ticker, {
+          portfolioId: input.portfolioId,
+          watchlistId: input.watchlistId,
+          includeMacro: input.includeMacro,
+          includeGeopolitical: input.includeGeopolitical,
+          includeNews: input.includeNews,
+          includeAnalyst: input.includeAnalyst,
+          includeScore: input.includeScore,
+        });
+
+        return {
+          plannedAction: true,
+          toolName: "generateTickerReport",
+          ticker: input.ticker,
+          holdingId: input.holdingId ?? null,
+          portfolioId: input.portfolioId ?? null,
+          watchlistId: input.watchlistId ?? null,
+          options: {
+            useOpenAi: input.useOpenAi ?? true,
+            refreshBeforeGenerate: input.refreshBeforeGenerate ?? false,
+            includeMacro: input.includeMacro ?? true,
+            includeGeopolitical: input.includeGeopolitical ?? true,
+            includeNews: input.includeNews ?? true,
+            includeAnalyst: input.includeAnalyst ?? true,
+            includeScore: input.includeScore ?? true,
+            createPredictions: input.createPredictions ?? true,
+          },
+          contextPreview: {
+            ticker: context.ticker,
+            asOf: context.asOf,
+            dataQuality: context.dataQuality,
+            hasMarketSnapshot: context.marketSnapshot != null,
+            hasTechnicalSnapshot: context.technicalSnapshot != null,
+            hasFundamentalSnapshot: context.fundamentalSnapshot != null,
+            hasAnalystContext: context.analystContext != null,
+            hasNewsContext: context.newsContext != null,
+            hasEarningsContext: context.earningsContext != null,
+            hasMacroContext: context.macroContext != null,
+            hasGeopoliticalContext: context.geopoliticalContext != null,
+          },
+          message:
+            "Dry-run planned report generation from current context. No report or prediction rows were written.",
+        };
       },
     },
     {

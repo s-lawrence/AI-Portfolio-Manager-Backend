@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 
+import { assertPortfolioOwnership } from "../../auth";
 import { notFound, runService } from "../errors";
 import { created, ok, paginated } from "../response";
 import {
@@ -17,6 +18,7 @@ export async function portfolioSummariesRoutes(
 ): Promise<void> {
   app.post("/:portfolioId/generate", async (request, reply) => {
     const params = portfolioSummaryParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const summary = await runService(() =>
       generateMockPortfolioSummary(params.portfolioId),
@@ -27,6 +29,7 @@ export async function portfolioSummariesRoutes(
 
   app.get("/:portfolioId/latest", async (request, reply) => {
     const params = portfolioSummaryParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const summary = await runService(() => getLatestPortfolioSummary(params.portfolioId));
     if (!summary) {
@@ -39,6 +42,7 @@ export async function portfolioSummariesRoutes(
   app.get("/:portfolioId", async (request, reply) => {
     const params = portfolioSummaryParamsSchema.parse(request.params);
     const query = listPortfolioSummaryQuerySchema.parse(request.query);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const summaries = await runService(() =>
       listPortfolioSummaries(params.portfolioId, query.limit),

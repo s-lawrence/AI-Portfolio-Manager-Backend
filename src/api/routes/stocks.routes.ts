@@ -4,6 +4,7 @@ import { notFound, runService } from "../errors";
 import { ok, paginated } from "../response";
 import {
   listStocksQuerySchema,
+  stockSearchQuerySchema,
   stockTickerParamsSchema,
   updateStockMetadataBodySchema,
 } from "../schemas/stocks.schemas";
@@ -11,11 +12,31 @@ import {
   getStockProfile,
   getStockResearchBundle,
   listStocks,
+  searchStockCandidates,
   searchStocks,
   updateStockMetadata,
 } from "../../services";
 
 export async function stocksRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/search", async (request, reply) => {
+    const query = stockSearchQuerySchema.parse(request.query);
+
+    const candidates = await runService(() =>
+      searchStockCandidates(query.query, {
+        exchange: query.exchange,
+        country: query.country,
+        limit: query.limit,
+      }),
+    );
+
+    reply.send(
+      ok({
+        query: query.query,
+        candidates,
+      }),
+    );
+  });
+
   app.get("/", async (request, reply) => {
     const query = listStocksQuerySchema.parse(request.query);
 

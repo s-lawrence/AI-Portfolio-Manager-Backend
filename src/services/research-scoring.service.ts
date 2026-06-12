@@ -2,6 +2,7 @@ import { HoldingStatus, Sentiment, WatchlistItemStatus } from "@prisma/client";
 
 import {
   type CompareTickersResult,
+  type PortfolioHoldingRankingResult,
   type PortfolioDataQualityResult,
   type PortfolioFxIssue,
   type PortfolioConcentrationRisk,
@@ -9,6 +10,8 @@ import {
   type PortfolioRiskConversionStatus,
   type PortfolioRiskSnapshotResult,
   type PortfolioOverviewHoldingSummary,
+  type PortfolioRankedHolding,
+  type PortfolioRankedSkippedHolding,
   type SuggestedResearchStance,
   type TickerResearchComponentScores,
   type TickerDataQualityResult,
@@ -36,6 +39,8 @@ const ACTIVE_WATCHLIST_STATUSES = new Set<WatchlistItemStatus>([
   WatchlistItemStatus.RESEARCHING,
   WatchlistItemStatus.CANDIDATE,
 ]);
+const PORTFOLIO_RANKING_DEFAULT_LIMIT = 3;
+const PORTFOLIO_RANKING_MAX_LIMIT = 25;
 
 type StockResearchBundle = NonNullable<Awaited<ReturnType<typeof getStockResearchBundle>>>;
 
@@ -905,6 +910,199 @@ export async function scoreWatchlist(watchlistId: string): Promise<WatchlistRese
     warnings: dedupe(warnings),
     itemCount: rankedItems.length,
     rankedItems,
+  };
+}
+
+function normalizeRankingLimit(limit: number | undefined): number {
+  if (typeof limit !== "number" || !Number.isFinite(limit)) {
+    return PORTFOLIO_RANKING_DEFAULT_LIMIT;
+  }
+
+  return Math.max(1, Math.min(Math.trunc(limit), PORTFOLIO_RANKING_MAX_LIMIT));
+}
+
+function collectMissingPortfolioRankingSignals(
+  holding: PortfolioOverviewHoldingSummary,
+): string[] {
+  const missing: string[] = [];
+
+  if (holding.latestPrice == null) {
+    missing.push("price");
+  }
+  if (!holding.latestPriceCapturedAt) {
+    missing.push("priceTimestamp");
+  }
+  if (!holding.currency && !holding.nativeCurrency) {
+    missing.push("currency");
+  }
+  if (holding.marketValueCad == null) {
+    missing.push("marketValueCad");
+  }
+  if (holding.shares == null) {
+    missing.push("quantity");
+  }
+  if (!holding.latestRecommendation && !holding.latestReportDate) {
+    missing.push("reportContext");
+  }
+  if (!holding.sector) {
+    missing.push("sector");
+  }
+
+  return missing;
+}
+
+function hasEssentiallyNoUsablePortfolioData(
+  holding: PortfolioOverviewHoldingSummary,
+  missingSignals: string[],
+): boolean {
+  if (missingSignals.length >= 6) {
+    return true;
+  }
+
+  return (
+    holding.latestPrice == null &&
+    holding.marketValueCad == null &&
+    holding.latestRecommendation == null &&
+    holding.latestReportDate == null
+  );
+}
+
+function toFallbackMissingDataSignals(holding: PortfolioOverviewHoldingSummary): string[] {
+  const missingSignals = collectMissingPortfolioRankingSignals(holding);
+  return missingSignals.length > 0
+    ? missingSignals
+    : ["price", "technical", "fundamental", "analyst", "news", "earnings"];
+}
+
+export async function rankPortfolioHoldings(
+  portfolioId: string,
+  options: {
+    limit?: number;
+    includeWatchlist?: boolean;
+  } = {},
+): Promise<PortfolioHoldingRankingResult> {
+  const normalizedPortfolioId = assertNonBlank(portfolioId, "portfolioId");
+  const limit = normalizeRankingLimit(options.limit);
+  const includeWatchlist = options.includeWatchlist === true;
+
+  const overview = await getPortfolioOverview(normalizedPortfolioId);
+  if (!overview) {
+    throw new Error("Portfolio not found.");
+  }
+
+  const scopedHoldings = overview.holdings.filter((holding) => {
+    if (!holding.ticker || holding.ticker.trim().length === 0) {
+      return false;
+    }
+
+    if (holding.status === HoldingStatus.OWNED) {
+      return true;
+    }
+
+    return includeWatchlist && holding.status === HoldingStatus.WATCHLIST;
+  });
+
+  const totalMarketValueCad =
+    overview.totalMarketValueCad != null && Number.isFinite(overview.totalMarketValueCad)
+      ? overview.totalMarketValueCad
+      : scopedHoldings.reduce((sum, holding) => {
+        return sum + (holding.marketValueCad ?? 0);
+      }, 0);
+
+  const warnings: string[] = [];
+  const skippedHoldings: PortfolioRankedSkippedHolding[] = [];
+  const scoredHoldings: PortfolioRankedHolding[] = [];
+
+  for (const holding of scopedHoldings) {
+    let normalizedTicker: string;
+
+    try {
+      normalizedTicker = normalizeTicker(holding.ticker);
+    } catch {
+      skippedHoldings.push({
+        ticker: holding.ticker,
+        reason: "Invalid ticker format.",
+        missingData: toFallbackMissingDataSignals(holding),
+      });
+      continue;
+    }
+
+    const missingSignals = collectMissingPortfolioRankingSignals(holding);
+    if (hasEssentiallyNoUsablePortfolioData(holding, missingSignals)) {
+      skippedHoldings.push({
+        ticker: normalizedTicker,
+        reason: "No meaningful persisted metrics are available for ranking.",
+        missingData: missingSignals,
+      });
+      continue;
+    }
+
+    try {
+      const score = await scoreTickerResearch(normalizedTicker);
+
+      scoredHoldings.push({
+        rank: 0,
+        ticker: normalizedTicker,
+        companyName: holding.companyName ?? null,
+        quantity: holding.shares,
+        marketValueCad: holding.marketValueCad ?? null,
+        marketValueNative: holding.marketValueNative ?? null,
+        portfolioWeight:
+          holding.marketValueCad != null && totalMarketValueCad > 0
+            ? round((holding.marketValueCad / totalMarketValueCad) * 100)
+            : null,
+        compositeScore: score.compositeScore,
+        suggestedStance: score.suggestedStance,
+        componentScores: score.componentScores,
+        bullishFactors: score.bullishFactors,
+        bearishFactors: score.bearishFactors,
+        missingData: score.missingData,
+        staleDataWarnings: score.staleDataWarnings,
+      });
+    } catch (error) {
+      const reason = error instanceof Error && error.message.trim().length > 0
+        ? error.message
+        : "Ticker scoring failed.";
+
+      skippedHoldings.push({
+        ticker: normalizedTicker,
+        reason,
+        missingData: toFallbackMissingDataSignals(holding),
+      });
+      warnings.push(`Skipped ${normalizedTicker}: ${reason}`);
+    }
+  }
+
+  scoredHoldings.sort((left, right) => {
+    if (right.compositeScore !== left.compositeScore) {
+      return right.compositeScore - left.compositeScore;
+    }
+
+    const leftValue = left.marketValueCad ?? -1;
+    const rightValue = right.marketValueCad ?? -1;
+    if (rightValue !== leftValue) {
+      return rightValue - leftValue;
+    }
+
+    return left.ticker.localeCompare(right.ticker);
+  });
+
+  const rankedHoldings = scoredHoldings
+    .map((holding, index) => ({
+      ...holding,
+      rank: index + 1,
+    }))
+    .slice(0, limit);
+
+  return {
+    portfolioId: overview.portfolio.id,
+    asOf: new Date().toISOString(),
+    totalHoldings: scopedHoldings.length,
+    scoredHoldingsCount: scoredHoldings.length,
+    skippedHoldingsCount: skippedHoldings.length,
+    skippedHoldings,
+    rankedHoldings,
+    warnings: dedupe(warnings),
   };
 }
 

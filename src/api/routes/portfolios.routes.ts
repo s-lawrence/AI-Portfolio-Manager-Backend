@@ -1,9 +1,15 @@
 import type { FastifyInstance } from "fastify";
 
+import {
+  assertPortfolioOwnership,
+  isAuthEnabled,
+  resolveUserIdForRequest,
+} from "../../auth";
 import { runService, notFound } from "../errors";
 import { created, deleted, ok, paginated } from "../response";
 import {
   createPortfolioBodySchema,
+  createPortfolioRouteBodySchema,
   portfolioIdParamsSchema,
   updatePortfolioBodySchema,
   userIdParamsSchema,
@@ -20,10 +26,17 @@ import {
 
 export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
   app.post("/", async (request, reply) => {
-    const body = createPortfolioBodySchema.parse(request.body);
+    const body = createPortfolioRouteBodySchema.parse(request.body);
+
+    // Preserve legacy validation semantics when auth is disabled.
+    if (!isAuthEnabled()) {
+      createPortfolioBodySchema.parse(body);
+    }
+
+    const userId = await runService(() => resolveUserIdForRequest(request, body.userId));
 
     const portfolio = await runService(() =>
-      createPortfolioForUser(body.userId, {
+      createPortfolioForUser(userId, {
         name: body.name,
         description: body.description,
         baseCurrency: body.baseCurrency,
@@ -35,7 +48,8 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/user/:userId", async (request, reply) => {
     const params = userIdParamsSchema.parse(request.params);
-    const portfolios = await runService(() => listUserPortfolios(params.userId));
+    const userId = await runService(() => resolveUserIdForRequest(request, params.userId));
+    const portfolios = await runService(() => listUserPortfolios(userId));
 
     reply.send(
       paginated(portfolios, {
@@ -46,6 +60,7 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/:portfolioId", async (request, reply) => {
     const params = portfolioIdParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
     const overview = await runService(() => getPortfolioOverview(params.portfolioId));
 
     if (!overview) {
@@ -58,6 +73,7 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/:portfolioId", async (request, reply) => {
     const params = portfolioIdParamsSchema.parse(request.params);
     const body = updatePortfolioBodySchema.parse(request.body);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const portfolio = await runService(() =>
       updatePortfolioDetails(params.portfolioId, body),
@@ -68,6 +84,7 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete("/:portfolioId", async (request, reply) => {
     const params = portfolioIdParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     await runService(() => deletePortfolio(params.portfolioId));
     reply.send(deleted());
@@ -75,6 +92,7 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/:portfolioId/generate-summary", async (request, reply) => {
     const params = portfolioIdParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const summary = await runService(() =>
       generateMockPortfolioSummary(params.portfolioId),
@@ -85,6 +103,7 @@ export async function portfoliosRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/:portfolioId/run-analysis", async (request, reply) => {
     const params = portfolioIdParamsSchema.parse(request.params);
+    await runService(() => assertPortfolioOwnership(request, params.portfolioId));
 
     const result = await runService(() => runPortfolioAnalysis(params.portfolioId));
     reply.send(ok(result));

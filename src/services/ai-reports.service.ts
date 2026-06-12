@@ -35,7 +35,12 @@ import { getLatestMacroSeriesObservation } from "../repositories/macro-series-ob
 import {
   AIReportWithStockMetadata,
   DailyTickerReportInput,
+  TickerReportContext,
+  TickerReportContextBuildOptions,
+  TickerReportDataQualityConfidence,
   TickerReportGenerationResult,
+  TickerReportGenerationOptions,
+  TickerReportMode,
 } from "../types/services";
 import { getNewsSentimentSummary, isDemoNewsArticle } from "./news.service";
 import { getLatestFxRate } from "./fx-rates.service";
@@ -45,6 +50,22 @@ import {
   getStockResearchBundle,
 } from "./stocks.service";
 import { getGeopoliticalSummary } from "./geopolitical-ingestion.service";
+import {
+  OpenAiAgentClientError,
+  type OpenAiTickerReportOutput,
+  generateTickerReport as generateOpenAiTickerReport,
+} from "../agent/openai-agent-client";
+import { env } from "../config/env";
+import { getPortfolioOverview } from "./portfolios.service";
+import { getWatchlistWithItems } from "../repositories/watchlists.repository";
+import { getTickerDataQuality, scoreTickerResearch } from "./research-scoring.service";
+import {
+  ingestTickerEarnings,
+  ingestTickerFundamentals,
+  ingestTickerMarketData,
+  ingestTickerNews,
+} from "./real-data-ingestion.service";
+import { ingestTickerAnalystData } from "./analyst-ingestion.service";
 
 function assertNonBlank(value: string, label: string): string {
   const trimmed = value.trim();
@@ -57,6 +78,203 @@ function assertNonBlank(value: string, label: string): string {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+const OPENAI_REPORT_PROMPT_VERSION = "openai-ticker-report-v1";
+const OPENAI_AVOID_DB_MAPPING: Recommendation = Recommendation.SELL;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function toIsoOrNull(value: Date | string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function toAgeInDays(value: Date | string | null | undefined): number | null {
+  const iso = toIsoOrNull(value);
+  if (!iso) {
+    return null;
+  }
+
+  const parsed = new Date(iso);
+  return Math.floor((Date.now() - parsed.getTime()) / MS_PER_DAY);
+}
+
+function stringifyNumber(value: number | null | undefined): string | null {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return String(value);
+}
+
+function stringifyBigInt(value: bigint | number | null | undefined): string | null {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+
+  return stringifyNumber(value);
+}
+
+function normalizeTextList(values: Array<string | null | undefined>, limit: number): string[] {
+  const deduped = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    deduped.add(trimmed);
+    if (deduped.size >= limit) {
+      break;
+    }
+  }
+
+  return [...deduped];
+}
+
+function joinNotesOrNull(values: Array<string | null | undefined>): string | null {
+  const normalized = normalizeTextList(values, 12);
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  return normalized.join(" ");
+}
+
+function mapDataQualityConfidence(
+  missingData: string[],
+  staleDataWarnings: string[],
+): TickerReportDataQualityConfidence {
+  if (missingData.length >= 4 || staleDataWarnings.length >= 4) {
+    return "LOW";
+  }
+
+  if (missingData.length >= 2 || staleDataWarnings.length >= 2) {
+    return "MEDIUM";
+  }
+
+  return "HIGH";
+}
+
+function toWarningMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+
+  return "Unexpected error.";
+}
+
+function summarizeOpenAiFailure(error: OpenAiAgentClientError): string {
+  const stage = error.failure.stage;
+  const code = error.failure.errorCode ? ` (${error.failure.errorCode})` : "";
+  return `OpenAI report generation failed at ${stage}${code}; deterministic fallback used.`;
+}
+
+function mapOpenAiRecommendation(
+  recommendation: OpenAiTickerReportOutput["recommendation"],
+  warnings: string[],
+): Recommendation {
+  if (recommendation === "AVOID") {
+    warnings.push("OpenAI recommendation 'AVOID' mapped to 'SELL' for persistence compatibility.");
+    return OPENAI_AVOID_DB_MAPPING;
+  }
+
+  return recommendation;
+}
+
+function mapOpenAiSentiment(
+  recommendation: Recommendation,
+  report: OpenAiTickerReportOutput,
+): Sentiment {
+  if (recommendation === Recommendation.BUY) {
+    return Sentiment.BULLISH;
+  }
+
+  if (recommendation === Recommendation.SELL) {
+    return Sentiment.BEARISH;
+  }
+
+  if (report.bullCase.length > 0 && report.bearCase.length > 0) {
+    return Sentiment.MIXED;
+  }
+
+  if (report.bullCase.length > 0) {
+    return Sentiment.BULLISH;
+  }
+
+  if (report.bearCase.length > 0) {
+    return Sentiment.BEARISH;
+  }
+
+  return Sentiment.NEUTRAL;
+}
+
+function mapConvictionToConfidence(
+  conviction: OpenAiTickerReportOutput["conviction"],
+  dataQualityConfidence: TickerReportDataQualityConfidence,
+  dataGapCount: number,
+): number {
+  const base = conviction === "HIGH" ? 0.82 : conviction === "MEDIUM" ? 0.64 : 0.42;
+  const qualityPenalty = dataQualityConfidence === "LOW"
+    ? 0.14
+    : dataQualityConfidence === "MEDIUM"
+      ? 0.06
+      : 0;
+  const gapPenalty = Math.min(0.12, dataGapCount * 0.02);
+
+  return clamp(base - qualityPenalty - gapPenalty, 0.1, 0.95);
+}
+
+function mapOpenAiRiskScore(args: {
+  recommendation: Recommendation;
+  conviction: OpenAiTickerReportOutput["conviction"];
+  dataQualityConfidence: TickerReportDataQualityConfidence;
+  dailyChangePercent: number | null;
+}): number {
+  let score =
+    args.recommendation === Recommendation.BUY
+      ? 34
+      : args.recommendation === Recommendation.HOLD
+        ? 45
+        : args.recommendation === Recommendation.WATCH
+          ? 56
+          : 72;
+
+  if (args.conviction === "LOW") {
+    score += 8;
+  }
+
+  if (args.dataQualityConfidence === "LOW") {
+    score += 10;
+  } else if (args.dataQualityConfidence === "MEDIUM") {
+    score += 4;
+  }
+
+  if (args.dailyChangePercent != null && Math.abs(args.dailyChangePercent) >= 5) {
+    score += 6;
+  }
+
+  return clamp(score, 5, 95);
+}
+
+function includeOptionEnabled(value: boolean | undefined): boolean {
+  return value !== false;
 }
 
 function formatEstimatedRevenue(value: bigint | number | null | undefined): string | null {
@@ -795,6 +1013,618 @@ async function createOrUpdateDailyReport(
   }
 
   return updateAIReport(existing.id, input);
+}
+
+async function refreshTickerResearchData(ticker: string): Promise<string[]> {
+  const warnings: string[] = [];
+
+  try {
+    const market = await ingestTickerMarketData(ticker);
+    warnings.push(...market.warnings);
+  } catch (error) {
+    warnings.push(`Market refresh failed: ${toWarningMessage(error)}`);
+  }
+
+  try {
+    const fundamentals = await ingestTickerFundamentals(ticker);
+    warnings.push(...fundamentals.warnings);
+  } catch (error) {
+    warnings.push(`Fundamental refresh failed: ${toWarningMessage(error)}`);
+  }
+
+  try {
+    const earnings = await ingestTickerEarnings(ticker);
+    warnings.push(...earnings.warnings);
+  } catch (error) {
+    warnings.push(`Earnings refresh failed: ${toWarningMessage(error)}`);
+  }
+
+  try {
+    const news = await ingestTickerNews(ticker, { limit: 30 });
+    warnings.push(...news.warnings);
+  } catch (error) {
+    warnings.push(`News refresh failed: ${toWarningMessage(error)}`);
+  }
+
+  try {
+    const analyst = await ingestTickerAnalystData(ticker);
+    warnings.push(...analyst.warnings);
+  } catch (error) {
+    warnings.push(`Analyst refresh failed: ${toWarningMessage(error)}`);
+  }
+
+  return normalizeTextList(warnings, 20);
+}
+
+function buildPortfolioContext(args: {
+  portfolioOverview: Awaited<ReturnType<typeof getPortfolioOverview>>;
+  ticker: string;
+}): TickerReportContext["portfolioContext"] {
+  const overview = args.portfolioOverview;
+  if (!overview) {
+    return null;
+  }
+
+  const matching = overview.holdings.filter((holding) =>
+    holding.ticker.toUpperCase() === args.ticker.toUpperCase(),
+  );
+
+  const totalMarketValueCad = overview.totalMarketValueCad ?? null;
+  const matchingMarketValueCad = matching.reduce<number | null>((sum, holding) => {
+    if (holding.marketValueCad == null) {
+      return sum;
+    }
+
+    return (sum ?? 0) + holding.marketValueCad;
+  }, null);
+
+  const matchingWeightPercent =
+    matchingMarketValueCad != null &&
+    totalMarketValueCad != null &&
+    totalMarketValueCad > 0
+      ? Number(((matchingMarketValueCad / totalMarketValueCad) * 100).toFixed(2))
+      : null;
+
+  return {
+    portfolioId: overview.portfolio.id,
+    baseCurrency: "CAD",
+    holdingCount: overview.holdingCount,
+    matchingHoldingsCount: matching.length,
+    matchingHoldingIds: matching.map((holding) => holding.id),
+    matchingMarketValueCad,
+    matchingWeightPercent,
+  };
+}
+
+function buildWatchlistContext(args: {
+  watchlist: Awaited<ReturnType<typeof getWatchlistWithItems>>;
+  ticker: string;
+}): TickerReportContext["watchlistContext"] {
+  const watchlist = args.watchlist;
+  if (!watchlist) {
+    return null;
+  }
+
+  const matchingItems = watchlist.items.filter(
+    (item) => item.stock.ticker.toUpperCase() === args.ticker.toUpperCase(),
+  );
+
+  return {
+    watchlistId: watchlist.id,
+    watchlistName: watchlist.name,
+    itemCount: watchlist.items.length,
+    matchingItemsCount: matchingItems.length,
+    matchingStatuses: normalizeTextList(matchingItems.map((item) => item.status), 10),
+    matchingPriorities: normalizeTextList(matchingItems.map((item) => item.priority), 10),
+    thesisSamples: normalizeTextList(matchingItems.map((item) => item.thesis), 3),
+  };
+}
+
+function buildDataGaps(args: {
+  qualityMissing: string[];
+  qualityStale: string[];
+  bundle: NonNullable<Awaited<ReturnType<typeof getStockResearchBundle>>>;
+  options: TickerReportContextBuildOptions;
+}): string[] {
+  const gaps: string[] = [];
+  gaps.push(...args.qualityMissing.map((item) => `Missing ${item} data.`));
+  gaps.push(...args.qualityStale);
+
+  if (includeOptionEnabled(args.options.includeNews) && args.bundle.recentNews.length === 0) {
+    gaps.push("No recent news context is available.");
+  }
+
+  if (includeOptionEnabled(args.options.includeAnalyst)) {
+    if (!args.bundle.latestAnalystSnapshot && args.bundle.recentAnalystActions.length === 0) {
+      gaps.push("No analyst snapshot or recent analyst actions are available.");
+    }
+  }
+
+  if (!args.bundle.latestPriceSnapshot) {
+    gaps.push("No price snapshot is available for this ticker.");
+  }
+
+  return normalizeTextList(gaps, 20);
+}
+
+export async function buildTickerReportContext(
+  ticker: string,
+  options: TickerReportContextBuildOptions = {},
+): Promise<TickerReportContext> {
+  const normalizedTicker = normalizeTickerOrThrow(ticker);
+  const stock = await ensureStockExists(normalizedTicker);
+
+  const [bundle, dataQuality, deterministicScore, newsSummary] = await Promise.all([
+    getStockResearchBundle(normalizedTicker),
+    getTickerDataQuality(normalizedTicker),
+    includeOptionEnabled(options.includeScore)
+      ? scoreTickerResearch(normalizedTicker).catch(() => null)
+      : Promise.resolve(null),
+    includeOptionEnabled(options.includeNews)
+      ? getNewsSentimentSummary(normalizedTicker, 30).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  if (!bundle) {
+    throw new Error("Unable to build stock research bundle.");
+  }
+
+  const [macroSummary, geopoliticalSummary, portfolioOverview, watchlistWithItems] = await Promise.all([
+    includeOptionEnabled(options.includeMacro)
+      ? buildMacroSummary().catch(() => "Macro context unavailable.")
+      : Promise.resolve(null),
+    includeOptionEnabled(options.includeGeopolitical)
+      ? getGeopoliticalSummary({ days: 7, limit: 100 }).catch(() => null)
+      : Promise.resolve(null),
+    options.portfolioId ? getPortfolioOverview(options.portfolioId) : Promise.resolve(null),
+    options.watchlistId ? getWatchlistWithItems(options.watchlistId) : Promise.resolve(null),
+  ]);
+
+  const topHeadlines = includeOptionEnabled(options.includeNews)
+    ? bundle.recentNews
+      .slice(0, 5)
+      .map((article) => ({
+        headline: article.headline,
+        publishedAt: article.publishedAt.toISOString(),
+        source: article.source ?? null,
+        sentiment: article.sentiment ?? null,
+        sentimentScore: article.sentimentScore ?? null,
+        materialityScore: article.materialityScore ?? null,
+      }))
+    : [];
+
+  const dataQualityConfidence = mapDataQualityConfidence(
+    dataQuality.missingData,
+    dataQuality.staleDataWarnings,
+  );
+
+  const dataGaps = buildDataGaps({
+    qualityMissing: dataQuality.missingData,
+    qualityStale: dataQuality.staleDataWarnings,
+    bundle,
+    options,
+  });
+
+  return {
+    ticker: normalizedTicker,
+    companyName: stock.companyName ?? null,
+    exchange: stock.exchange ?? null,
+    currency: stock.currency ?? null,
+    asOf: new Date().toISOString(),
+    dataQuality: {
+      missingData: dataQuality.missingData,
+      staleDataWarnings: dataQuality.staleDataWarnings,
+      confidence: dataQualityConfidence,
+    },
+    marketSnapshot: bundle.latestPriceSnapshot
+      ? {
+          price: bundle.latestPriceSnapshot.price ?? null,
+          previousClose: bundle.latestPriceSnapshot.previousClose ?? null,
+          changePercent:
+            bundle.latestPriceSnapshot.changePercent ??
+            (bundle.latestPriceSnapshot.previousClose
+              ? ((bundle.latestPriceSnapshot.price - bundle.latestPriceSnapshot.previousClose) /
+                  bundle.latestPriceSnapshot.previousClose) *
+                100
+              : null),
+          open: bundle.latestPriceSnapshot.open ?? null,
+          high: bundle.latestPriceSnapshot.high ?? null,
+          low: bundle.latestPriceSnapshot.low ?? null,
+          volume: stringifyBigInt(bundle.latestPriceSnapshot.volume),
+          marketCap: stringifyBigInt(bundle.latestPriceSnapshot.marketCap),
+          capturedAt: toIsoOrNull(bundle.latestPriceSnapshot.capturedAt),
+          source: bundle.latestPriceSnapshot.source ?? null,
+        }
+      : null,
+    technicalSnapshot: bundle.latestTechnicalSnapshot
+      ? {
+          trendDirection: bundle.latestTechnicalSnapshot.trendDirection ?? null,
+          sma20: bundle.latestTechnicalSnapshot.sma20 ?? null,
+          sma50: bundle.latestTechnicalSnapshot.sma50 ?? null,
+          sma200: bundle.latestTechnicalSnapshot.sma200 ?? null,
+          rsi14: bundle.latestTechnicalSnapshot.rsi14 ?? null,
+          macd: bundle.latestTechnicalSnapshot.macd ?? null,
+          macdSignal: bundle.latestTechnicalSnapshot.macdSignal ?? null,
+          macdHistogram: bundle.latestTechnicalSnapshot.macdHistogram ?? null,
+          volatility: null,
+          capturedAt: toIsoOrNull(bundle.latestTechnicalSnapshot.capturedAt),
+        }
+      : null,
+    fundamentalSnapshot: bundle.latestFundamentalSnapshot
+      ? {
+          peRatio: bundle.latestFundamentalSnapshot.peRatio ?? null,
+          forwardPeRatio: bundle.latestFundamentalSnapshot.forwardPeRatio ?? null,
+          pegRatio: bundle.latestFundamentalSnapshot.pegRatio ?? null,
+          priceToSales: bundle.latestFundamentalSnapshot.priceToSales ?? null,
+          priceToBook: bundle.latestFundamentalSnapshot.priceToBook ?? null,
+          evToEbitda: bundle.latestFundamentalSnapshot.evToEbitda ?? null,
+          eps: bundle.latestFundamentalSnapshot.eps ?? null,
+          revenueGrowth: bundle.latestFundamentalSnapshot.revenueGrowth ?? null,
+          grossMargin: bundle.latestFundamentalSnapshot.grossMargin ?? null,
+          operatingMargin: bundle.latestFundamentalSnapshot.operatingMargin ?? null,
+          netMargin: bundle.latestFundamentalSnapshot.netMargin ?? null,
+          debtToEquity: bundle.latestFundamentalSnapshot.debtToEquity ?? null,
+          currentRatio: bundle.latestFundamentalSnapshot.currentRatio ?? null,
+          freeCashFlow: stringifyBigInt(bundle.latestFundamentalSnapshot.freeCashFlow),
+          dividendYield: bundle.latestFundamentalSnapshot.dividendYield ?? null,
+          analystConsensus: bundle.latestFundamentalSnapshot.analystConsensus ?? null,
+          capturedAt: toIsoOrNull(bundle.latestFundamentalSnapshot.capturedAt),
+          source: bundle.latestFundamentalSnapshot.source ?? null,
+        }
+      : null,
+    analystContext: includeOptionEnabled(options.includeAnalyst) && bundle.latestAnalystSnapshot
+      ? {
+          ratingConsensus: bundle.latestAnalystSnapshot.ratingConsensus ?? null,
+          analystCount: bundle.latestAnalystSnapshot.analystCount ?? null,
+          priceTargetAverage: bundle.latestAnalystSnapshot.priceTargetAverage ?? null,
+          priceTargetHigh: bundle.latestAnalystSnapshot.priceTargetHigh ?? null,
+          priceTargetLow: bundle.latestAnalystSnapshot.priceTargetLow ?? null,
+          priceTargetConsensus: bundle.latestAnalystSnapshot.priceTargetConsensus ?? null,
+          targetMedian: bundle.latestAnalystSnapshot.targetMedian ?? null,
+          upsidePercent: bundle.latestAnalystSnapshot.upsidePercent ?? null,
+          strongBuyCount: bundle.latestAnalystSnapshot.strongBuyCount ?? null,
+          buyCount: bundle.latestAnalystSnapshot.buyCount ?? null,
+          holdCount: bundle.latestAnalystSnapshot.holdCount ?? null,
+          sellCount: bundle.latestAnalystSnapshot.sellCount ?? null,
+          strongSellCount: bundle.latestAnalystSnapshot.strongSellCount ?? null,
+          capturedAt: toIsoOrNull(bundle.latestAnalystSnapshot.capturedAt),
+          source: bundle.latestAnalystSnapshot.source ?? null,
+        }
+      : null,
+    recentAnalystActions: includeOptionEnabled(options.includeAnalyst)
+      ? bundle.recentAnalystActions
+        .slice(0, 10)
+        .map((action) => ({
+          actionType: action.actionType,
+          firm: action.firm ?? null,
+          newRating: action.newRating ?? null,
+          previousRating: action.previousRating ?? null,
+          newPriceTarget: action.newPriceTarget ?? null,
+          previousPriceTarget: action.previousPriceTarget ?? null,
+          eventDate: action.eventDate.toISOString(),
+        }))
+      : [],
+    analystEstimates: {
+      latestAnnual: includeOptionEnabled(options.includeAnalyst)
+        ? bundle.latestAnnualAnalystEstimate ?? null
+        : null,
+      latestQuarter: includeOptionEnabled(options.includeAnalyst)
+        ? bundle.latestQuarterAnalystEstimate ?? null
+        : null,
+    },
+    fmpFinancialRating: includeOptionEnabled(options.includeAnalyst)
+      ? bundle.fmpFinancialRating ?? null
+      : null,
+    newsContext: includeOptionEnabled(options.includeNews)
+      ? {
+          totalArticles: newsSummary?.totalArticles ?? bundle.recentNews.length,
+          bullishCount: newsSummary?.bullishCount ?? 0,
+          bearishCount: newsSummary?.bearishCount ?? 0,
+          neutralCount: newsSummary?.neutralCount ?? 0,
+          mixedCount: newsSummary?.mixedCount ?? 0,
+          averageSentimentScore: newsSummary?.averageSentimentScore ?? null,
+          averageMaterialityScore: newsSummary?.averageMaterialityScore ?? null,
+          topHeadlines,
+        }
+      : null,
+    earningsContext: bundle.nextEarningsEvent
+      ? {
+          nextEarningsDate: toIsoOrNull(bundle.nextEarningsEvent.earningsDate),
+          earningsTime: bundle.nextEarningsEvent.earningsTime ?? null,
+          estimatedEps: bundle.nextEarningsEvent.estimatedEps ?? null,
+          estimatedRevenue: stringifyBigInt(bundle.nextEarningsEvent.estimatedRevenue),
+          fiscalQuarter: bundle.nextEarningsEvent.fiscalQuarter ?? null,
+          fiscalYear: bundle.nextEarningsEvent.fiscalYear ?? null,
+          isDateConfirmed: bundle.nextEarningsEvent.isDateConfirmed ?? null,
+        }
+      : null,
+    macroContext: includeOptionEnabled(options.includeMacro)
+      ? {
+          summary: macroSummary ?? "Macro context unavailable.",
+        }
+      : null,
+    geopoliticalContext: includeOptionEnabled(options.includeGeopolitical)
+      ? geopoliticalSummary
+      : null,
+    portfolioContext: options.portfolioId
+      ? buildPortfolioContext({ portfolioOverview, ticker: normalizedTicker })
+      : undefined,
+    watchlistContext: options.watchlistId
+      ? buildWatchlistContext({ watchlist: watchlistWithItems, ticker: normalizedTicker })
+      : undefined,
+    deterministicScore,
+  } satisfies TickerReportContext;
+}
+
+function mapOpenAiReportToPersistence(args: {
+  modelReport: OpenAiTickerReportOutput;
+  context: TickerReportContext;
+  stockId: string;
+  holdingId: string | null;
+  modelName: string;
+  warnings: string[];
+  fallbackUsed: boolean;
+}): Parameters<typeof createOrUpdateDailyReport>[0] {
+  const recommendation = mapOpenAiRecommendation(args.modelReport.recommendation, args.warnings);
+  const sentiment = mapOpenAiSentiment(recommendation, args.modelReport);
+  const confidenceScore = mapConvictionToConfidence(
+    args.modelReport.conviction,
+    args.context.dataQuality.confidence,
+    args.modelReport.dataGaps.length,
+  );
+  const currentPrice = args.context.marketSnapshot?.price ?? null;
+  const dailyChangePercent = args.context.marketSnapshot?.changePercent ?? null;
+  const riskScore = mapOpenAiRiskScore({
+    recommendation,
+    conviction: args.modelReport.conviction,
+    dataQualityConfidence: args.context.dataQuality.confidence,
+    dailyChangePercent,
+  });
+
+  const scoreSummary = args.modelReport.scoreSummary;
+  const shortTermOutlook = joinNotesOrNull([
+    ...args.modelReport.watchItems,
+    ...args.modelReport.keyCatalysts,
+  ]);
+  const mediumTermOutlook = joinNotesOrNull([
+    ...args.modelReport.bullCase,
+    ...args.modelReport.bearCase,
+  ]);
+  const longTermOutlook = joinNotesOrNull([
+    ...args.modelReport.valuationNotes,
+    ...args.modelReport.macroGeopoliticalNotes,
+  ]);
+
+  const technicalSummary = joinNotesOrNull(args.modelReport.technicalNotes);
+  const fundamentalSummary = joinNotesOrNull(args.modelReport.valuationNotes);
+  const newsSummary = joinNotesOrNull(args.modelReport.newsSentimentNotes);
+  const earningsSummary = joinNotesOrNull(args.modelReport.earningsNotes);
+  const macroGeopoliticalSummary = joinNotesOrNull(args.modelReport.macroGeopoliticalNotes);
+
+  return {
+    stockId: args.stockId,
+    holdingId: args.holdingId,
+    reportDate: new Date(),
+    recommendation,
+    sentiment,
+    confidenceScore,
+    riskScore,
+    riskLevel: riskLevelFromScore(riskScore),
+    currentPrice,
+    dailyChangePercent,
+    shortTermOutlook,
+    mediumTermOutlook,
+    longTermOutlook,
+    keyTakeaway: args.modelReport.executiveSummary,
+    bullishFactors: args.modelReport.bullCase,
+    bearishFactors: args.modelReport.bearCase,
+    technicalSummary,
+    fundamentalSummary,
+    newsSummary,
+    earningsSummary,
+    macroGeopoliticalSummary,
+    whatChanged: joinNotesOrNull([
+      ...args.modelReport.keyCatalysts,
+      ...args.modelReport.analystNotes,
+      ...args.modelReport.watchItems,
+    ]),
+    whatWouldChangeRecommendation: joinNotesOrNull(args.modelReport.suggestedNextActions),
+    sourceReferences: {
+      reportMode: "OPENAI_STRUCTURED",
+      fallbackUsed: args.fallbackUsed,
+      dataQualityConfidence: args.context.dataQuality.confidence,
+      dataQualityMissingData: args.context.dataQuality.missingData,
+      dataQualityStaleDataWarnings: args.context.dataQuality.staleDataWarnings,
+      disclaimer: args.modelReport.disclaimer,
+      generatedAsOf: args.modelReport.asOf,
+    },
+    modelName: args.modelName,
+    promptVersion: OPENAI_REPORT_PROMPT_VERSION,
+    rawModelOutput: {
+      reportMode: "OPENAI_STRUCTURED",
+      mappedRecommendation: recommendation,
+      openAiOutput: args.modelReport,
+      scoreSummary: {
+        compositeScore: scoreSummary.compositeScore,
+        technicalScore: scoreSummary.technicalScore,
+        fundamentalScore: scoreSummary.fundamentalScore,
+        valuationScore: scoreSummary.valuationScore,
+        analystScore: scoreSummary.analystScore,
+        newsScore: scoreSummary.newsScore,
+        dataQualityScore: scoreSummary.dataQualityScore,
+      },
+      contextSummary: {
+        asOf: args.context.asOf,
+        marketSnapshotCapturedAt: args.context.marketSnapshot?.capturedAt ?? null,
+        technicalSnapshotCapturedAt: args.context.technicalSnapshot?.capturedAt ?? null,
+        fundamentalSnapshotCapturedAt: args.context.fundamentalSnapshot?.capturedAt ?? null,
+      },
+    },
+  };
+}
+
+async function attemptOpenAiReport(args: {
+  context: TickerReportContext;
+  stockId: string;
+  holdingId: string | null;
+}): Promise<{
+  report: AIReport;
+  reportMode: TickerReportMode;
+  fallbackUsed: boolean;
+  warnings: string[];
+  dataGaps: string[];
+  modelName?: string;
+} | null> {
+  try {
+    const generated = await generateOpenAiTickerReport({
+      context: args.context,
+    });
+
+    const warnings: string[] = [];
+    const payload = mapOpenAiReportToPersistence({
+      modelReport: generated.report,
+      context: args.context,
+      stockId: args.stockId,
+      holdingId: args.holdingId,
+      modelName: generated.modelName,
+      warnings,
+      fallbackUsed: generated.usedFallbackModel,
+    });
+
+    const report = await createOrUpdateDailyReport(payload);
+    return {
+      report,
+      reportMode: "OPENAI_STRUCTURED",
+      fallbackUsed: generated.usedFallbackModel,
+      warnings,
+      dataGaps: normalizeTextList(
+        [...args.context.dataQuality.missingData, ...generated.report.dataGaps],
+        20,
+      ),
+      modelName: generated.modelName,
+    };
+  } catch (error) {
+    if (error instanceof OpenAiAgentClientError) {
+      return {
+        report: null as never,
+        reportMode: "DETERMINISTIC_FALLBACK",
+        fallbackUsed: true,
+        warnings: [summarizeOpenAiFailure(error)],
+        dataGaps: normalizeTextList(args.context.dataQuality.missingData, 20),
+        modelName: undefined,
+      };
+    }
+
+    return {
+      report: null as never,
+      reportMode: "DETERMINISTIC_FALLBACK",
+      fallbackUsed: true,
+      warnings: [
+        `OpenAI report generation failed unexpectedly: ${toWarningMessage(error)}. Deterministic fallback used.`,
+      ],
+      dataGaps: normalizeTextList(args.context.dataQuality.missingData, 20),
+      modelName: undefined,
+    };
+  }
+}
+
+export async function generateTickerReport(
+  ticker: string,
+  options: TickerReportGenerationOptions = {},
+): Promise<TickerReportGenerationResult> {
+  const normalizedTicker = normalizeTickerOrThrow(ticker);
+  const stock = await ensureStockExists(normalizedTicker);
+
+  const holding = options.holdingId ? await getHoldingWithStock(options.holdingId) : null;
+  if (options.holdingId && !holding) {
+    throw new Error("Holding not found.");
+  }
+
+  if (holding && holding.stockId !== stock.id) {
+    throw new Error("Holding does not match ticker.");
+  }
+
+  const refreshWarnings = options.refreshBeforeGenerate
+    ? await refreshTickerResearchData(normalizedTicker)
+    : [];
+
+  const context = await buildTickerReportContext(normalizedTicker, {
+    portfolioId: options.portfolioId,
+    watchlistId: options.watchlistId,
+    includeMacro: options.includeMacro,
+    includeGeopolitical: options.includeGeopolitical,
+    includeNews: options.includeNews,
+    includeAnalyst: options.includeAnalyst,
+    includeScore: options.includeScore,
+  });
+
+  const useOpenAi = options.useOpenAi === true && Boolean(env.OPENAI_API_KEY);
+  const warnings = [...refreshWarnings];
+
+  let reportMode: TickerReportMode = "DETERMINISTIC_FALLBACK";
+  let fallbackUsed = false;
+  let modelName: string | undefined;
+  let report: AIReport | null = null;
+
+  if (options.useOpenAi === true && !env.OPENAI_API_KEY) {
+    warnings.push("OpenAI requested but OPENAI_API_KEY is not configured; deterministic fallback used.");
+    fallbackUsed = true;
+  }
+
+  if (useOpenAi) {
+    const openAiResult = await attemptOpenAiReport({
+      context,
+      stockId: stock.id,
+      holdingId: holding?.id ?? null,
+    });
+
+    if (openAiResult?.report) {
+      report = openAiResult.report;
+      reportMode = openAiResult.reportMode;
+      fallbackUsed = openAiResult.fallbackUsed;
+      modelName = openAiResult.modelName;
+      warnings.push(...openAiResult.warnings);
+    } else {
+      fallbackUsed = true;
+      warnings.push(...(openAiResult?.warnings ?? []));
+    }
+  }
+
+  if (!report) {
+    const fallbackResult = await generateMockTickerReport(normalizedTicker, holding?.id);
+    report = fallbackResult.report;
+    reportMode = "DETERMINISTIC_FALLBACK";
+    modelName = report.modelName ?? "deterministic-mock-service";
+  }
+
+  let predictions: Prediction[] = [];
+  if (options.createPredictions !== false) {
+    const startingPrice =
+      report.currentPrice ?? context.marketSnapshot?.price ?? null;
+
+    if (startingPrice != null && startingPrice > 0) {
+      predictions = await createPredictionsForReport(
+        report,
+        startingPrice,
+        directionFromRecommendation(report.recommendation, report.dailyChangePercent),
+      );
+    } else {
+      warnings.push("Predictions were skipped because no positive starting price was available.");
+    }
+  }
+
+  return {
+    report,
+    predictions,
+    reportMode,
+    fallbackUsed,
+    warnings: normalizeTextList(warnings, 20),
+    dataGaps: normalizeTextList(
+      [...context.dataQuality.missingData, ...context.dataQuality.staleDataWarnings],
+      20,
+    ),
+    modelName,
+  };
 }
 
 export async function generateMockTickerReport(

@@ -2,6 +2,7 @@ import { WatchlistItemSource, WatchlistItemStatus } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fmpAnalystProvider } from "../../src/providers/fmp";
+import { ProviderConfigurationError } from "../../src/providers/errors";
 import { listAnalystActionsByStock } from "../../src/repositories/analyst-action-events.repository";
 import { getLatestAnalystSnapshot } from "../../src/repositories/analyst-snapshots.repository";
 import { createWatchlistItem } from "../../src/repositories/watchlist-items.repository";
@@ -334,5 +335,110 @@ describe("analyst-ingestion.service", () => {
     expect(result.subsourceWarnings.priceTargetConsensus.length).toBeGreaterThan(0);
     expect(result.subsourceWarnings.analystRatings.length).toBeGreaterThan(0);
     expect(result.subsourceWarnings.analystActions.length).toBeGreaterThan(0);
+  });
+
+  it("aggregates repeated entitlement warnings into a bounded summary", async () => {
+    const portfolio = await createTestPortfolio();
+    const stockA = await createTestStock("TSTANLENT1");
+    const stockB = await createTestStock("TSTANLENT2");
+
+    await createTestHolding(portfolio.id, stockA.id);
+    await createTestHolding(portfolio.id, stockB.id);
+
+    const entitlementError = new ProviderConfigurationError(
+      "Financial Modeling Prep",
+      "Financial Modeling Prep endpoint is not available for the current plan.",
+    );
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockRejectedValue(entitlementError);
+
+    const result = await ingestPortfolioAnalystData(portfolio.id);
+
+    expect(result.tickersFailed).toBe(0);
+    expect(result.analystWarningsSummary.entitlementIssuesCount).toBeGreaterThan(0);
+    expect(result.analystWarningsSummary.affectedTickers).toEqual([
+      stockA.ticker,
+      stockB.ticker,
+    ]);
+    expect(
+      result.warnings.filter(
+        (warning) => warning === "Analyst data unavailable for some tickers under current FMP plan.",
+      ),
+    ).toHaveLength(1);
+    expect(result.warnings.length).toBeLessThanOrEqual(5);
+    expect(result.rawWarnings.length).toBeGreaterThan(result.warnings.length);
+    expect(result.rawWarnings.some((warning) => warning.includes("current plan"))).toBe(true);
+  });
+
+  it("aggregates no-data warnings by ticker/category while keeping raw warning detail", async () => {
+    const portfolio = await createTestPortfolio();
+    const stock = await createTestStock("TSTANLND01");
+
+    await createTestHolding(portfolio.id, stock.id);
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockResolvedValue({
+      ticker: stock.ticker,
+      capturedAt: new Date("2026-06-10T00:00:00.000Z"),
+      source: "FMP",
+      priceTargetAverage: 120,
+      raw: { source: "summary" },
+    });
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockResolvedValue({
+      source: "FMP",
+      priceTargetConsensus: 121,
+      raw: { source: "consensus" },
+    });
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockResolvedValue(null);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockResolvedValue({
+      source: "FMP",
+      ratingConsensus: "HOLD",
+      raw: { source: "grades-historical" },
+    });
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockResolvedValue([
+      {
+        period: "annual",
+        date: new Date("2026-06-01T00:00:00.000Z"),
+        source: "FMP",
+      },
+    ] as any);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockResolvedValue({
+      rating: "B",
+      source: "FMP",
+    } as any);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockResolvedValue([
+      {
+        rating: "B",
+        source: "FMP",
+      },
+    ] as any);
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockResolvedValue([
+      {
+        ticker: stock.ticker,
+        source: "FMP",
+        actionType: "UPGRADE",
+        eventDate: new Date("2026-06-11T00:00:00.000Z"),
+        raw: { source: "actions" },
+      },
+    ]);
+
+    const result = await ingestPortfolioAnalystData(portfolio.id);
+
+    expect(result.analystWarningsSummary.entitlementIssuesCount).toBe(0);
+    expect(result.analystWarningsSummary.noDataCount).toBe(1);
+    expect(result.analystWarningsSummary.noRecordsCount).toBe(0);
+    expect(result.warnings.some((warning) => warning.includes("returned no data"))).toBe(true);
+    expect(result.warnings.length).toBeLessThanOrEqual(5);
+
+    const duplicatedRawWarnings = result.rawWarnings.filter((warning) =>
+      warning.includes("Grades consensus returned no data."),
+    );
+    expect(duplicatedRawWarnings.length).toBeGreaterThan(1);
   });
 });

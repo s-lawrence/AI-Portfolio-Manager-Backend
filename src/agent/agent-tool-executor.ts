@@ -192,6 +192,29 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
     };
   }
 
+  if (toolName === "rankPortfolioHoldings") {
+    const rankedHoldings = asArray(payload.rankedHoldings);
+    const skippedHoldings = asArray(payload.skippedHoldings);
+
+    return {
+      portfolioId: asString(payload.portfolioId),
+      totalHoldings: asNumber(payload.totalHoldings),
+      scoredHoldingsCount: asNumber(payload.scoredHoldingsCount) ?? rankedHoldings.length,
+      skippedHoldingsCount: asNumber(payload.skippedHoldingsCount) ?? skippedHoldings.length,
+      topRankedTickers: rankedHoldings
+        .map((value) => asRecord(value))
+        .filter((value): value is Record<string, unknown> => value != null)
+        .slice(0, 3)
+        .map((item) => {
+          const ticker = asString(item.ticker) ?? "UNKNOWN";
+          const score = asNumber(item.compositeScore);
+          const stance = asString(item.suggestedStance);
+          const withScore = score == null ? ticker : `${ticker} (${score.toFixed(1)})`;
+          return stance ? `${withScore} ${stance}` : withScore;
+        }),
+    };
+  }
+
   if (toolName === "getTickerDataQuality") {
     return {
       ticker: asString(payload.ticker),
@@ -248,11 +271,49 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
       .filter((value): value is Record<string, unknown> => value != null);
     return {
       category: asString(payload.category),
-      candidateCount: items.length,
-      topTickers: items
-        .map((item) => asString(item.ticker))
-        .filter((ticker): ticker is string => ticker != null)
-        .slice(0, MAX_LIST_ITEMS),
+      candidateCount: asNumber(payload.candidateCount) ?? items.length,
+      topTickers:
+        toBoundedStringList(asArray(payload.topTickers), MAX_LIST_ITEMS).length > 0
+          ? toBoundedStringList(asArray(payload.topTickers), MAX_LIST_ITEMS)
+          : items
+            .map((item) => asString(item.ticker))
+            .filter((ticker): ticker is string => ticker != null)
+            .slice(0, MAX_LIST_ITEMS),
+      capturedAt: asString(payload.capturedAt),
+      warningCount: asArray(payload.warnings).length,
+    };
+  }
+
+  if (toolName === "rankDiscoveryCandidates") {
+    const rankedCandidates = asArray(payload.rankedCandidates);
+    const recommendedCandidates = asArray(payload.recommendedCandidates);
+    const monitorCandidates = asArray(payload.monitorCandidates);
+    const notRecommendedCandidates = asArray(payload.notRecommendedCandidates);
+    const bestAvailableButBelowThreshold = asArray(payload.bestAvailableButBelowThreshold);
+    const skippedCandidates = asArray(payload.skippedCandidates);
+    return {
+      category: asString(payload.category),
+      totalCandidates: asNumber(payload.totalCandidates),
+      scoredCandidatesCount: asNumber(payload.scoredCandidatesCount) ?? rankedCandidates.length,
+      skippedCandidatesCount: asNumber(payload.skippedCandidatesCount) ?? skippedCandidates.length,
+      recommendedCandidatesCount: recommendedCandidates.length,
+      monitorCandidatesCount: monitorCandidates.length,
+      notRecommendedCandidatesCount: notRecommendedCandidates.length,
+      bestAvailableButBelowThresholdCount: bestAvailableButBelowThreshold.length,
+      noQualifiedCandidates: payload.noQualifiedCandidates === true,
+      topRankedTickers: rankedCandidates
+        .map((value) => asRecord(value))
+        .filter((value): value is Record<string, unknown> => value != null)
+        .slice(0, 5)
+        .map((item) => {
+          const ticker = asString(item.ticker) ?? "UNKNOWN";
+          const score = asNumber(item.compositeScore);
+          const stance = asString(item.suggestedStance);
+          const withScore = score == null ? ticker : `${ticker} (${score.toFixed(1)})`;
+          return stance ? `${withScore} ${stance}` : withScore;
+        }),
+      warningCount: asArray(payload.warnings).length,
+      suggestedRefreshActions: toBoundedStringList(asArray(payload.suggestedRefreshActions), 5),
     };
   }
 
@@ -280,6 +341,8 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
         .map((value) => asString(value.key))
         .filter((key): key is string => key != null)
         .slice(0, 3),
+      message: asString(payload.message),
+      suggestedActions: toBoundedStringList(asArray(payload.suggestedActions), 3),
     };
   }
 
@@ -334,12 +397,40 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
   }
 
   if (toolName === "refreshGdeltRiskContext") {
+    const failedQueries = asArray(payload.failedQueries)
+      .map((value) => asRecord(value))
+      .filter((value): value is Record<string, unknown> => value != null);
+
     return {
       plannedOrExecuted: "executed",
       queriesProcessed: asNumber(payload.queriesProcessed),
       queriesFailed: asNumber(payload.queriesFailed),
       eventsCreated: asNumber(payload.eventsCreated),
       warningCount: asArray(payload.warnings).length,
+      failedQueries: failedQueries
+        .slice(0, 3)
+        .map((item) => ({
+          query: asString(item.query),
+          failureCode: asString(item.failureCode),
+        })),
+    };
+  }
+
+  if (toolName === "generateTickerReport") {
+    const report = asRecord(payload.report);
+    const predictions = asArray(payload.predictions);
+
+    return {
+      plannedOrExecuted: "executed",
+      reportId: asString(report?.id),
+      ticker: asString(report?.ticker),
+      recommendation: asString(report?.recommendation),
+      reportMode: asString(payload.reportMode),
+      fallbackUsed: payload.fallbackUsed === true,
+      predictionCount: predictions.length,
+      warningCount: asArray(payload.warnings).length,
+      dataGapCount: asArray(payload.dataGaps).length,
+      modelName: asString(payload.modelName),
     };
   }
 
@@ -370,6 +461,7 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
 function buildDryRunSummary(toolName: string, plannedData: unknown): Record<string, unknown> {
   const payload = asRecord(plannedData) ?? {};
   const plannedTickers = asArray(payload.plannedTickers);
+  const queryProfiles = asArray(payload.queryProfiles);
   return {
     plannedOrExecuted: "planned",
     toolName,
@@ -379,6 +471,7 @@ function buildDryRunSummary(toolName: string, plannedData: unknown): Record<stri
     plannedTickersCount: plannedTickers.length,
     tickersProcessed: asNumber(payload.tickersProcessed),
     tickersSkipped: asNumber(payload.tickersSkipped),
+    queryProfilesCount: queryProfiles.length,
     message: asString(payload.message),
   };
 }

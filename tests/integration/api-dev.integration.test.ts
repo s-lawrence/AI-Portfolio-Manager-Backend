@@ -95,6 +95,20 @@ describe("API dev demo-context route", () => {
     await app.close();
   });
 
+  it("route-map debug endpoint is unavailable in production", async () => {
+    process.env.NODE_ENV = "production";
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/dev/routes",
+    });
+
+    expect(response.statusCode).toBe(404);
+
+    await app.close();
+  });
+
   it("returns market-data audit payload for an existing ticker", async () => {
     process.env.NODE_ENV = "test";
 

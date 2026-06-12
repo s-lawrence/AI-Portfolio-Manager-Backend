@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
+import { env } from "../config/env";
 import { prisma } from "../db/prisma";
 import { resetTestData, testPrisma, verifyDatabaseConnection } from "./test-db";
 
@@ -9,6 +10,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  env.NODE_ENV = "test";
+  env.AUTH_ENABLED = false;
   await resetTestData();
 });
 

@@ -326,6 +326,40 @@ export interface WatchlistResearchScoreResult {
   rankedItems: WatchlistScoredItem[];
 }
 
+export interface PortfolioRankedHolding {
+  rank: number;
+  ticker: string;
+  companyName: string | null;
+  quantity: number | null;
+  marketValueCad: number | null;
+  marketValueNative: number | null;
+  portfolioWeight: number | null;
+  compositeScore: number;
+  suggestedStance: SuggestedResearchStance;
+  componentScores: TickerResearchComponentScores;
+  bullishFactors: string[];
+  bearishFactors: string[];
+  missingData: string[];
+  staleDataWarnings: string[];
+}
+
+export interface PortfolioRankedSkippedHolding {
+  ticker: string;
+  reason: string;
+  missingData: string[];
+}
+
+export interface PortfolioHoldingRankingResult {
+  portfolioId: string;
+  asOf: string;
+  totalHoldings: number;
+  scoredHoldingsCount: number;
+  skippedHoldingsCount: number;
+  skippedHoldings: PortfolioRankedSkippedHolding[];
+  rankedHoldings: PortfolioRankedHolding[];
+  warnings: string[];
+}
+
 export interface RefreshWatchlistResearchDataOptions {
   historicalLimit?: number;
   newsLimitPerTicker?: number;
@@ -480,6 +514,8 @@ export interface GeopoliticalSummaryResult {
   }>;
   topCountries: Array<{ key: string; count: number }>;
   topDomains: Array<{ key: string; count: number }>;
+  message?: string;
+  suggestedActions?: string[];
 }
 
 export interface DailyTickerReportInput {
@@ -622,7 +658,170 @@ export interface AlertQueryOptions extends RepositoryListOptions {
 export interface TickerReportGenerationResult {
   report: AIReport;
   predictions: Prediction[];
+  reportMode?: TickerReportMode;
+  fallbackUsed?: boolean;
+  warnings?: string[];
+  dataGaps?: string[];
+  modelName?: string;
 }
+
+export type TickerReportDataQualityConfidence = "LOW" | "MEDIUM" | "HIGH";
+
+export interface TickerReportContextBuildOptions {
+  portfolioId?: string;
+  watchlistId?: string;
+  includeMacro?: boolean;
+  includeGeopolitical?: boolean;
+  includeNews?: boolean;
+  includeAnalyst?: boolean;
+  includeScore?: boolean;
+}
+
+export interface TickerReportGenerationOptions extends TickerReportContextBuildOptions {
+  holdingId?: string | null;
+  useOpenAi?: boolean;
+  refreshBeforeGenerate?: boolean;
+  createPredictions?: boolean;
+}
+
+export interface TickerReportContext {
+  ticker: string;
+  companyName: string | null;
+  exchange: string | null;
+  currency: string | null;
+  asOf: string;
+  dataQuality: {
+    missingData: string[];
+    staleDataWarnings: string[];
+    confidence: TickerReportDataQualityConfidence;
+  };
+  marketSnapshot: {
+    price: number | null;
+    previousClose: number | null;
+    changePercent: number | null;
+    open: number | null;
+    high: number | null;
+    low: number | null;
+    volume: string | null;
+    marketCap: string | null;
+    capturedAt: string | null;
+    source: string | null;
+  } | null;
+  technicalSnapshot: {
+    trendDirection: string | null;
+    sma20: number | null;
+    sma50: number | null;
+    sma200: number | null;
+    rsi14: number | null;
+    macd: number | null;
+    macdSignal: number | null;
+    macdHistogram: number | null;
+    volatility: number | null;
+    capturedAt: string | null;
+  } | null;
+  fundamentalSnapshot: {
+    peRatio: number | null;
+    forwardPeRatio: number | null;
+    pegRatio: number | null;
+    priceToSales: number | null;
+    priceToBook: number | null;
+    evToEbitda: number | null;
+    eps: number | null;
+    revenueGrowth: number | null;
+    grossMargin: number | null;
+    operatingMargin: number | null;
+    netMargin: number | null;
+    debtToEquity: number | null;
+    currentRatio: number | null;
+    freeCashFlow: string | null;
+    dividendYield: number | null;
+    analystConsensus: string | null;
+    capturedAt: string | null;
+    source: string | null;
+  } | null;
+  analystContext: {
+    ratingConsensus: string | null;
+    analystCount: number | null;
+    priceTargetAverage: number | null;
+    priceTargetHigh: number | null;
+    priceTargetLow: number | null;
+    priceTargetConsensus: number | null;
+    targetMedian: number | null;
+    upsidePercent: number | null;
+    strongBuyCount: number | null;
+    buyCount: number | null;
+    holdCount: number | null;
+    sellCount: number | null;
+    strongSellCount: number | null;
+    capturedAt: string | null;
+    source: string | null;
+  } | null;
+  recentAnalystActions: Array<{
+    actionType: string;
+    firm: string | null;
+    newRating: string | null;
+    previousRating: string | null;
+    newPriceTarget: number | null;
+    previousPriceTarget: number | null;
+    eventDate: string;
+  }>;
+  analystEstimates: {
+    latestAnnual: TickerDashboardSummary["latestAnnualAnalystEstimate"] | null;
+    latestQuarter: TickerDashboardSummary["latestQuarterAnalystEstimate"] | null;
+  };
+  fmpFinancialRating: TickerDashboardSummary["fmpFinancialRating"] | null;
+  newsContext: {
+    totalArticles: number;
+    bullishCount: number;
+    bearishCount: number;
+    neutralCount: number;
+    mixedCount: number;
+    averageSentimentScore: number | null;
+    averageMaterialityScore: number | null;
+    topHeadlines: Array<{
+      headline: string;
+      publishedAt: string;
+      source: string | null;
+      sentiment: string | null;
+      sentimentScore: number | null;
+      materialityScore: number | null;
+    }>;
+  } | null;
+  earningsContext: {
+    nextEarningsDate: string | null;
+    earningsTime: string | null;
+    estimatedEps: number | null;
+    estimatedRevenue: string | null;
+    fiscalQuarter: string | null;
+    fiscalYear: number | null;
+    isDateConfirmed: boolean | null;
+  } | null;
+  macroContext: {
+    summary: string;
+  } | null;
+  geopoliticalContext: GeopoliticalSummaryResult | null;
+  portfolioContext?: {
+    portfolioId: string;
+    baseCurrency: string;
+    holdingCount: number;
+    matchingHoldingsCount: number;
+    matchingHoldingIds: string[];
+    matchingMarketValueCad: number | null;
+    matchingWeightPercent: number | null;
+  } | null;
+  watchlistContext?: {
+    watchlistId: string;
+    watchlistName: string;
+    itemCount: number;
+    matchingItemsCount: number;
+    matchingStatuses: string[];
+    matchingPriorities: string[];
+    thesisSamples: string[];
+  } | null;
+  deterministicScore?: TickerResearchScoreResult | null;
+}
+
+export type TickerReportMode = "OPENAI_STRUCTURED" | "DETERMINISTIC_FALLBACK";
 
 export interface AIReportWithStockMetadata extends AIReport {
   ticker: string;
@@ -841,6 +1040,14 @@ export interface IngestTickerAnalystDataResult {
   warnings: string[];
 }
 
+export interface AnalystWarningsSummary {
+  entitlementIssuesCount: number;
+  noDataCount: number;
+  noRecordsCount: number;
+  affectedTickers: string[];
+  examples: string[];
+}
+
 export interface IngestPortfolioAnalystDataResult {
   portfolioId: string;
   startedAt: string;
@@ -854,6 +1061,8 @@ export interface IngestPortfolioAnalystDataResult {
   actionsUpdated: number;
   results: IngestTickerAnalystDataResult[];
   failedTickers: IngestPortfolioTickerFailure[];
+  analystWarningsSummary: AnalystWarningsSummary;
+  rawWarnings: string[];
   warnings: string[];
 }
 
@@ -870,6 +1079,8 @@ export interface IngestWatchlistAnalystDataResult {
   actionsUpdated: number;
   results: IngestTickerAnalystDataResult[];
   failedTickers: IngestPortfolioTickerFailure[];
+  analystWarningsSummary: AnalystWarningsSummary;
+  rawWarnings: string[];
   warnings: string[];
 }
 
@@ -905,6 +1116,15 @@ export interface GdeltIngestionOptions {
   from?: Date;
   to?: Date;
   maxRecords?: number;
+  queryProfile?: string;
+}
+
+export interface GdeltQueryProfile {
+  queryProfile: string;
+  query: string;
+  lookbackDays: number;
+  maxRecords: number;
+  expectedUseCase: string;
 }
 
 export interface GdeltDefaultRiskIngestionOptions {
@@ -919,12 +1139,24 @@ export interface GdeltDefaultRiskIngestionOptions {
 export interface GdeltQueryFailureDetail {
   query: string;
   reason: string;
+  failureCode?: string;
   statusCode?: number;
+  retryAttempted?: boolean;
+}
+
+export interface GdeltResponseDiagnosticItem {
+  query: string;
+  failureCode?: string;
+  statusCode?: number;
+  contentType?: string | null;
+  contentLength?: number;
+  responsePreview?: string;
   retryAttempted?: boolean;
 }
 
 export interface IngestGeopoliticalQueryResult {
   query: string;
+  queryProfile?: string;
   eventsCreated: number;
   eventsUpdated: number;
   eventsSkipped: number;
@@ -943,6 +1175,8 @@ export interface IngestDefaultGdeltRiskSetResult {
   warnings: string[];
   failedQueries: GdeltQueryFailureDetail[];
   results: IngestGeopoliticalQueryResult[];
+  queryProfiles?: GdeltQueryProfile[];
+  responseDiagnostics?: GdeltResponseDiagnosticItem[];
 }
 
 export interface GdeltQueryAuditResult {
@@ -966,7 +1200,78 @@ export interface LatestGeopoliticalContextResult {
 
 export interface DiscoveryCandidatesResult {
   category: string;
+  candidateCount: number;
+  topTickers: string[];
+  capturedAt?: string;
+  warnings: string[];
   items: MarketDiscoverySnapshot[];
+}
+
+export interface RankDiscoveryCandidatesOptions {
+  portfolioId?: string;
+  watchlistId?: string;
+  category?: string;
+  limit?: number;
+  excludeExistingHoldings?: boolean;
+  excludeExistingWatchlistItems?: boolean;
+}
+
+export interface RankedDiscoveryCandidate {
+  rank: number;
+  ticker: string;
+  companyName: string | null;
+  category: string;
+  price: number | null;
+  changePercent: number | null;
+  marketCap: number | string | null;
+  compositeScore: number;
+  suggestedStance: SuggestedResearchStance;
+  actionLabel: string;
+  qualifiesForRecommendation: boolean;
+  why: string[];
+  cautions: string[];
+  dataQualityScore: number | null;
+  bullishFactors: string[];
+  bearishFactors: string[];
+  missingData: string[];
+  staleDataWarnings: string[];
+  diversificationNotes: string[];
+  alreadyHeld: boolean;
+  alreadyInWatchlist: boolean;
+}
+
+export interface SkippedDiscoveryCandidate {
+  ticker: string;
+  reason: string;
+  missingData: string[];
+}
+
+export interface RankDiscoveryCandidatesResult {
+  category: string;
+  totalCandidates: number;
+  scoredCandidatesCount: number;
+  skippedCandidatesCount: number;
+  recommendationThreshold: {
+    minimumRecommendationScore: number;
+    monitorOnlyScoreFloor: number;
+    monitorOnlyScoreCeiling: number;
+    labels: {
+      strongReviewCandidate: string;
+      reviewCandidate: string;
+      monitorOnly: string;
+      notRecommended: string;
+    };
+  };
+  noQualifiedCandidates: boolean;
+  reasonNoQualifiedCandidates?: string;
+  rankedCandidates: RankedDiscoveryCandidate[];
+  recommendedCandidates: RankedDiscoveryCandidate[];
+  monitorCandidates: RankedDiscoveryCandidate[];
+  notRecommendedCandidates: RankedDiscoveryCandidate[];
+  bestAvailableButBelowThreshold: RankedDiscoveryCandidate[];
+  skippedCandidates: SkippedDiscoveryCandidate[];
+  warnings: string[];
+  suggestedRefreshActions: string[];
 }
 
 export interface FmpEconomicsIngestionSectionResult {
@@ -1115,6 +1420,7 @@ export interface PortfolioFmpFullRefreshResult {
   earnings: PortfolioEarningsIngestionResult;
   news: IngestPortfolioNewsResult;
   analystData?: IngestPortfolioAnalystDataResult;
+  analystWarningsSummary?: AnalystWarningsSummary;
   geopolitical?: IngestDefaultGdeltRiskSetResult;
   economics?: IngestFmpEconomicsDefaultSetResult;
   bankOfCanada?: MacroIngestionSectionResult;

@@ -35,6 +35,14 @@ export function badRequest(message: string, details?: unknown): ApiError {
   return new ApiError(400, "BAD_REQUEST", message, details);
 }
 
+export function unauthorized(message: string = "Authentication required."): ApiError {
+  return new ApiError(401, "UNAUTHORIZED", message);
+}
+
+export function forbidden(message: string = "Forbidden."): ApiError {
+  return new ApiError(403, "FORBIDDEN", message);
+}
+
 export function notFound(message: string): ApiError {
   return new ApiError(404, "NOT_FOUND", message);
 }
@@ -141,6 +149,16 @@ function logError(request: FastifyRequest, logger: FastifyBaseLogger, error: unk
 }
 
 export function registerApiErrorHandler(app: FastifyInstance): void {
+  app.setNotFoundHandler((request, reply) => {
+    reply.status(404).send({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: `Route ${request.method}:${request.url} not found.`,
+      },
+    } satisfies ErrorEnvelope);
+  });
+
   app.setErrorHandler(
     (error: unknown, request: FastifyRequest, reply: FastifyReply) => {
       const mapped = mapKnownError(error);

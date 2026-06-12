@@ -21,6 +21,7 @@ import * as researchScoringService from "../../src/services/research-scoring.ser
 import * as stocksService from "../../src/services/stocks.service";
 import * as watchlistsService from "../../src/services/watchlists.service";
 import * as macroIngestionService from "../../src/services/macro-ingestion.service";
+import * as aiReportsService from "../../src/services/ai-reports.service";
 import { bankOfCanadaProvider } from "../../src/providers/bank-of-canada";
 import { updateHolding } from "../../src/repositories/holdings.repository";
 import {
@@ -260,6 +261,72 @@ describe("agent tool registry and executor", () => {
     });
   });
 
+  it("rankPortfolioHoldings tool calls research scoring service and returns bounded ranking summary", async () => {
+    const rankingSpy = vi
+      .spyOn(researchScoringService, "rankPortfolioHoldings")
+      .mockResolvedValue({
+        portfolioId: "portfolio-1",
+        asOf: new Date("2026-06-12T00:00:00.000Z").toISOString(),
+        totalHoldings: 5,
+        scoredHoldingsCount: 4,
+        skippedHoldingsCount: 1,
+        skippedHoldings: [
+          {
+            ticker: "NODATA",
+            reason: "No meaningful persisted metrics are available for ranking.",
+            missingData: ["price", "currency"],
+          },
+        ],
+        rankedHoldings: [
+          {
+            rank: 1,
+            ticker: "NVDA",
+            companyName: "NVIDIA Corporation",
+            quantity: 10,
+            marketValueCad: 1200,
+            marketValueNative: 1200,
+            portfolioWeight: 24,
+            compositeScore: 82.2,
+            suggestedStance: "STRONG_CANDIDATE",
+            componentScores: {
+              technicalScore: 80,
+              fundamentalScore: 82,
+              valuationScore: 70,
+              analystScore: 85,
+              newsScore: 76,
+              macroRiskScore: 61,
+              earningsRiskScore: 58,
+              dataQualityScore: 88,
+            },
+            bullishFactors: ["Revenue growth is positive."],
+            bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+            missingData: [],
+            staleDataWarnings: [],
+          },
+        ],
+        warnings: [],
+      });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "rankPortfolioHoldings",
+      input: { portfolioId: "portfolio-1", limit: 3 },
+      context: { source: "USER" },
+    });
+
+    expect(rankingSpy).toHaveBeenCalledWith("portfolio-1", {
+      limit: 3,
+      includeWatchlist: false,
+    });
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      portfolioId: "portfolio-1",
+      totalHoldings: 5,
+      scoredHoldingsCount: 4,
+      skippedHoldingsCount: 1,
+    });
+  });
+
   it("getWatchlistResearchBundle tool calls existing watchlist service", async () => {
     const bundleSpy = vi
       .spyOn(watchlistsService, "getWatchlistResearchBundle")
@@ -285,7 +352,14 @@ describe("agent tool registry and executor", () => {
   it("getDiscoveryCandidates input schema rejects invalid filters", async () => {
     const discoverySpy = vi
       .spyOn(discoveryService, "listDiscoveryCandidates")
-      .mockResolvedValue({ category: "GAINERS", items: [] });
+      .mockResolvedValue({
+        category: "GAINERS",
+        candidateCount: 0,
+        topTickers: [],
+        capturedAt: undefined,
+        warnings: [],
+        items: [],
+      });
 
     const executor = new AgentToolExecutor(createAgentToolRegistry());
 
@@ -439,6 +513,10 @@ describe("agent tool registry and executor", () => {
 
     vi.spyOn(discoveryService, "listDiscoveryCandidates").mockResolvedValue({
       category: "GAINERS",
+      candidateCount: 200,
+      topTickers: ["TK0", "TK1", "TK2", "TK3", "TK4", "TK5"],
+      capturedAt: new Date("2026-06-10T12:00:00.000Z").toISOString(),
+      warnings: ["stale snapshot"],
       items,
     });
 
@@ -453,8 +531,123 @@ describe("agent tool registry and executor", () => {
     expect(result.dataSummary).toMatchObject({
       category: "GAINERS",
       candidateCount: 200,
+      warningCount: 1,
     });
     expect((result.dataSummary?.topTickers as string[]).length).toBeLessThanOrEqual(5);
+  });
+
+  it("rankDiscoveryCandidates tool calls discovery service and returns bounded ranking summary", async () => {
+    const rankSpy = vi
+      .spyOn(discoveryService, "rankDiscoveryCandidates")
+      .mockResolvedValue({
+        category: "GAINERS",
+        totalCandidates: 10,
+        scoredCandidatesCount: 6,
+        skippedCandidatesCount: 4,
+        recommendationThreshold: {
+          minimumRecommendationScore: 60,
+          monitorOnlyScoreFloor: 50,
+          monitorOnlyScoreCeiling: 59.99,
+          labels: {
+            strongReviewCandidate: "Strong review candidate",
+            reviewCandidate: "Review candidate",
+            monitorOnly: "Monitor only",
+            notRecommended: "Not recommended from current snapshot",
+          },
+        },
+        noQualifiedCandidates: false,
+        rankedCandidates: [
+          {
+            rank: 1,
+            ticker: "NVDA",
+            companyName: "NVIDIA Corporation",
+            category: "GAINERS",
+            price: 120,
+            changePercent: 2.1,
+            marketCap: 2_000_000_000,
+            compositeScore: 81.3,
+            suggestedStance: "STRONG_CANDIDATE",
+            actionLabel: "Strong review candidate",
+            qualifiesForRecommendation: true,
+            why: ["Revenue growth is positive."],
+            cautions: ["RSI is elevated and may signal short-term exhaustion."],
+            dataQualityScore: 84,
+            bullishFactors: ["Revenue growth is positive."],
+            bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+            missingData: [],
+            staleDataWarnings: [],
+            diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+            alreadyHeld: false,
+            alreadyInWatchlist: false,
+          },
+        ],
+        recommendedCandidates: [
+          {
+            rank: 1,
+            ticker: "NVDA",
+            companyName: "NVIDIA Corporation",
+            category: "GAINERS",
+            price: 120,
+            changePercent: 2.1,
+            marketCap: 2_000_000_000,
+            compositeScore: 81.3,
+            suggestedStance: "STRONG_CANDIDATE",
+            actionLabel: "Strong review candidate",
+            qualifiesForRecommendation: true,
+            why: ["Revenue growth is positive."],
+            cautions: ["RSI is elevated and may signal short-term exhaustion."],
+            dataQualityScore: 84,
+            bullishFactors: ["Revenue growth is positive."],
+            bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+            missingData: [],
+            staleDataWarnings: [],
+            diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+            alreadyHeld: false,
+            alreadyInWatchlist: false,
+          },
+        ],
+        monitorCandidates: [],
+        notRecommendedCandidates: [],
+        bestAvailableButBelowThreshold: [],
+        skippedCandidates: [
+          {
+            ticker: "MSFT",
+            reason: "Ticker is already held in the portfolio.",
+            missingData: [],
+          },
+        ],
+        warnings: [],
+        suggestedRefreshActions: ["refreshDiscoveryCategory"],
+      });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "rankDiscoveryCandidates",
+      input: {
+        category: "GAINERS",
+        portfolioId: "portfolio-1",
+        watchlistId: "watchlist-1",
+        limit: 5,
+      },
+      context: { source: "USER" },
+    });
+
+    expect(rankSpy).toHaveBeenCalledWith({
+      category: "GAINERS",
+      portfolioId: "portfolio-1",
+      watchlistId: "watchlist-1",
+      limit: 5,
+      excludeExistingHoldings: undefined,
+      excludeExistingWatchlistItems: undefined,
+    });
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      category: "GAINERS",
+      totalCandidates: 10,
+      scoredCandidatesCount: 6,
+      skippedCandidatesCount: 4,
+      suggestedRefreshActions: ["refreshDiscoveryCategory"],
+    });
   });
 
   it("tool errors are structured and secret-safe", async () => {
@@ -663,6 +856,114 @@ describe("agent tool registry and executor", () => {
         riskLevel: "MUTATION",
       },
     });
+
+    await expect(
+      executor.executeByName({
+        toolName: "generateTickerReport",
+        input: {
+          ticker: "AAPL",
+          useOpenAi: false,
+        },
+        context: { source: "AGENT" },
+      }),
+    ).rejects.toMatchObject({
+      code: "AGENT_TOOL_CONFIRMATION_REQUIRED",
+      statusCode: 409,
+      details: {
+        toolName: "generateTickerReport",
+        riskLevel: "MUTATION",
+      },
+    });
+  });
+
+  it("generateTickerReport dry-run returns planned context and skips writes", async () => {
+    const contextSpy = vi
+      .spyOn(aiReportsService, "buildTickerReportContext")
+      .mockResolvedValue({
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        exchange: "NASDAQ",
+        currency: "USD",
+        asOf: new Date("2026-06-01T00:00:00.000Z").toISOString(),
+        dataQuality: {
+          missingData: [],
+          staleDataWarnings: [],
+          confidence: "HIGH",
+        },
+        marketSnapshot: null,
+        technicalSnapshot: null,
+        fundamentalSnapshot: null,
+        analystContext: null,
+        recentAnalystActions: [],
+        analystEstimates: {
+          latestAnnual: null,
+          latestQuarter: null,
+        },
+        fmpFinancialRating: null,
+        newsContext: null,
+        earningsContext: null,
+        macroContext: null,
+        geopoliticalContext: null,
+        deterministicScore: null,
+      } as never);
+    const generateSpy = vi.spyOn(aiReportsService, "generateTickerReport");
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "generateTickerReport",
+      input: {
+        ticker: "AAPL",
+        useOpenAi: false,
+      },
+      context: { source: "AGENT", dryRun: true },
+      confirmed: true,
+    });
+
+    expect(contextSpy).toHaveBeenCalledWith("AAPL", expect.any(Object));
+    expect(generateSpy).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      plannedOrExecuted: "planned",
+      toolName: "generateTickerReport",
+    });
+  });
+
+  it("generateTickerReport executes when confirmed", async () => {
+    const generateSpy = vi
+      .spyOn(aiReportsService, "generateTickerReport")
+      .mockResolvedValue({
+        report: {
+          id: "report-2",
+          recommendation: "BUY",
+        },
+        predictions: [{ id: "prediction-1" }],
+        reportMode: "OPENAI_STRUCTURED",
+        fallbackUsed: false,
+        warnings: [],
+        dataGaps: [],
+        modelName: "gpt-test",
+      } as never);
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "generateTickerReport",
+      input: {
+        ticker: "MSFT",
+        useOpenAi: true,
+      },
+      context: { source: "USER" },
+      confirmed: true,
+    });
+
+    expect(generateSpy).toHaveBeenCalledWith("MSFT", expect.objectContaining({ useOpenAi: true }));
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      reportId: "report-2",
+      recommendation: "BUY",
+      reportMode: "OPENAI_STRUCTURED",
+      predictionCount: 1,
+      modelName: "gpt-test",
+    });
   });
 
   it("dry-run addTickerToWatchlist does not write", async () => {
@@ -793,6 +1094,57 @@ describe("agent tool registry and executor", () => {
         },
       ],
     });
+  });
+
+  it("refreshGdeltRiskContext dry-run returns planned query profiles and does not call service", async () => {
+    const refreshSpy = vi.spyOn(geopoliticalService, "ingestDefaultGdeltRiskSet");
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+
+    const result = await executor.executeByName({
+      toolName: "refreshGdeltRiskContext",
+      input: {
+        mode: "quick",
+        lookbackDays: 7,
+      },
+      context: { source: "AGENT", dryRun: true },
+      confirmed: true,
+    });
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      plannedAction: true,
+      toolName: "refreshGdeltRiskContext",
+      queryProfiles: expect.any(Array),
+    });
+  });
+
+  it("refreshGdeltRiskContext confirmed path calls ingestion service", async () => {
+    const refreshSpy = vi.spyOn(geopoliticalService, "ingestDefaultGdeltRiskSet").mockResolvedValue({
+      startedAt: new Date("2026-06-01T00:00:00.000Z").toISOString(),
+      finishedAt: new Date("2026-06-01T00:00:01.000Z").toISOString(),
+      durationMs: 1000,
+      queriesProcessed: 1,
+      queriesFailed: 0,
+      eventsCreated: 1,
+      eventsUpdated: 0,
+      eventsSkipped: 0,
+      warnings: [],
+      failedQueries: [],
+      results: [],
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    await executor.executeByName({
+      toolName: "refreshGdeltRiskContext",
+      input: {
+        mode: "quick",
+      },
+      context: { source: "AGENT" },
+      confirmed: true,
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 
   it("disabled tool cannot execute", async () => {

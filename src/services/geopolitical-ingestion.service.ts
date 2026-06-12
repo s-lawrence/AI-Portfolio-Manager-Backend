@@ -2,7 +2,11 @@ import { Prisma } from "@prisma/client";
 
 import { env } from "../config/env";
 import { gdeltProvider } from "../providers/gdelt";
-import { ProviderRequestError } from "../providers/errors";
+import {
+  GDELT_FAILURE_CODES,
+  GdeltFailureCode,
+} from "../providers/gdelt/gdelt-client";
+import { ProviderRequestError, ProviderResponseError } from "../providers/errors";
 import {
   ProviderGeopoliticalEvent,
   ProviderGeopoliticalSearchOptions,
@@ -15,8 +19,10 @@ import {
 import {
   GdeltDefaultRiskIngestionOptions,
   GdeltIngestionOptions,
+  GdeltQueryProfile,
   GdeltQueryAuditResult,
   GdeltQueryFailureDetail,
+  GdeltResponseDiagnosticItem,
   GeopoliticalSummaryResult,
   IngestDefaultGdeltRiskSetResult,
   IngestGeopoliticalQueryResult,
@@ -26,6 +32,120 @@ import {
 const DEFAULT_LOOKBACK_DAYS = 7;
 const MAX_SUMMARY_EVENTS = 250;
 const DEFAULT_GDELT_MAX_RECORDS_PER_QUERY = 10;
+const NON_PRODUCTION = env.NODE_ENV !== "production";
+
+type GdeltErrorCause = {
+  failureCode?: string;
+  retryAttempted?: boolean;
+  responseDiagnostics?: {
+    statusCode?: number;
+    contentType?: string | null;
+    contentLength?: number;
+    responsePreview?: string;
+    retryAttempted?: boolean;
+  };
+};
+
+const QUERY_PROFILE_USE_CASES = {
+  portfolioRisk: "Broad market and geopolitical risk context for portfolio-level exposure.",
+  macroRisk: "Macro/economic risk context for rates, inflation, growth, and energy pressure.",
+  tickerCompanyRisk: "Company-specific risk context for one issuer using name/ticker + risk terms.",
+  sectorRisk: "Sector-specific risk context for industry-level risk monitoring.",
+} as const;
+
+const PORTFOLIO_RISK_QUERY =
+  "sanctions OR conflict OR war OR tariffs OR supply chain OR central bank OR inflation OR oil prices";
+const MACRO_RISK_QUERY =
+  "Federal Reserve OR inflation OR interest rates OR oil prices OR recession OR unemployment";
+
+function quoteForGdeltQuery(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\"/g, "")
+    .replace(/[()]/g, "")
+    .trim();
+}
+
+function toTickerCompanyRiskQuery(ticker?: string, companyName?: string): string {
+  const identity = quoteForGdeltQuery(companyName?.trim() || ticker?.trim() || "");
+  if (!identity) {
+    throw new Error("ticker or companyName is required for tickerCompanyRisk profile.");
+  }
+
+  return `"${identity}" AND (risk OR lawsuit OR investigation OR downgrade OR debt OR strike OR recall OR disruption OR sanctions)`;
+}
+
+function toSectorRiskQuery(sector?: string): string {
+  const normalized = quoteForGdeltQuery(sector?.trim() ?? "");
+  if (!normalized) {
+    throw new Error("sector is required for sectorRisk profile.");
+  }
+
+  return `"${normalized}" AND (risk OR regulation OR disruption OR demand shock OR supply chain OR layoffs)`;
+}
+
+export function buildGdeltQueryProfiles(options: {
+  lookbackDays?: number;
+  maxRecordsPerQuery?: number;
+  includePortfolioRisk?: boolean;
+  includeMacroRisk?: boolean;
+  ticker?: string;
+  companyName?: string;
+  sector?: string;
+} = {}): GdeltQueryProfile[] {
+  const lookbackDays = normalizePositiveInteger(options.lookbackDays, DEFAULT_LOOKBACK_DAYS);
+  const maxRecords = normalizePositiveInteger(
+    options.maxRecordsPerQuery,
+    DEFAULT_GDELT_MAX_RECORDS_PER_QUERY,
+  );
+
+  const includePortfolioRisk = options.includePortfolioRisk ?? true;
+  const includeMacroRisk = options.includeMacroRisk ?? true;
+  const profiles: GdeltQueryProfile[] = [];
+
+  if (includePortfolioRisk) {
+    profiles.push({
+      queryProfile: "portfolioRisk",
+      query: PORTFOLIO_RISK_QUERY,
+      lookbackDays,
+      maxRecords,
+      expectedUseCase: QUERY_PROFILE_USE_CASES.portfolioRisk,
+    });
+  }
+
+  if (includeMacroRisk) {
+    profiles.push({
+      queryProfile: "macroRisk",
+      query: MACRO_RISK_QUERY,
+      lookbackDays,
+      maxRecords,
+      expectedUseCase: QUERY_PROFILE_USE_CASES.macroRisk,
+    });
+  }
+
+  if ((options.ticker && options.ticker.trim()) || (options.companyName && options.companyName.trim())) {
+    profiles.push({
+      queryProfile: "tickerCompanyRisk",
+      query: toTickerCompanyRiskQuery(options.ticker, options.companyName),
+      lookbackDays,
+      maxRecords,
+      expectedUseCase: QUERY_PROFILE_USE_CASES.tickerCompanyRisk,
+    });
+  }
+
+  if (options.sector && options.sector.trim()) {
+    profiles.push({
+      queryProfile: "sectorRisk",
+      query: toSectorRiskQuery(options.sector),
+      lookbackDays,
+      maxRecords,
+      expectedUseCase: QUERY_PROFILE_USE_CASES.sectorRisk,
+    });
+  }
+
+  return profiles;
+}
 
 function randomInt(min: number, max: number): number {
   const boundedMin = Math.ceil(min);
@@ -47,21 +167,74 @@ async function delay(ms: number): Promise<void> {
   });
 }
 
-function toQueryFailureDetail(query: string, error: unknown): GdeltQueryFailureDetail {
+function toDefaultFailureCode(error: unknown): GdeltFailureCode {
   if (error instanceof ProviderRequestError) {
-    const cause = error.cause as { retryAttempted?: boolean } | undefined;
+    const message = error.message.toLowerCase();
+    if (message.includes("timed out")) {
+      return GDELT_FAILURE_CODES.TIMEOUT;
+    }
 
-    return {
-      query,
-      reason: error.message,
-      statusCode: error.statusCode,
-      retryAttempted: Boolean(cause?.retryAttempted),
-    };
+    return GDELT_FAILURE_CODES.HTTP_ERROR;
   }
+
+  if (error instanceof ProviderResponseError) {
+    const message = error.message.toLowerCase();
+    if (message.includes("non-json")) {
+      return GDELT_FAILURE_CODES.NON_JSON_RESPONSE;
+    }
+
+    if (message.includes("empty response")) {
+      return GDELT_FAILURE_CODES.EMPTY_RESPONSE;
+    }
+
+    if (message.includes("invalid json")) {
+      return GDELT_FAILURE_CODES.PARSE_ERROR;
+    }
+
+    return GDELT_FAILURE_CODES.PARSE_ERROR;
+  }
+
+  return GDELT_FAILURE_CODES.HTTP_ERROR;
+}
+
+function toQueryFailureDetail(
+  query: string,
+  error: unknown,
+): GdeltQueryFailureDetail & { responseDiagnostic?: GdeltResponseDiagnosticItem } {
+  const providerStatusCode =
+    error instanceof ProviderRequestError || error instanceof ProviderResponseError
+      ? error.statusCode
+      : undefined;
+  const providerCause =
+    error instanceof ProviderRequestError || error instanceof ProviderResponseError
+      ? (error.cause as GdeltErrorCause | undefined)
+      : undefined;
+
+  const failureCode =
+    typeof providerCause?.failureCode === "string" && providerCause.failureCode.trim().length > 0
+      ? providerCause.failureCode
+      : toDefaultFailureCode(error);
+
+  const responseDiagnostic: GdeltResponseDiagnosticItem | undefined = providerCause?.responseDiagnostics
+    ? {
+        query,
+        failureCode,
+        statusCode: providerCause.responseDiagnostics.statusCode ?? providerStatusCode,
+        contentType: providerCause.responseDiagnostics.contentType,
+        contentLength: providerCause.responseDiagnostics.contentLength,
+        responsePreview: providerCause.responseDiagnostics.responsePreview,
+        retryAttempted:
+          providerCause.responseDiagnostics.retryAttempted ?? providerCause.retryAttempted,
+      }
+    : undefined;
 
   return {
     query,
     reason: toErrorReason(error),
+    failureCode,
+    statusCode: providerStatusCode,
+    retryAttempted: Boolean(providerCause?.retryAttempted),
+    responseDiagnostic,
   };
 }
 
@@ -140,6 +313,7 @@ function toBoundedTopCounts(
 
 function toSearchOptions(args: {
   query?: string;
+  queryProfile?: string;
   queries?: string[];
   from?: Date;
   to?: Date;
@@ -148,6 +322,7 @@ function toSearchOptions(args: {
 }): ProviderGeopoliticalSearchOptions {
   return {
     query: args.query,
+    queryProfile: args.queryProfile,
     queries: args.queries,
     from: args.from,
     to: args.to,
@@ -217,6 +392,7 @@ export async function ingestGdeltQuery(
   const events = await gdeltProvider.searchDocArticles(
     toSearchOptions({
       query: normalizedQuery,
+      queryProfile: options.queryProfile,
       from: options.from,
       to: options.to,
       maxRecords: options.maxRecords,
@@ -233,6 +409,7 @@ export async function ingestGdeltQuery(
 
   return {
     query: normalizedQuery,
+    queryProfile: options.queryProfile,
     eventsCreated: persisted.created,
     eventsUpdated: persisted.updated,
     eventsSkipped: persisted.skipped,
@@ -251,35 +428,83 @@ export async function ingestDefaultGdeltRiskSet(
   });
 
   const mode = options.mode ?? "full";
-  const queries =
-    options.queries?.filter((value) => value.trim().length > 0) ?? gdeltProvider.getDefaultQueries(mode);
   const warnings: string[] = [];
   const failedQueries: GdeltQueryFailureDetail[] = [];
   const results: IngestGeopoliticalQueryResult[] = [];
+  const responseDiagnostics: GdeltResponseDiagnosticItem[] = [];
 
   const effectivePerQueryMaxRecords = normalizePositiveInteger(
     options.maxRecordsPerQuery,
     DEFAULT_GDELT_MAX_RECORDS_PER_QUERY,
   );
 
-  for (const [index, query] of queries.entries()) {
+  const queryProfiles: GdeltQueryProfile[] =
+    options.queries && options.queries.length > 0
+      ? options.queries
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+          .map((query, index) => ({
+            queryProfile: `customQuery${index + 1}`,
+            query,
+            lookbackDays: DEFAULT_LOOKBACK_DAYS,
+            maxRecords: effectivePerQueryMaxRecords,
+            expectedUseCase: "Caller-provided GDELT query.",
+          }))
+      : buildGdeltQueryProfiles({
+          lookbackDays: DEFAULT_LOOKBACK_DAYS,
+          maxRecordsPerQuery: effectivePerQueryMaxRecords,
+          includePortfolioRisk: true,
+          includeMacroRisk: mode === "quick" || mode === "full",
+        });
+
+  if (queryProfiles.length === 0) {
+    const fallbackQueries = gdeltProvider.getDefaultQueries(mode);
+    for (const [index, query] of fallbackQueries.entries()) {
+      queryProfiles.push({
+        queryProfile: `legacyDefault${index + 1}`,
+        query,
+        lookbackDays: DEFAULT_LOOKBACK_DAYS,
+        maxRecords: effectivePerQueryMaxRecords,
+        expectedUseCase: "Legacy default global-risk fallback query.",
+      });
+    }
+  }
+
+  for (const [index, profile] of queryProfiles.entries()) {
     try {
-      const result = await ingestGdeltQuery(query, {
+      const result = await ingestGdeltQuery(profile.query, {
+        queryProfile: profile.queryProfile,
         from: timeWindow.from,
         to: timeWindow.to,
         maxRecords: effectivePerQueryMaxRecords,
       });
       results.push(result);
-      warnings.push(...result.warnings.map((warning) => `${query}: ${warning}`));
+
+      const eventsPersisted = result.eventsCreated + result.eventsUpdated;
+      if (eventsPersisted === 0) {
+        const noResultsDetail: GdeltQueryFailureDetail = {
+          query: profile.query,
+          reason: "No GDELT results persisted for query.",
+          failureCode: GDELT_FAILURE_CODES.NO_RESULTS,
+        };
+        failedQueries.push(noResultsDetail);
+        warnings.push(`${profile.query}: ${noResultsDetail.reason}`);
+      }
+
+      warnings.push(...result.warnings.map((warning) => `${profile.query}: ${warning}`));
     } catch (error) {
-      const detail = toQueryFailureDetail(query, error);
+      const detail = toQueryFailureDetail(profile.query, error);
       failedQueries.push(detail);
       warnings.push(
-        `${query}: ${detail.reason}${detail.statusCode ? ` (status ${detail.statusCode})` : ""}${detail.retryAttempted ? " [retry attempted]" : ""}`,
+        `${profile.query}: ${detail.reason}${detail.statusCode ? ` (status ${detail.statusCode})` : ""}${detail.retryAttempted ? " [retry attempted]" : ""}`,
       );
+
+      if (NON_PRODUCTION && detail.responseDiagnostic) {
+        responseDiagnostics.push(detail.responseDiagnostic);
+      }
     }
 
-    if (index < queries.length - 1) {
+    if (index < queryProfiles.length - 1) {
       const baseDelay = Math.max(0, env.GDELT_QUERY_DELAY_MS);
       const jitter = randomInt(0, 1000);
       await delay(baseDelay + jitter);
@@ -300,6 +525,8 @@ export async function ingestDefaultGdeltRiskSet(
     warnings,
     failedQueries,
     results,
+    queryProfiles,
+    responseDiagnostics: NON_PRODUCTION && responseDiagnostics.length > 0 ? responseDiagnostics : undefined,
   };
 }
 
@@ -435,5 +662,15 @@ export async function getGeopoliticalSummary(options: {
     topHeadlines,
     topCountries: toBoundedTopCounts(countryCounts, 5),
     topDomains: toBoundedTopCounts(domainCounts, 5),
+    message:
+      totalEvents === 0
+        ? "No persisted GDELT events are currently available in local context for this window. This does not imply global risk is absent."
+        : undefined,
+    suggestedActions:
+      totalEvents === 0
+        ? [
+            "Run refreshGdeltRiskContext (confirmation required) to populate local geopolitical context.",
+          ]
+        : undefined,
   };
 }

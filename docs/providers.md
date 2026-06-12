@@ -126,44 +126,80 @@ Notes:
 - If `GDELT_TIMEOUT_MS` is not set, the shared `PROVIDER_HTTP_TIMEOUT_MS` value is used.
 - `GDELT_QUERY_DELAY_MS` adds a short delay between default-set queries to reduce burst rate limits.
 - `GDELT_MAX_RETRY_429` controls retry attempts for HTTP 429 responses, honoring provider `Retry-After` when present.
-- GDELT ingestion is designed as global geopolitical/news-event context, not ticker-specific company news.
+- Current mode is HTTP/API ingestion persisted into local `GeopoliticalEvent` rows.
+- GDELT ingestion is primarily designed as portfolio/watchlist macro-geopolitical context.
+- This milestone does not include BigQuery/GKG enrichment yet.
 
-### Default Global Risk Queries
+### Query Profiles
+
+Default refresh profiles:
+
+- `portfolioRisk`
+  - Query: `sanctions OR conflict OR war OR tariffs OR supply chain OR central bank OR inflation OR oil prices`
+  - Use case: broad portfolio-level geopolitical/market risk context.
+- `macroRisk`
+  - Query: `Federal Reserve OR inflation OR interest rates OR oil prices OR recession OR unemployment`
+  - Use case: macro/economic risk context.
+
+Template profiles (available for targeted future usage):
+
+- `tickerCompanyRisk`
+  - Input: `ticker` or `companyName`
+  - Query shape: `"<company-or-ticker>" AND (risk OR lawsuit OR investigation OR downgrade OR debt OR strike OR recall OR disruption OR sanctions)`
+- `sectorRisk`
+  - Input: `sector`
+  - Query shape: `"<sector>" AND (risk OR regulation OR disruption OR demand shock OR supply chain OR layoffs)`
+
+### Default Global Risk Refresh Modes
 
 Quick mode (used by full-refresh `includeGdelt=true`):
 
-- `geopolitical risk`
-- `war OR conflict OR sanctions`
-- `oil supply disruption OR energy crisis`
+- `portfolioRisk`
+- `macroRisk`
 
 Full mode (used by direct default-risk ingestion unless overridden):
 
-- `geopolitical risk`
-- `war OR conflict OR sanctions`
-- `oil supply disruption OR energy crisis`
-- `central bank OR inflation OR recession`
-- `trade war OR tariffs`
-- `cyber attack OR critical infrastructure`
-- `Canada economy OR Canadian dollar`
-- `United States economy OR Federal Reserve`
+- `portfolioRisk`
+- `macroRisk`
 
 ### GDELT Mapping Notes
 
 - Endpoint: `/doc/doc` with `mode=ArtList` and `format=json`.
+- Query parameters are URL-encoded with `URLSearchParams`.
 - Primary fields mapped from DOC response:
 	- `title -> title`
 	- `url -> url`
 	- `domain -> domain`
+	- `sourcecommonname -> source` (fallback `domain`)
 	- `seendate -> publishedAt`
 	- `sourcecountry -> sourceCountry`
 	- `language -> language`
 	- `tone -> tone`
+- Optional fields mapped when present:
+	- `v2themes/themes -> organizations/themes context`
+	- `v2locations/locations -> locations`
+	- `v2persons/persons -> persons`
+	- `v2organizations/organizations -> organizations`
 - Items without title or usable published date are skipped.
 - URL-based dedupe is applied when URL is present.
 - Sentiment mapping from tone:
 	- `tone > 1 => POSITIVE`
 	- `tone < -1 => NEGATIVE`
 	- otherwise `NEUTRAL`
+
+### GDELT Failure Codes
+
+- `GDELT_HTTP_ERROR`
+- `GDELT_TIMEOUT`
+- `GDELT_NON_JSON_RESPONSE`
+- `GDELT_EMPTY_RESPONSE`
+- `GDELT_PARSE_ERROR`
+- `GDELT_NO_RESULTS`
+
+Notes:
+- Non-JSON and malformed responses are detected before persistence.
+- Response diagnostics include a bounded/redacted preview and are returned only in non-production mode.
+- Raw HTML bodies are not exposed directly in API/tool error strings.
 
 ### Non-Blocking Full-Refresh Behavior
 
@@ -172,13 +208,16 @@ Full mode (used by direct default-risk ingestion unless overridden):
 - GDELT ingestion runs after macro/economics sections and before portfolio analysis.
 - Query-level failures are captured in warnings and failed-query lists.
 - GDELT failures are non-blocking for the overall full-refresh response.
-- Failed-query diagnostics include query, status code, and whether retry was attempted.
+- Failed-query diagnostics include query, reason, failure code, status code, and retry metadata where available.
 
 ### Current GDELT Limitations
 
 - GDELT DOC feed is high-noise and broad; this milestone intentionally keeps categorization simple.
 - Theme/category inference is query-driven and heuristic.
 - Only bounded summary/top-headline context is surfaced for downstream reporting and watchlist views.
+- Person/location/organization/theme extraction depends on HTTP payload fields that are inconsistently populated.
+- Network-graph analytics and deeper entity modeling are out of scope for this pass.
+- BigQuery/GKG enrichment can be added in a future phase.
 
 ### Ticker Examples
 

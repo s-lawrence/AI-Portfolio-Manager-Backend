@@ -42,11 +42,15 @@ describe("agent-chat.service planner flow", () => {
   const originalProviderEnabled = env.OPENAI_AGENT_PROVIDER_ENABLED;
   const originalApiKey = env.OPENAI_API_KEY;
   const originalModel = env.OPENAI_AGENT_MODEL;
+  const originalFallbackModel = env.OPENAI_AGENT_MODEL_FALLBACK;
+  const originalNodeEnv = env.NODE_ENV;
 
   afterEach(() => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = originalProviderEnabled;
     env.OPENAI_API_KEY = originalApiKey;
     env.OPENAI_AGENT_MODEL = originalModel;
+    env.OPENAI_AGENT_MODEL_FALLBACK = originalFallbackModel;
+    env.NODE_ENV = originalNodeEnv;
     vi.restoreAllMocks();
   });
 
@@ -1773,5 +1777,970 @@ describe("agent-chat.service planner flow", () => {
       confirmed: true,
     }));
     expect(result.metadata.executedToolCount).toBe(1);
+  });
+
+  it("planner failure still executes deterministic portfolio review tools when portfolioId is present", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockRejectedValue(
+      new OpenAiAgentClientError(
+        {
+          stage: "REQUEST_FAILED",
+          modelName: env.OPENAI_AGENT_MODEL,
+        },
+        "planner failed",
+      ),
+    );
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      return mockToolResult(request.toolName, {
+        portfolioId: "portfolio-1",
+      }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Review my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.plannerFallbackUsed).toBe(true);
+    expect(result.toolCalls.map((call) => call.toolName)).toEqual(expect.arrayContaining([
+      "getPortfolioOverview",
+      "getPortfolioRiskSnapshot",
+      "getPortfolioDataQuality",
+    ]));
+  });
+
+  it("missing portfolioId returns missingContext portfolioId for portfolio review intent", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Review my portfolio",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).not.toHaveBeenCalled();
+    expect(result.missingContext).toContain("portfolioId");
+    expect(result.answer).toContain("I need additional context");
+  });
+
+  it("production mode hides raw planner diagnostics and keeps user-safe warning", async () => {
+    env.NODE_ENV = "production";
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockRejectedValue(
+      new OpenAiAgentClientError(
+        {
+          stage: "REQUEST_FAILED",
+          modelName: env.OPENAI_AGENT_MODEL,
+        },
+        "planner failed",
+      ),
+    );
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockRejectedValue(
+      new Error("internal details should not leak"),
+    );
+
+    const result = await runAgentChat({
+      message: "Review my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.openAiDiagnostics).toBeUndefined();
+    expect(result.warnings).toContain("Tool execution failed.");
+    expect(result.warnings.some((warning) => warning.includes("OpenAI planner failed"))).toBe(false);
+  });
+
+  it("non-production includes blocked tool and execution error diagnostics", async () => {
+    env.NODE_ENV = "development";
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "PORTFOLIO_REVIEW",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getPortfolioOverview",
+            input: { portfolioId: "portfolio-other" },
+            purpose: "Try alternate portfolio",
+          },
+          {
+            toolName: "getGeopoliticalSummary",
+            input: {},
+            purpose: "Macro context",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Fallback summary."));
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockRejectedValue(new Error("boom"));
+
+    const result = await runAgentChat({
+      message: "Review my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.blockedToolCount).toBe(1);
+    expect(result.metadata.blockedTools?.[0]).toMatchObject({
+      toolName: "getPortfolioOverview",
+    });
+    expect(result.metadata.toolExecutionErrors?.[0]).toMatchObject({
+      toolName: "getGeopoliticalSummary",
+      code: "TOOL_EXECUTION_FAILED",
+    });
+  });
+
+  it("top-three recommendation prompts execute ranking, risk, and quality tools even when planner under-tools", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "PORTFOLIO_REVIEW",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "getPortfolioOverview",
+            input: { portfolioId: "portfolio-1" },
+            purpose: "Inspect portfolio",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Ranked summary."));
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) =>
+      mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "What are your top three recommendations for my portfolio based on current metrics?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    const executedToolNames = executeSpy.mock.calls.map((call) => call[0]?.toolName);
+    expect(executedToolNames).toEqual(expect.arrayContaining([
+      "rankPortfolioHoldings",
+      "getPortfolioRiskSnapshot",
+      "getPortfolioDataQuality",
+    ]));
+    expect(result.intent).toBe("PORTFOLIO_RECOMMENDATIONS");
+  });
+
+  it("deterministic fallback for top recommendations does not run only portfolio overview", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) =>
+      mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never,
+    );
+
+    await runAgentChat({
+      message: "Rank my portfolio and give me the top three positions.",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    const executedToolNames = executeSpy.mock.calls.map((call) => call[0]?.toolName);
+    expect(executedToolNames).toEqual(expect.arrayContaining([
+      "rankPortfolioHoldings",
+      "getPortfolioRiskSnapshot",
+      "getPortfolioDataQuality",
+    ]));
+    expect(executedToolNames.filter((toolName) => toolName === "getPortfolioOverview").length).toBeLessThan(executedToolNames.length);
+  });
+
+  it("market candidate discovery intent executes ranking/risk/quality toolset deterministically", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankDiscoveryCandidates") {
+        return mockToolResult("rankDiscoveryCandidates", {
+          category: "GAINERS",
+          totalCandidates: 8,
+          scoredCandidatesCount: 5,
+          skippedCandidatesCount: 3,
+          noQualifiedCandidates: false,
+          recommendationThreshold: {
+            minimumRecommendationScore: 60,
+          },
+          rankedCandidates: [
+            {
+              rank: 1,
+              ticker: "NVDA",
+              companyName: "NVIDIA Corporation",
+              compositeScore: 82.4,
+              suggestedStance: "STRONG_CANDIDATE",
+              actionLabel: "Strong review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Revenue growth is positive."],
+              cautions: ["RSI is elevated and may signal short-term exhaustion."],
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+            {
+              rank: 2,
+              ticker: "MSFT",
+              companyName: "Microsoft Corporation",
+              compositeScore: 79.3,
+              suggestedStance: "CANDIDATE",
+              actionLabel: "Review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Price is above SMA200."],
+              cautions: ["Valuation ratios are mostly unavailable."],
+              bullishFactors: ["Price is above SMA200."],
+              bearishFactors: ["Valuation ratios are mostly unavailable."],
+              diversificationNotes: ["Sector differs from largest current sector (Technology), which may improve diversification."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: true,
+            },
+          ],
+          recommendedCandidates: [
+            {
+              rank: 1,
+              ticker: "NVDA",
+              companyName: "NVIDIA Corporation",
+              compositeScore: 82.4,
+              suggestedStance: "STRONG_CANDIDATE",
+              actionLabel: "Strong review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Revenue growth is positive."],
+              cautions: ["RSI is elevated and may signal short-term exhaustion."],
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+            {
+              rank: 2,
+              ticker: "MSFT",
+              companyName: "Microsoft Corporation",
+              compositeScore: 79.3,
+              suggestedStance: "CANDIDATE",
+              actionLabel: "Review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Price is above SMA200."],
+              cautions: ["Valuation ratios are mostly unavailable."],
+              bullishFactors: ["Price is above SMA200."],
+              bearishFactors: ["Valuation ratios are mostly unavailable."],
+              diversificationNotes: ["Sector differs from largest current sector (Technology), which may improve diversification."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: true,
+            },
+          ],
+          monitorCandidates: [],
+          notRecommendedCandidates: [],
+          bestAvailableButBelowThreshold: [],
+          skippedCandidates: [],
+          warnings: [],
+          suggestedRefreshActions: [],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Find candidate tickers for a new holding from discovery data",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    const executedToolNames = executeSpy.mock.calls.map((call) => call[0]?.toolName);
+    expect(result.intent).toBe("MARKET_CANDIDATE_DISCOVERY");
+    expect(executedToolNames).toEqual(expect.arrayContaining([
+      "getPortfolioOverview",
+      "getPortfolioRiskSnapshot",
+      "getPortfolioDataQuality",
+      "rankDiscoveryCandidates",
+    ]));
+    expect(result.answer).toContain("Qualified new-holding recommendations from persisted GAINERS discovery data");
+    expect(result.answer).toContain("1. NVDA (NVIDIA Corporation)");
+    expect(result.answer).toContain("Decision support only, not a buy/sell instruction.");
+
+    const addActions = result.suggestedActions.filter((action) => action.toolName === "addTickerToWatchlist");
+    expect(addActions.length).toBe(1);
+    expect(addActions[0]?.input).toMatchObject({
+      watchlistId: "watchlist-1",
+      ticker: "NVDA",
+      status: "CANDIDATE",
+      source: "AGENT",
+    });
+    expect(addActions[0]?.requiresConfirmation).toBe(true);
+  });
+
+  it("market candidate discovery without watchlistId does not suggest add-to-watchlist actions", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankDiscoveryCandidates") {
+        return mockToolResult("rankDiscoveryCandidates", {
+          category: "GAINERS",
+          totalCandidates: 2,
+          scoredCandidatesCount: 2,
+          skippedCandidatesCount: 0,
+          noQualifiedCandidates: false,
+          recommendationThreshold: {
+            minimumRecommendationScore: 60,
+          },
+          rankedCandidates: [
+            {
+              rank: 1,
+              ticker: "AAPL",
+              companyName: "Apple Inc.",
+              compositeScore: 78.1,
+              suggestedStance: "CANDIDATE",
+              actionLabel: "Review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Revenue growth is positive."],
+              cautions: ["RSI is elevated and may signal short-term exhaustion."],
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              diversificationNotes: ["Portfolio context was not provided; diversification fit could not be fully assessed."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+          ],
+          recommendedCandidates: [
+            {
+              rank: 1,
+              ticker: "AAPL",
+              companyName: "Apple Inc.",
+              compositeScore: 78.1,
+              suggestedStance: "CANDIDATE",
+              actionLabel: "Review candidate",
+              qualifiesForRecommendation: true,
+              why: ["Revenue growth is positive."],
+              cautions: ["RSI is elevated and may signal short-term exhaustion."],
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              diversificationNotes: ["Portfolio context was not provided; diversification fit could not be fully assessed."],
+              missingData: [],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+          ],
+          monitorCandidates: [],
+          notRecommendedCandidates: [],
+          bestAvailableButBelowThreshold: [],
+          skippedCandidates: [],
+          warnings: [],
+          suggestedRefreshActions: [],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Suggest candidate stocks from discovery for a new holding",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.intent).toBe("MARKET_CANDIDATE_DISCOVERY");
+    expect(result.suggestedActions.some((action) => action.toolName === "addTickerToWatchlist")).toBe(false);
+  });
+
+  it("discovery no-qualified response avoids watchlist mutation suggestions and prioritizes refresh", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankDiscoveryCandidates") {
+        return mockToolResult("rankDiscoveryCandidates", {
+          category: "GAINERS",
+          totalCandidates: 3,
+          scoredCandidatesCount: 3,
+          skippedCandidatesCount: 0,
+          noQualifiedCandidates: true,
+          reasonNoQualifiedCandidates: "Top names are HOLD_OFF and below quality threshold.",
+          recommendationThreshold: {
+            minimumRecommendationScore: 60,
+          },
+          rankedCandidates: [
+            {
+              rank: 1,
+              ticker: "XYZ",
+              companyName: "XYZ Corp",
+              compositeScore: 48.2,
+              suggestedStance: "HOLD_OFF",
+              actionLabel: "Not recommended from current snapshot",
+              qualifiesForRecommendation: false,
+              why: ["Short-term move detected."],
+              cautions: ["Insufficient quality and analyst context."],
+              missingData: ["analyst"],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+          ],
+          recommendedCandidates: [],
+          monitorCandidates: [],
+          notRecommendedCandidates: [
+            {
+              rank: 1,
+              ticker: "XYZ",
+              companyName: "XYZ Corp",
+              compositeScore: 48.2,
+              suggestedStance: "HOLD_OFF",
+              actionLabel: "Not recommended from current snapshot",
+              qualifiesForRecommendation: false,
+              why: ["Short-term move detected."],
+              cautions: ["Insufficient quality and analyst context."],
+              missingData: ["analyst"],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+          ],
+          bestAvailableButBelowThreshold: [
+            {
+              rank: 1,
+              ticker: "XYZ",
+              companyName: "XYZ Corp",
+              compositeScore: 48.2,
+              suggestedStance: "HOLD_OFF",
+              actionLabel: "Not recommended from current snapshot",
+              qualifiesForRecommendation: false,
+              why: ["Short-term move detected."],
+              cautions: ["Insufficient quality and analyst context."],
+              missingData: ["analyst"],
+              staleDataWarnings: [],
+              alreadyInWatchlist: false,
+            },
+          ],
+          skippedCandidates: [],
+          warnings: [],
+          suggestedRefreshActions: ["refreshDiscoveryCategory"],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Find candidate tickers for a new holding from discovery data",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+        watchlistId: "watchlist-1",
+      },
+    });
+
+    expect(result.answer).toContain("none met the minimum score/quality threshold");
+    expect(result.answer).toContain("Best available but below threshold");
+    expect(result.suggestedActions.some((action) => action.toolName === "addTickerToWatchlist")).toBe(false);
+    expect(result.suggestedActions.some((action) => action.toolName === "refreshDiscoveryCategory")).toBe(true);
+  });
+
+  it("confirmed refreshDiscoveryCategory defaults category to GAINERS when input missing", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("refreshDiscoveryCategory", { category: "GAINERS", refreshed: true }) as never,
+    );
+
+    await runAgentChat({
+      message: "Confirm refresh discovery candidates",
+      context: {
+        source: "USER",
+      },
+      confirmedToolExecutions: ["refreshDiscoveryCategory"],
+      allowRefresh: true,
+      dryRun: false,
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "refreshDiscoveryCategory",
+      confirmed: true,
+      input: expect.objectContaining({
+        category: "GAINERS",
+      }),
+    }));
+  });
+
+  it("confirmed refreshDiscoveryCategory uses explicit confirmedToolInputs map", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = undefined;
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("refreshDiscoveryCategory", { category: "LOSERS", refreshed: true }) as never,
+    );
+
+    await runAgentChat({
+      message: "Confirm refresh losers discovery",
+      context: {
+        source: "USER",
+      },
+      confirmedToolExecutions: ["refreshDiscoveryCategory"],
+      confirmedToolInputs: {
+        refreshDiscoveryCategory: {
+          category: "LOSERS",
+        },
+      },
+      allowRefresh: true,
+      dryRun: false,
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "refreshDiscoveryCategory",
+      confirmed: true,
+      input: expect.objectContaining({
+        category: "LOSERS",
+      }),
+    }));
+  });
+
+  it("deterministic recommendation answer is structured, readable, and includes recommendation cards", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankPortfolioHoldings") {
+        return mockToolResult("rankPortfolioHoldings", {
+          portfolioId: "portfolio-1",
+          totalHoldings: 5,
+          scoredHoldingsCount: 5,
+          skippedHoldingsCount: 0,
+          skippedHoldings: [],
+          rankedHoldings: [
+            {
+              rank: 1,
+              ticker: "NVDA",
+              companyName: "NVIDIA Corporation",
+              compositeScore: 82.3,
+              suggestedStance: "STRONG_CANDIDATE",
+              componentScores: { dataQualityScore: 88 },
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+            {
+              rank: 2,
+              ticker: "GOOGL",
+              companyName: "Alphabet Inc.",
+              compositeScore: 80.8,
+              suggestedStance: "WATCH",
+              componentScores: { dataQualityScore: 74 },
+              bullishFactors: ["Price is above SMA200.", "Analyst consensus is constructive."],
+              bearishFactors: ["Valuation ratios are mostly unavailable."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+            {
+              rank: 3,
+              ticker: "AMZN",
+              compositeScore: 79.9,
+              suggestedStance: "CANDIDATE",
+              componentScores: { dataQualityScore: 34 },
+              bullishFactors: ["Analyst consensus is constructive."],
+              bearishFactors: ["Recent news sentiment skews negative."],
+              missingData: ["technical", "fundamental", "news"],
+              staleDataWarnings: ["Fundamental snapshot is stale."],
+            },
+          ],
+          warnings: [],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioRiskSnapshot") {
+        return mockToolResult("getPortfolioRiskSnapshot", {
+          topRisks: ["Single-name concentration is high in NVDA."],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioDataQuality") {
+        return mockToolResult("getPortfolioDataQuality", {
+          missingFxIssues: [{ ticker: "NVDA", currency: "USD" }],
+          missingCurrencyIssues: [],
+          missingPriceIssues: [],
+          staleDataWarnings: ["USD/CAD FX snapshot appears stale (5 days old)."],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "What are your top three recommendations for my portfolio based on current metrics?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.answer).toContain("Snapshot-based decision support from persisted backend scoring");
+    expect(result.answer).toContain("Top 3 recommendations:");
+    expect(result.answer).toContain("1. NVDA (NVIDIA Corporation)");
+    expect(result.answer).toContain("2. GOOGL (Alphabet Inc.)");
+    expect(result.answer).toContain("3. AMZN");
+    expect(result.answer).toContain("Action: Review / Candidate");
+    expect(result.answer).toContain("Action: Hold / Monitor");
+    expect(result.answer).toContain("Action: Data cleanup needed");
+    expect(result.answer).toContain("Why it ranks here:");
+    expect(result.answer).toContain("Main caution:");
+    expect(result.answer).toContain("Suggested next step:");
+    expect(result.answer).toContain("Portfolio-level caveats:");
+    expect(result.answer).toContain("Decision support only, not a buy/sell instruction.");
+    expect(result.answer.toLowerCase()).not.toContain("without specific performance or metric data");
+    expect(result.answer.toLowerCase()).not.toContain("cannot identify");
+    expect(result.answer).not.toMatch(/1\)\s+[A-Z.]+\s+[\-\u2014]/);
+
+    expect(result.recommendationCards).toHaveLength(3);
+    expect(result.recommendationCards?.[0]).toMatchObject({
+      rank: 1,
+      ticker: "NVDA",
+      actionLabel: "Review / Candidate",
+      score: 82.3,
+      stance: "STRONG_CANDIDATE",
+    });
+    expect(result.recommendationCards?.[0]?.why.length).toBeGreaterThan(0);
+    expect(result.recommendationCards?.[0]?.cautions.length).toBeGreaterThan(0);
+  });
+
+  it("translates AVOID stance to Trim / Risk review action label", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankPortfolioHoldings") {
+        return mockToolResult("rankPortfolioHoldings", {
+          portfolioId: "portfolio-1",
+          totalHoldings: 3,
+          scoredHoldingsCount: 3,
+          skippedHoldingsCount: 0,
+          skippedHoldings: [],
+          rankedHoldings: [
+            {
+              rank: 1,
+              ticker: "AAPL",
+              compositeScore: 70.5,
+              suggestedStance: "AVOID",
+              componentScores: { dataQualityScore: 80 },
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["Debt-to-equity is elevated."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+          ],
+          warnings: [],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioRiskSnapshot") {
+        return mockToolResult("getPortfolioRiskSnapshot", {
+          topRisks: ["Single-name concentration is high in AAPL."],
+          concentrationRisks: [{ type: "HOLDING", key: "AAPL", sharePercent: 52, message: "Single-name concentration is high in AAPL." }],
+          sectorExposure: [{ key: "TECH", holdings: 1, marketValueCad: 1000, sharePercent: 52 }],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioDataQuality") {
+        return mockToolResult("getPortfolioDataQuality", {
+          missingFxIssues: [],
+          missingCurrencyIssues: [],
+          missingPriceIssues: [],
+          staleDataWarnings: [],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Top recommendations for my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.answer).toContain("Action: Trim / Risk review");
+    expect(result.recommendationCards?.[0]?.actionLabel).toBe("Trim / Risk review");
+  });
+
+  it("uses the same structured recommendation format when OpenAI synthesis fails", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "PORTFOLIO_RECOMMENDATIONS",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "rankPortfolioHoldings",
+            input: { portfolioId: "portfolio-1", limit: 3, includeWatchlist: false },
+            purpose: "Rank holdings",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: env.OPENAI_AGENT_MODEL,
+      usedFallbackModel: false,
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockRejectedValue(
+      new OpenAiAgentClientError(
+        {
+          stage: "REQUEST_FAILED",
+          modelName: env.OPENAI_AGENT_MODEL,
+        },
+        "synthetic synthesis failure",
+      ),
+    );
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "rankPortfolioHoldings") {
+        return mockToolResult("rankPortfolioHoldings", {
+          portfolioId: "portfolio-1",
+          totalHoldings: 3,
+          scoredHoldingsCount: 3,
+          skippedHoldingsCount: 0,
+          skippedHoldings: [],
+          rankedHoldings: [
+            {
+              rank: 1,
+              ticker: "NVDA",
+              compositeScore: 81.4,
+              suggestedStance: "STRONG_CANDIDATE",
+              componentScores: { dataQualityScore: 84 },
+              bullishFactors: ["Revenue growth is positive."],
+              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+            {
+              rank: 2,
+              ticker: "GOOGL",
+              compositeScore: 80.1,
+              suggestedStance: "WATCH",
+              componentScores: { dataQualityScore: 77 },
+              bullishFactors: ["Price is above SMA200."],
+              bearishFactors: ["Margins are thin."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+            {
+              rank: 3,
+              ticker: "AMZN",
+              compositeScore: 79.7,
+              suggestedStance: "CANDIDATE",
+              componentScores: { dataQualityScore: 73 },
+              bullishFactors: ["Analyst consensus is constructive."],
+              bearishFactors: ["Recent news sentiment skews negative."],
+              missingData: [],
+              staleDataWarnings: [],
+            },
+          ],
+          warnings: [],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioRiskSnapshot") {
+        return mockToolResult("getPortfolioRiskSnapshot", {
+          topRisks: ["Single-name concentration is high in NVDA."],
+          concentrationRisks: [{ type: "HOLDING", key: "NVDA", sharePercent: 44, message: "Single-name concentration is high in NVDA." }],
+          sectorExposure: [{ key: "TECH", holdings: 2, marketValueCad: 2000, sharePercent: 58 }],
+        }) as never;
+      }
+
+      if (request.toolName === "getPortfolioDataQuality") {
+        return mockToolResult("getPortfolioDataQuality", {
+          missingFxIssues: [{ ticker: "NVDA", currency: "USD" }],
+          missingCurrencyIssues: [],
+          missingPriceIssues: [],
+          staleDataWarnings: [],
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, { portfolioId: "portfolio-1" }) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "What are three recommendations you would make for my portfolio with today's data?",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.warnings).toContain("OpenAI synthesis failed; deterministic fallback used.");
+    expect(result.answer).toContain("Top 3 recommendations:");
+    expect(result.answer).toContain("Portfolio-level caveats:");
+    expect(result.answer).toContain("Decision support only, not a buy/sell instruction.");
+  });
+
+  it("production mode keeps fallback model warning while hiding raw OpenAI diagnostics", async () => {
+    env.NODE_ENV = "production";
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+    env.OPENAI_AGENT_MODEL_FALLBACK = "fallback-model";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "PORTFOLIO_RECOMMENDATIONS",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "rankPortfolioHoldings",
+            input: {
+              portfolioId: "portfolio-1",
+              limit: 3,
+              includeWatchlist: false,
+            },
+            purpose: "Rank holdings",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: "fallback-model",
+      usedFallbackModel: true,
+      primaryModelFailure: {
+        stage: "UNSUPPORTED_MODEL",
+        modelName: env.OPENAI_AGENT_MODEL,
+      },
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue(mockSynthesis("Fallback synthesis."));
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("rankPortfolioHoldings", {
+        rankedHoldings: [{ ticker: "NVDA", compositeScore: 80.1, suggestedStance: "STRONG_CANDIDATE" }],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Top three recommendations for my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.openAiDiagnostics).toBeUndefined();
+    expect(result.warnings).toContain("Primary OpenAI model was unavailable; fallback model was used.");
+  });
+
+  it("metadata identifies primary/fallback and per-stage model usage", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+    env.OPENAI_AGENT_MODEL = "primary-model";
+    env.OPENAI_AGENT_MODEL_FALLBACK = "fallback-model";
+
+    vi.spyOn(openAiClient, "generateToolPlan").mockResolvedValue({
+      plan: {
+        intent: "PORTFOLIO_RECOMMENDATIONS",
+        needsTools: true,
+        toolCalls: [
+          {
+            toolName: "rankPortfolioHoldings",
+            input: { portfolioId: "portfolio-1", limit: 3, includeWatchlist: false },
+            purpose: "Rank holdings",
+          },
+        ],
+        missingContext: [],
+        requiresConfirmation: false,
+        clarifyingQuestion: null,
+      },
+      modelName: "fallback-model",
+      usedFallbackModel: true,
+      primaryModelFailure: {
+        stage: "UNSUPPORTED_MODEL",
+        modelName: "primary-model",
+      },
+    });
+
+    vi.spyOn(openAiClient, "generateAgentSynthesis").mockResolvedValue({
+      synthesis: {
+        answer: "Synthesized answer",
+        confidence: "MEDIUM",
+        warnings: [],
+        suggestedActions: [],
+      },
+      modelName: "fallback-model",
+      usedFallbackModel: true,
+      primaryModelFailure: {
+        stage: "UNSUPPORTED_MODEL",
+        modelName: "primary-model",
+      },
+    });
+
+    vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
+      mockToolResult("rankPortfolioHoldings", {
+        rankedHoldings: [{ ticker: "NVDA", compositeScore: 80.1, suggestedStance: "STRONG_CANDIDATE" }],
+      }) as never,
+    );
+
+    const result = await runAgentChat({
+      message: "Top three recommendations for my portfolio",
+      context: {
+        source: "USER",
+        portfolioId: "portfolio-1",
+      },
+    });
+
+    expect(result.metadata.primaryModelName).toBe("primary-model");
+    expect(result.metadata.fallbackModelName).toBe("fallback-model");
+    expect(result.metadata.modelUsedForPlanning).toBe("fallback-model");
+    expect(result.metadata.modelUsedForSynthesis).toBe("fallback-model");
+    expect(result.metadata.primaryFailureReason).toBe("unsupported_model");
   });
 });

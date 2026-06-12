@@ -20,6 +20,7 @@ import {
 import {
   gdeltProvider,
 } from "../../src/providers/gdelt";
+import { ProviderConfigurationError } from "../../src/providers/errors";
 import { ProviderHistoricalPrice } from "../../src/providers/types";
 import { createUser } from "../../src/repositories/users.repository";
 
@@ -1773,6 +1774,119 @@ describe("API ingestion routes", () => {
     expect(body.data.analystData).toBeDefined();
     expect(body.data.analystData.tickersProcessed).toBeGreaterThan(0);
     expect(body.data.analystData.snapshotsCreated + body.data.analystData.snapshotsUpdated).toBeGreaterThan(0);
+
+    await app.close();
+  });
+
+  it("full-refresh remains successful with summarized analyst entitlement warnings", async () => {
+    env.FMP_API_KEY = "test-fmp-key";
+
+    vi.spyOn(fmpProfileProvider, "getCompanyProfile").mockImplementation(async (ticker) => ({
+      ticker,
+      companyName: `${ticker} Company`,
+      exchange: "NASDAQ",
+      sector: "Technology",
+      industry: "Software",
+      country: "US",
+      currency: "USD",
+      assetType: "EQUITY",
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getQuote").mockImplementation(async (ticker) => ({
+      ticker,
+      price: 130,
+      previousClose: 128,
+      close: 130,
+      volume: 8_000,
+    }));
+
+    vi.spyOn(fmpMarketDataProvider, "getHistoricalDailyPrices").mockImplementation(
+      async (ticker) => buildHistoricalSeries(ticker),
+    );
+
+    vi.spyOn(fmpFundamentalsProvider, "getFundamentals").mockImplementation(
+      async (ticker) => ({
+        ticker,
+        marketCap: 3_000_000_000,
+        peRatio: 21,
+        source: "FMP",
+      }),
+    );
+
+    vi.spyOn(fmpEarningsProvider, "getNextEarnings").mockResolvedValue(null);
+    vi.spyOn(fmpEarningsProvider, "getEarningsHistory").mockResolvedValue([]);
+    vi.spyOn(fmpNewsProvider, "getCompanyNews").mockResolvedValue([]);
+
+    const entitlementError = new ProviderConfigurationError(
+      "Financial Modeling Prep",
+      "Financial Modeling Prep endpoint is not available for the current plan.",
+    );
+
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetSummary").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getPriceTargetConsensus").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getGradesConsensus").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalGrades").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getAnalystEstimates").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getRatingsSnapshot").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getHistoricalRatings").mockRejectedValue(entitlementError);
+    vi.spyOn(fmpAnalystProvider, "getRecentGrades").mockRejectedValue(entitlementError);
+
+    const app = buildApp();
+
+    const user = await createUser({
+      email: `test+api-full-refresh-analyst-entitlement-${Date.now()}@example.com`,
+      name: "[TEST] API Full Refresh Analyst Entitlement User",
+    });
+
+    const createPortfolioResponse = await app.inject({
+      method: "POST",
+      url: "/api/portfolios",
+      payload: {
+        userId: user.id,
+        name: "[TEST] Full Refresh Analyst Entitlement Portfolio",
+        baseCurrency: "USD",
+      },
+    });
+
+    const portfolioId = createPortfolioResponse.json().data.id as string;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/holdings",
+      payload: {
+        portfolioId,
+        ticker: "TSTFRANE",
+        status: "OWNED",
+        shares: 5,
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/ingestion/fmp/portfolio/${portfolioId}/full-refresh`,
+      payload: {
+        includeAnalystData: true,
+        includeEconomics: false,
+        includeBankOfCanada: false,
+        includeFred: false,
+        runAnalysis: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.analystData).toBeDefined();
+    expect(body.data.analystData.warnings.length).toBeLessThanOrEqual(5);
+    expect(
+      body.data.analystData.warnings.filter(
+        (warning: string) => warning === "Analyst data unavailable for some tickers under current FMP plan.",
+      ),
+    ).toHaveLength(1);
+    expect(body.data.analystData.rawWarnings.length).toBeGreaterThan(body.data.analystData.warnings.length);
+    expect(body.data.analystWarningsSummary.entitlementIssuesCount).toBeGreaterThan(0);
+    expect(Array.isArray(body.data.warnings)).toBe(true);
 
     await app.close();
   });

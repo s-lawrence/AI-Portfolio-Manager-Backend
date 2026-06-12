@@ -250,6 +250,7 @@ export interface ProviderGeopoliticalEvent {
   language?: string | null;
   publishedAt: Date;
   query?: string | null;
+  queryProfile?: string | null;
   theme?: string | null;
   category?: string | null;
   tone?: number | null;
@@ -264,6 +265,7 @@ export interface ProviderGeopoliticalEvent {
 
 export interface ProviderGeopoliticalSearchOptions {
   query?: string;
+  queryProfile?: string;
   queries?: string[];
   from?: Date;
   to?: Date;

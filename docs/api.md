@@ -27,11 +27,14 @@ npm start
 
 ## Health Endpoints
 
-- `GET /health`
-- `GET /health/db`
+- `GET /api/health`
+- `GET /api/health/dependencies`
+- `GET /health` (legacy alias)
+- `GET /health/db` (legacy DB check)
 
 ## Main Route Groups
 
+- `/api/health`
 - `/api/portfolios`
 - `/api/holdings`
 - `/api/stocks`
@@ -43,14 +46,56 @@ npm start
 - `/api/portfolio-summaries`
 - `/api/predictions`
 - `/api/alerts`
+- `/api/auth`
 - `/api/agent`
 - `/api/watchlists`
 - `/api/analyst`
 - `/api/discovery`
 - `/api/geopolitical`
 
+## Authentication (Beta)
+
+Feature flag behavior:
+
+- `AUTH_ENABLED=false` (default local mode): existing local/demo request flow remains available.
+- `AUTH_ENABLED=true` (beta hosted mode): session cookie auth and account scoping are enforced.
+
+Auth endpoints:
+
+- `GET /api/auth/google/start`
+- `GET /api/auth/google/callback`
+- `GET /api/auth/me`
+- `POST /api/auth/logout`
+- `POST /api/auth/dev-login` (non-production only)
+
+`GET /api/auth/me` response envelope includes:
+
+- `authEnabled`
+- `authenticated`
+- `user` (null when unauthenticated)
+
+Session and cookie notes:
+
+- Uses HTTP-only signed cookie session (`apm_session`).
+- `SameSite` uses `AUTH_COOKIE_SAME_SITE` (`lax` default).
+- `secure` uses `AUTH_COOKIE_SECURE` when set; otherwise defaults to `true` in production and `false` in non-production.
+- `AUTH_COOKIE_SAME_SITE=none` requires `AUTH_COOKIE_SECURE=true`.
+- Google access tokens are not persisted.
+
+Scoped-access behavior when `AUTH_ENABLED=true`:
+
+- Portfolio, holding, watchlist, report, agent execution/chat context, and refresh/mutation routes enforce authenticated ownership checks.
+- User identity is derived from authenticated session.
+- Supplied `userId` values in request payload/route must match session identity (or are rejected).
+
+Local-dev compatibility when `AUTH_ENABLED=false`:
+
+- Existing explicit `userId` request flows remain supported.
+- This preserves current demo/local workflows.
+
 ## Development Helpers
 
+- `GET /api/dev/routes`
 - `GET /api/dev/demo-context`
 - `POST /api/dev/seed-demo-market-data`
 - `POST /api/dev/seed-demo-market-data?runAnalysis=true`
@@ -138,6 +183,7 @@ Current data-quality and scoring tools include:
 - `getTickerDataQuality`
 - `getWatchlistDataQuality`
 - `getPortfolioDataQuality`
+- `rankDiscoveryCandidates` (ranks persisted discovery candidates for potential new holdings)
 
 Refresh tools that require confirmation include:
 
@@ -145,11 +191,16 @@ Refresh tools that require confirmation include:
 - `refreshTickerAnalystData`
 - `refreshUsdCadFxRate`
 
+Mutation tools that require confirmation include:
+
+- `generateTickerReport`
+
 Agent suggested-action behavior includes:
 
 - Suggest `refreshWatchlistResearchData` when watchlist score/data-quality coverage is weak.
 - Suggest `refreshTickerAnalystData` when ticker data-quality indicates analyst/data gaps.
 - Prefer `refreshUsdCadFxRate` when portfolio outputs show missing FX coverage.
+- For new-holding discovery flows with ranked candidates and a provided `watchlistId`, suggest confirmation-gated `addTickerToWatchlist` actions for top non-tracked names.
 
 `POST /api/agent/chat` behavior:
 
@@ -158,7 +209,10 @@ Agent suggested-action behavior includes:
 - Executes approved backend tools only through the agent tool registry/executor.
 - Requires confirmation gates for refresh/mutation/high-impact tools.
 - Uses OpenAI synthesis on tool results after validated execution.
+- For new-holding candidate prompts, plans `rankDiscoveryCandidates` plus portfolio risk/quality context when portfolio scope is available.
+- Uses persisted backend discovery/scoring data as the source of named candidates (no OpenAI-generated ticker invention).
 - Tool execution remains backend-controlled and confirmation policy is unchanged.
+- No background autonomous OpenAI loops are used; OpenAI calls only happen inline during the request.
 
 Agent chat request example:
 
@@ -179,23 +233,29 @@ curl -X POST http://localhost:4000/api/agent/chat \
         "input": "override"
       }
     },
+    "maxToolCalls": 5,
     "allowRefresh": false,
     "allowMutation": false,
     "dryRun": false
   }'
 ```
 
+When `AUTH_ENABLED=true`, agent routes derive `context.userId` from session and enforce portfolio/watchlist ownership before tool execution.
+
 OpenAI synthesis enablement:
 
 - `OPENAI_AGENT_PROVIDER_ENABLED=true`
 - `OPENAI_API_KEY` present in backend environment
 - optional `OPENAI_AGENT_MODEL_FALLBACK` for unsupported/unavailable primary model
+- optional `OPENAI_AGENT_MAX_COMPLETION_TOKENS` to bound completion size/cost
+- optional `OPENAI_DAILY_REQUEST_LIMIT_PER_USER` and `OPENAI_MONTHLY_REQUEST_LIMIT_GLOBAL`
 
 Fallback behavior:
 
 - If planner fails, deterministic router fallback is used.
 - If synthesis fails after planning, deterministic answer fallback is used with tool summaries.
 - If OpenAI is disabled, deterministic router mode is used directly.
+- If OpenAI usage limits are reached, deterministic router mode is used directly.
 - Chat metadata includes:
   - `mode` (`OPENAI_PLANNED_SYNTHESIS`, `OPENAI_SYNTHESIS`, or `DETERMINISTIC_ROUTER`)
   - `modelName` when OpenAI path is attempted
@@ -205,6 +265,7 @@ Fallback behavior:
   - `plannedToolCount`
   - `executedToolCount`
   - `droppedToolCount`
+  - `effectiveMaxToolCalls`
   - `fallbackReason` (optional)
 
 Non-production fallback diagnostics:
@@ -246,6 +307,72 @@ curl -X POST http://localhost:4000/api/holdings \
   }'
 ```
 
+Holding-create ambiguity warnings:
+
+- `POST /api/holdings` now returns `data.warnings`.
+- One-character/short ambiguous tickers (for example `E`, `F`, `T`) include:
+  - `Ticker <SYMBOL> is ambiguous; verify security mapping.`
+- The holding is still created so imports remain non-blocking, but mapping should be reviewed/corrected.
+
+Search stock/security candidates for symbol correction:
+
+```bash
+curl "http://localhost:4000/api/stocks/search?query=E"
+```
+
+- `GET /api/stocks/search` behavior:
+  - searches local `Stock` records by `ticker` and `companyName` first
+  - optionally augments with provider candidates when FMP is configured
+  - returns bounded `candidates[]` with:
+    - `stockId` (when local record exists)
+    - `ticker`
+    - `companyName`
+    - `exchange`
+    - `currency`
+    - `country`
+    - `provider`
+    - `matchType` (`LOCAL` | `PROVIDER`)
+    - `confidence` (`HIGH` | `MEDIUM` | `LOW`)
+- Short symbols remain candidate-based (no implicit auto-selection).
+
+Correct a holding to a different linked security:
+
+```bash
+curl -X PATCH http://localhost:4000/api/holdings/<HOLDING_CUID>/stock \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stockId": "<STOCK_CUID>"
+  }'
+```
+
+or
+
+```bash
+curl -X PATCH http://localhost:4000/api/holdings/<HOLDING_CUID>/stock \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticker": "ENB.TO",
+    "companyName": "Enbridge Inc",
+    "exchange": "TSX",
+    "currency": "CAD",
+    "provider": "FMP",
+    "refreshAfterCorrection": false
+  }'
+```
+
+- `PATCH /api/holdings/<HOLDING_CUID>/stock`:
+  - accepts either `stockId` or `ticker` input (not both)
+  - preserves holding quantity/cost/thesis fields
+  - reassigns `holding.stockId` to selected/created stock identity
+  - returns `holdingOverview` for the corrected holding
+  - returns `warnings` including market-data refresh guidance
+  - includes warning: `Market data should be refreshed for corrected ticker.`
+  - when `refreshAfterCorrection=true`, attempts bounded ticker market/fundamental refresh and returns non-blocking warnings on failures
+
+Auth/scoping note:
+
+- When `AUTH_ENABLED=true`, correction is ownership-scoped; users cannot reassign holdings they do not own.
+
 Record market snapshot:
 
 ```bash
@@ -264,9 +391,32 @@ Generate ticker report:
 curl -X POST http://localhost:4000/api/reports/AAPL/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "holdingId": "<HOLDING_CUID>"
+    "holdingId": "<HOLDING_CUID>",
+    "portfolioId": "<OPTIONAL_PORTFOLIO_CUID>",
+    "watchlistId": "<OPTIONAL_WATCHLIST_CUID>",
+    "useOpenAi": true,
+    "refreshBeforeGenerate": false,
+    "includeMacro": true,
+    "includeGeopolitical": true,
+    "includeNews": true,
+    "includeAnalyst": true,
+    "includeScore": true,
+    "createPredictions": true
   }'
 ```
+
+`POST /api/reports/<TICKER>/generate` notes:
+
+- Uses local persisted research context for report generation.
+- If `useOpenAi=true`, backend attempts OpenAI structured generation first, then falls back to deterministic generation on disable/failure.
+- If `refreshBeforeGenerate=true`, backend performs bounded per-ticker refresh attempts before building report context.
+- Response includes generation metadata:
+  - `reportMode` (`OPENAI_STRUCTURED` or `DETERMINISTIC_FALLBACK`)
+  - `fallbackUsed`
+  - `warnings[]`
+  - `dataGaps[]`
+  - `modelName` (when available)
+- When `AUTH_ENABLED=true`, optional `portfolioId` and `watchlistId` are ownership-checked against the authenticated user.
 
 Report payload metadata:
 
@@ -601,6 +751,33 @@ curl -X POST http://localhost:4000/api/ingestion/gdelt/default-risk-set \
 - `quick`: smaller default query subset intended for routine refreshes.
 - `full`: full default global-risk query set.
 
+Default response includes:
+
+- `queriesProcessed`
+- `queriesFailed`
+- `eventsCreated`
+- `eventsUpdated`
+- `eventsSkipped`
+- `failedQueries[]` with `query`, `reason`, optional `failureCode`, optional `statusCode`, optional `retryAttempted`
+- `warnings[]`
+- `durationMs`
+- optional `queryProfiles[]`
+- optional `responseDiagnostics[]` in non-production only
+
+GDELT failure codes:
+
+- `GDELT_HTTP_ERROR`
+- `GDELT_TIMEOUT`
+- `GDELT_NON_JSON_RESPONSE`
+- `GDELT_EMPTY_RESPONSE`
+- `GDELT_PARSE_ERROR`
+- `GDELT_NO_RESULTS`
+
+Notes:
+
+- Non-JSON/empty/malformed provider responses are classified and returned as safe diagnostics.
+- Raw HTML bodies are never emitted as direct API error messages.
+
 Read latest geopolitical events and summary:
 
 ```bash
@@ -610,6 +787,12 @@ curl "http://localhost:4000/api/geopolitical/latest?limit=20"
 ```bash
 curl "http://localhost:4000/api/geopolitical/summary?days=7"
 ```
+
+`GET /api/geopolitical/summary` returns persisted local context only.
+
+- If local event storage is empty for the requested window, response includes a `message` explaining that no persisted GDELT events are available locally.
+- Empty local storage does not imply global risk is absent.
+- Response includes `suggestedActions` with an actionable refresh suggestion (`refreshGdeltRiskContext`).
 
 Earnings ingestion responses include:
 
@@ -691,6 +874,7 @@ Include-flag semantics:
 - `includeAnalystData=false` skips analyst ingestion and omits `analystData` from response.
 - `includeGdelt=false` skips GDELT ingestion and omits `geopolitical` from response.
 - When `includeGdelt=true`, full-refresh uses `mode=quick` for default GDELT query ingestion.
+- GDELT query failures remain non-blocking and are preserved in `geopolitical.failedQueries`.
 - `includeBankOfCanada=false` skips BoC macro/FX and omits `bankOfCanada` from response.
 - `includeFred=false` skips FRED macro and omits `fred` from response.
 - If all macro flags are `false`, macro ingestion is skipped and `macro` is omitted.
@@ -703,11 +887,25 @@ Full-refresh response includes:
 - `earnings` category result (including per-ticker failures).
 - `news` category result (including per-ticker failures).
 - optional `analystData` when `includeAnalystData=true`.
+- optional `analystWarningsSummary` when `includeAnalystData=true`.
 - optional `geopolitical` when `includeGdelt=true`.
 - optional `analysis` when `runAnalysis=true`.
 - optional `economics` when `includeEconomics=true`.
 - optional `bankOfCanada`, `fred`, and `macro` when macro flags are enabled.
 - `warnings` aggregated across category-level partial failures.
+
+Analyst warning aggregation (`includeAnalystData=true`):
+
+- `analystData.warnings` is UI-facing and bounded (summarized, not per-endpoint spam).
+- `analystData.rawWarnings` preserves detailed raw per-ticker/per-endpoint messages.
+- `analystData.analystWarningsSummary` includes:
+  - `entitlementIssuesCount`
+  - `noDataCount`
+  - `noRecordsCount`
+  - `affectedTickers`
+  - `examples`
+- When FMP plan entitlement gaps are detected, warning wording is:
+  - `Analyst data unavailable for some tickers under current FMP plan.`
 
 Timing fields:
 

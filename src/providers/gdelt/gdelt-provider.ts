@@ -10,17 +10,13 @@ const DEFAULT_QUERY_LIMIT = 10;
 const MAX_QUERY_LIMIT = 100;
 
 const DEFAULT_GLOBAL_RISK_QUERIES_FULL = [
-  "geopolitical risk",
-  "sanctions OR trade war OR tariffs",
-  "war OR conflict",
-  "oil supply disruption OR energy crisis",
-  "Federal Reserve OR inflation OR recession",
-  "Canada economy OR Canadian dollar",
+  "sanctions OR conflict OR war OR tariffs OR supply chain OR central bank OR inflation OR oil prices",
+  "Federal Reserve OR inflation OR interest rates OR oil prices OR recession OR unemployment",
 ] as const;
 
 const DEFAULT_GLOBAL_RISK_QUERIES_QUICK = [
-  "geopolitical risk OR sanctions OR conflict",
-  "Federal Reserve OR inflation OR oil prices",
+  "sanctions OR conflict OR war OR central bank OR inflation",
+  "Federal Reserve OR inflation OR interest rates OR recession",
 ] as const;
 
 export interface GdeltDocQueryAuditResult {
@@ -205,8 +201,28 @@ function normalizeQueryList(options: ProviderGeopoliticalSearchOptions): string[
   return Array.from(dedup);
 }
 
+function normalizeEntityList(value: unknown): string[] | null {
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter((item) => item.length > 0);
+    return items.length > 0 ? items.slice(0, 25) : null;
+  }
+
+  if (typeof value === "string") {
+    const items = value
+      .split(/[;,|]/g)
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    return items.length > 0 ? items.slice(0, 25) : null;
+  }
+
+  return null;
+}
+
 function mapDocArticle(
   query: string,
+  queryProfile: string | null,
   article: GdeltDocArticle,
 ): ProviderGeopoliticalEvent | null {
   const title = typeof article.title === "string" ? article.title.trim() : "";
@@ -221,20 +237,30 @@ function mapDocArticle(
 
   const tone = toFiniteNumber(article.tone);
   const sentiment = sentimentFromTone(tone);
+  const themes = normalizeEntityList(article.v2themes ?? article.themes);
+  const locations = normalizeEntityList(article.v2locations ?? article.locations);
+  const persons = normalizeEntityList(article.v2persons ?? article.persons);
+  const organizations = normalizeEntityList(article.v2organizations ?? article.organizations);
+  const sourceCommonName =
+    typeof article.sourcecommonname === "string" && article.sourcecommonname.trim().length > 0
+      ? article.sourcecommonname.trim()
+      : null;
   const rawSubset = {
     title: article.title,
     url: article.url,
     domain: article.domain,
+    sourceCommonName,
     seendate: article.seendate,
     sourcecountry: article.sourcecountry,
     language: article.language,
     tone: article.tone,
     socialimage: article.socialimage,
+    queryProfile,
   };
 
   return {
     provider: "GDELT",
-    source: article.domain ?? null,
+    source: sourceCommonName ?? article.domain ?? null,
     sourceCountry: article.sourcecountry ?? null,
     title,
     url: article.url ?? null,
@@ -242,11 +268,16 @@ function mapDocArticle(
     language: article.language ?? null,
     publishedAt,
     query,
+    queryProfile,
     theme: inferThemeFromQuery(query),
     category: inferCategoryFromQuery(query),
     tone,
     sentiment,
     relevanceScore: null,
+    persons,
+    organizations,
+    locations,
+    countries: null,
     raw: rawSubset,
   };
 }
@@ -294,7 +325,7 @@ export class GdeltProvider implements GeopoliticalProvider {
       const payload = await this.client.getJson<GdeltDocResponse>("/doc/doc", queryParams);
       const articles = Array.isArray(payload.articles) ? payload.articles : [];
       const mappedEventCount = articles
-        .map((article) => mapDocArticle(query, article))
+        .map((article) => mapDocArticle(query, options.queryProfile ?? null, article))
         .filter((item): item is ProviderGeopoliticalEvent => item !== null)
         .length;
 
@@ -316,7 +347,7 @@ export class GdeltProvider implements GeopoliticalProvider {
     const payload = response.data;
     const articles = Array.isArray(payload.articles) ? payload.articles : [];
     const mappedEventCount = articles
-      .map((article) => mapDocArticle(query, article))
+      .map((article) => mapDocArticle(query, options.queryProfile ?? null, article))
       .filter((item): item is ProviderGeopoliticalEvent => item !== null)
       .length;
 
@@ -359,7 +390,7 @@ export class GdeltProvider implements GeopoliticalProvider {
 
       const articles = Array.isArray(payload.articles) ? payload.articles : [];
       for (const article of articles) {
-        const mapped = mapDocArticle(query, article);
+        const mapped = mapDocArticle(query, options.queryProfile ?? null, article);
         if (mapped) {
           all.push(mapped);
         }

@@ -164,6 +164,10 @@ describe("API agent tools routes", () => {
       .spyOn(discoveryService, "listDiscoveryCandidates")
       .mockResolvedValue({
         category: "GAINERS",
+        candidateCount: 0,
+        topTickers: [],
+        capturedAt: undefined,
+        warnings: [],
         items: [],
       });
 
@@ -203,6 +207,124 @@ describe("API agent tools routes", () => {
     await app.close();
   });
 
+  it("executes rankDiscoveryCandidates through existing discovery service", async () => {
+    const rankSpy = vi
+      .spyOn(discoveryService, "rankDiscoveryCandidates")
+      .mockResolvedValue({
+        category: "GAINERS",
+        totalCandidates: 4,
+        scoredCandidatesCount: 3,
+        skippedCandidatesCount: 1,
+        recommendationThreshold: {
+          minimumRecommendationScore: 60,
+          monitorOnlyScoreFloor: 50,
+          monitorOnlyScoreCeiling: 59.99,
+          labels: {
+            strongReviewCandidate: "Strong review candidate",
+            reviewCandidate: "Review candidate",
+            monitorOnly: "Monitor only",
+            notRecommended: "Not recommended from current snapshot",
+          },
+        },
+        noQualifiedCandidates: false,
+        rankedCandidates: [
+          {
+            rank: 1,
+            ticker: "NVDA",
+            companyName: "NVIDIA Corporation",
+            category: "GAINERS",
+            price: 120,
+            changePercent: 2.3,
+            marketCap: 2_000_000_000,
+            compositeScore: 81.2,
+            suggestedStance: "STRONG_CANDIDATE",
+            actionLabel: "Strong review candidate",
+            qualifiesForRecommendation: true,
+            why: ["Revenue growth is positive."],
+            cautions: ["RSI is elevated and may signal short-term exhaustion."],
+            dataQualityScore: 84,
+            bullishFactors: ["Revenue growth is positive."],
+            bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+            missingData: [],
+            staleDataWarnings: [],
+            diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+            alreadyHeld: false,
+            alreadyInWatchlist: false,
+          },
+        ],
+        recommendedCandidates: [
+          {
+            rank: 1,
+            ticker: "NVDA",
+            companyName: "NVIDIA Corporation",
+            category: "GAINERS",
+            price: 120,
+            changePercent: 2.3,
+            marketCap: 2_000_000_000,
+            compositeScore: 81.2,
+            suggestedStance: "STRONG_CANDIDATE",
+            actionLabel: "Strong review candidate",
+            qualifiesForRecommendation: true,
+            why: ["Revenue growth is positive."],
+            cautions: ["RSI is elevated and may signal short-term exhaustion."],
+            dataQualityScore: 84,
+            bullishFactors: ["Revenue growth is positive."],
+            bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
+            missingData: [],
+            staleDataWarnings: [],
+            diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
+            alreadyHeld: false,
+            alreadyInWatchlist: false,
+          },
+        ],
+        monitorCandidates: [],
+        notRecommendedCandidates: [],
+        bestAvailableButBelowThreshold: [],
+        skippedCandidates: [
+          {
+            ticker: "MSFT",
+            reason: "Ticker is already held in the portfolio.",
+            missingData: [],
+          },
+        ],
+        warnings: [],
+        reasonNoQualifiedCandidates: undefined,
+        suggestedRefreshActions: [],
+      });
+
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/tools/rankDiscoveryCandidates/execute",
+      payload: {
+        context: {
+          source: "AGENT",
+        },
+        input: {
+          category: "GAINERS",
+          portfolioId: "portfolio-1",
+          watchlistId: "watchlist-1",
+          limit: 5,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.success).toBe(true);
+    expect(body.data.success).toBe(true);
+    expect(rankSpy).toHaveBeenCalledWith({
+      category: "GAINERS",
+      portfolioId: "portfolio-1",
+      watchlistId: "watchlist-1",
+      limit: 5,
+      excludeExistingHoldings: undefined,
+      excludeExistingWatchlistItems: undefined,
+    });
+
+    await app.close();
+  });
+
   it("returns confirmation-required error for mutation tool without confirmed=true", async () => {
     const app = buildApp();
     const response = await app.inject({
@@ -224,6 +346,75 @@ describe("API agent tools routes", () => {
     expect(body.success).toBe(false);
     expect(body.error.code).toBe("AGENT_TOOL_CONFIRMATION_REQUIRED");
     expect(body.error.message).toBe("Tool requires confirmation.");
+
+    await app.close();
+  });
+
+  it("returns confirmation-required error for runPortfolioFullRefresh without confirmed=true", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/tools/runPortfolioFullRefresh/execute",
+      payload: {
+        context: {
+          source: "AGENT",
+        },
+        input: {
+          portfolioId: "portfolio-1",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    const body = response.json();
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe("AGENT_TOOL_CONFIRMATION_REQUIRED");
+
+    await app.close();
+  });
+
+  it("returns confirmation-required error for refreshWatchlistResearchData without confirmed=true", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/tools/refreshWatchlistResearchData/execute",
+      payload: {
+        context: {
+          source: "AGENT",
+        },
+        input: {
+          watchlistId: "watchlist-1",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    const body = response.json();
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe("AGENT_TOOL_CONFIRMATION_REQUIRED");
+
+    await app.close();
+  });
+
+  it("returns confirmation-required error for refreshTickerAnalystData without confirmed=true", async () => {
+    const app = buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agent/tools/refreshTickerAnalystData/execute",
+      payload: {
+        context: {
+          source: "AGENT",
+        },
+        input: {
+          ticker: "AAPL",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    const body = response.json();
+    expect(body.success).toBe(false);
+    expect(body.error.code).toBe("AGENT_TOOL_CONFIRMATION_REQUIRED");
 
     await app.close();
   });

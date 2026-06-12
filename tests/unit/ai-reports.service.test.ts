@@ -7,7 +7,9 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  buildTickerReportContext,
   createTickerReportFromInput,
+  generateTickerReport,
   generateMockTickerReport,
 } from "../../src/services/ai-reports.service";
 import { recordEarningsEvent } from "../../src/services/earnings.service";
@@ -246,6 +248,41 @@ describe("ai-reports.service", () => {
         PredictionHorizon.ONE_MONTH,
       ]),
     );
+  });
+
+  it("unified generateTickerReport returns deterministic metadata when OpenAI is disabled", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: false,
+      createPredictions: false,
+    });
+
+    expect(result.report.id).toBeDefined();
+    expect(result.reportMode).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.predictions).toHaveLength(0);
+    expect(Array.isArray(result.dataGaps)).toBe(true);
+  });
+
+  it("buildTickerReportContext respects include flags for optional context blocks", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const context = await buildTickerReportContext(ticker, {
+      includeMacro: false,
+      includeGeopolitical: false,
+      includeNews: false,
+      includeAnalyst: false,
+      includeScore: false,
+    });
+
+    expect(context.macroContext).toBeNull();
+    expect(context.geopoliticalContext).toBeNull();
+    expect(context.newsContext).toBeNull();
+    expect(context.analystContext).toBeNull();
+    expect(context.deterministicScore).toBeNull();
   });
 
   it("treats sparse data as lower-conviction and watch-oriented", async () => {

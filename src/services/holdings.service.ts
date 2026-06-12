@@ -8,6 +8,7 @@ import {
   getHoldingWithStock,
   updateHolding,
 } from "../repositories/holdings.repository";
+import { getStockById } from "../repositories/stocks.repository";
 import { listNewsByStockId } from "../repositories/news-articles.repository";
 import { getPortfolioById, getPortfolioWithHoldings } from "../repositories/portfolios.repository";
 import { getLatestMarketSnapshotForStock } from "../repositories/price-snapshots.repository";
@@ -18,6 +19,7 @@ import { normalizeTickerOrThrow } from "../types/common";
 import { HoldingOverview } from "../types/services";
 import { convertAmountWithRate, convertMoneyToCad } from "./fx-rates.service";
 import { ensureStockExists } from "./stocks.service";
+import { ingestTickerFundamentals, ingestTickerMarketData } from "./real-data-ingestion.service";
 
 export type AddTickerToPortfolioInput = Omit<
   Prisma.HoldingUncheckedCreateInput,
@@ -27,6 +29,23 @@ export type AddTickerToPortfolioInput = Omit<
 };
 
 export type UpdateHoldingDetailsInput = Prisma.HoldingUpdateInput;
+
+export interface CorrectHoldingStockInput {
+  stockId?: string;
+  ticker?: string;
+  companyName?: string;
+  exchange?: string;
+  currency?: string;
+  country?: string;
+  provider?: string;
+  refreshAfterCorrection?: boolean;
+}
+
+export interface CorrectHoldingStockResult {
+  holdingOverview: HoldingOverview;
+  warnings: string[];
+  refreshTriggered: boolean;
+}
 
 type HoldingWithStock = Holding & { stock: Stock };
 
@@ -128,6 +147,112 @@ export async function updateHoldingDetails(
   }
 
   return updateHolding(normalizedHoldingId, input);
+}
+
+function normalizeOptionalMetadataValue(value: string | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeOptionalCurrency(value: string | undefined): string | undefined {
+  const normalized = normalizeOptionalMetadataValue(value);
+  return normalized ? normalized.toUpperCase() : undefined;
+}
+
+async function resolveCorrectionTargetStock(
+  input: CorrectHoldingStockInput,
+): Promise<Stock> {
+  if (input.stockId) {
+    const stock = await getStockById(input.stockId);
+    if (!stock) {
+      throw new Error("Stock not found.");
+    }
+
+    return stock;
+  }
+
+  if (!input.ticker) {
+    throw new Error("Either stockId or ticker is required.");
+  }
+
+  const normalizedTicker = normalizeTickerOrThrow(input.ticker);
+
+  return ensureStockExists(normalizedTicker, {
+    companyName: normalizeOptionalMetadataValue(input.companyName),
+    exchange: normalizeOptionalMetadataValue(input.exchange),
+    currency: normalizeOptionalCurrency(input.currency),
+    country: normalizeOptionalCurrency(input.country),
+  });
+}
+
+export async function correctHoldingStock(
+  holdingId: string,
+  input: CorrectHoldingStockInput,
+): Promise<CorrectHoldingStockResult> {
+  const normalizedHoldingId = assertNonBlank(holdingId, "holdingId");
+  const existingHolding = await getHoldingById(normalizedHoldingId);
+
+  if (!existingHolding) {
+    throw new Error("Holding not found.");
+  }
+
+  const targetStock = await resolveCorrectionTargetStock(input);
+
+  if (existingHolding.stockId !== targetStock.id) {
+    const duplicateHolding = await getHoldingByPortfolioAndStock(
+      existingHolding.portfolioId,
+      targetStock.id,
+    );
+
+    if (duplicateHolding && duplicateHolding.id !== existingHolding.id) {
+      throw new Error("Holding already exists for this portfolio and ticker.");
+    }
+
+    await updateHolding(normalizedHoldingId, {
+      stock: {
+        connect: {
+          id: targetStock.id,
+        },
+      },
+    });
+  }
+
+  const warnings: string[] = [
+    `Security mapping was updated to ${targetStock.ticker}.`,
+    "Market data should be refreshed for corrected ticker.",
+  ];
+
+  if (input.refreshAfterCorrection) {
+    try {
+      const [marketDataResult, fundamentalsResult] = await Promise.all([
+        ingestTickerMarketData(targetStock.ticker, {
+          historicalLimit: 30,
+        }),
+        ingestTickerFundamentals(targetStock.ticker),
+      ]);
+
+      warnings.push(...marketDataResult.warnings);
+      warnings.push(...fundamentalsResult.warnings);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Ticker refresh failed.";
+      warnings.push(`Post-correction refresh warning for ${targetStock.ticker}: ${reason}`);
+    }
+  }
+
+  const holdingOverview = await getHoldingOverview(normalizedHoldingId);
+  if (!holdingOverview) {
+    throw new Error("Holding not found.");
+  }
+
+  return {
+    holdingOverview,
+    warnings,
+    refreshTriggered: Boolean(input.refreshAfterCorrection),
+  };
 }
 
 /**

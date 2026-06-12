@@ -1,5 +1,11 @@
 import type { FastifyInstance } from "fastify";
 
+import {
+  assertWatchlistItemOwnership,
+  isAuthEnabled,
+  assertWatchlistOwnership,
+  resolveUserIdForRequest,
+} from "../../auth";
 import { notFound, runService } from "../errors";
 import { created, deleted, ok, paginated } from "../response";
 import {
@@ -25,10 +31,15 @@ import {
   updateWatchlistItemDetails,
 } from "../../services";
 
+const createWatchlistBodySchemaAuthEnabled = createWatchlistBodySchema.partial({
+  userId: true,
+});
+
 export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
   app.get("/user/:userId", async (request, reply) => {
     const params = userIdParamsSchema.parse(request.params);
-    const watchlists = await runService(() => listWatchlistsForUser(params.userId));
+    const userId = await runService(() => resolveUserIdForRequest(request, params.userId));
+    const watchlists = await runService(() => listWatchlistsForUser(userId));
 
     reply.send(
       paginated(watchlists, {
@@ -40,6 +51,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/items/:itemId", async (request, reply) => {
     const params = watchlistItemIdParamsSchema.parse(request.params);
     const body = updateWatchlistItemBodySchema.parse(request.body);
+    await runService(() => assertWatchlistItemOwnership(request, params.itemId));
 
     const item = await runService(() => updateWatchlistItemDetails(params.itemId, body));
     reply.send(ok(item));
@@ -47,6 +59,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete("/items/:itemId", async (request, reply) => {
     const params = watchlistItemIdParamsSchema.parse(request.params);
+    await runService(() => assertWatchlistItemOwnership(request, params.itemId));
 
     await runService(() => removeWatchlistItem(params.itemId));
     reply.send(deleted());
@@ -55,6 +68,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
   app.post("/:watchlistId/items", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
     const body = addWatchlistItemBodySchema.parse(request.body);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
 
     const item = await runService(() =>
       addTickerToWatchlist(params.watchlistId, body.ticker, {
@@ -84,6 +98,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/:watchlistId/research-bundle", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
     const bundle = await runService(() => getWatchlistResearchBundle(params.watchlistId));
 
     if (!bundle) {
@@ -95,6 +110,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/:watchlistId/refresh-research-data", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
     const body = refreshWatchlistResearchDataBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );
@@ -117,6 +133,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/:watchlistId", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
     const watchlist = await runService(() => getWatchlistDetail(params.watchlistId));
 
     if (!watchlist) {
@@ -129,6 +146,7 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/:watchlistId", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
     const body = updateWatchlistBodySchema.parse(request.body);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
 
     const watchlist = await runService(() => updateWatchlist(params.watchlistId, body));
     reply.send(ok(watchlist));
@@ -136,16 +154,21 @@ export async function watchlistsRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete("/:watchlistId", async (request, reply) => {
     const params = watchlistIdParamsSchema.parse(request.params);
+    await runService(() => assertWatchlistOwnership(request, params.watchlistId));
 
     await runService(() => deleteWatchlist(params.watchlistId));
     reply.send(deleted());
   });
 
   app.post("/", async (request, reply) => {
-    const body = createWatchlistBodySchema.parse(request.body);
+    const body = (isAuthEnabled()
+      ? createWatchlistBodySchemaAuthEnabled
+      : createWatchlistBodySchema
+    ).parse(request.body);
+    const userId = await runService(() => resolveUserIdForRequest(request, body.userId));
 
     const watchlist = await runService(() =>
-      createWatchlist(body.userId, {
+      createWatchlist(userId, {
         name: body.name,
         description: body.description,
         isDefault: body.isDefault,

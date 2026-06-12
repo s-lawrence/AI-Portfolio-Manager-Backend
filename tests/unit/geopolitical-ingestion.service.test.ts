@@ -180,7 +180,18 @@ describe("geopolitical-ingestion.service", () => {
         });
       }
 
-      return [];
+      return [
+        {
+          provider: "GDELT",
+          title: "Inflation signal",
+          url: "https://example.com/inflation-signal",
+          publishedAt: new Date("2026-06-08T12:00:00.000Z"),
+          query: options.query,
+          category: "MACRO",
+          theme: "MACRO_POLICY",
+          sentiment: "NEUTRAL",
+        },
+      ];
     });
 
     const result = await ingestDefaultGdeltRiskSet({
@@ -193,7 +204,18 @@ describe("geopolitical-ingestion.service", () => {
       query: "geopolitical risk",
       statusCode: 429,
       retryAttempted: true,
+      failureCode: "GDELT_HTTP_ERROR",
     });
+  });
+
+  it("summary with no local geopolitical events suggests running refresh", async () => {
+    const summary = await getGeopoliticalSummary({ days: 7, limit: 50 });
+
+    expect(summary.totalEvents).toBe(0);
+    expect(summary.message).toContain("No persisted GDELT events");
+    expect(summary.suggestedActions?.some((value) => value.includes("refreshGdeltRiskContext"))).toBe(
+      true,
+    );
   });
 
   it("returns mapped GDELT query audit details", async () => {

@@ -10,6 +10,13 @@ export const listStocksQuerySchema = z.object({
   q: z.string().trim().min(1).optional(),
 });
 
+export const stockSearchQuerySchema = z.object({
+  query: z.string().trim().min(1),
+  exchange: z.string().trim().min(1).max(20).optional(),
+  country: z.string().trim().min(1).max(10).optional(),
+  limit: z.coerce.number().int().positive().max(25).optional(),
+});
+
 export const updateStockMetadataBodySchema = z
   .object({
     companyName: z.string().trim().min(1).optional(),

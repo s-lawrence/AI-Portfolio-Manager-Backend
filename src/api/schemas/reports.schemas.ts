@@ -17,6 +17,16 @@ export const reportTickerParamsSchema = z.object({
 
 export const generateReportBodySchema = z.object({
   holdingId: cuidSchema.optional(),
+  portfolioId: cuidSchema.optional(),
+  watchlistId: cuidSchema.optional(),
+  useOpenAi: z.boolean().optional(),
+  refreshBeforeGenerate: z.boolean().optional(),
+  includeMacro: z.boolean().optional(),
+  includeGeopolitical: z.boolean().optional(),
+  includeNews: z.boolean().optional(),
+  includeAnalyst: z.boolean().optional(),
+  includeScore: z.boolean().optional(),
+  createPredictions: z.boolean().optional(),
 });
 
 export const createReportBodySchema = z.object({

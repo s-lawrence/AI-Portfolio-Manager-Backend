@@ -17,6 +17,19 @@ export interface AgentSuggestedAction {
   requiresConfirmation?: boolean;
 }
 
+export interface AgentRecommendationCard {
+  rank: number;
+  ticker: string;
+  companyName?: string;
+  actionLabel: string;
+  score: number;
+  stance: string;
+  confidence?: AgentConfidence;
+  why: string[];
+  cautions: string[];
+  nextStep: string;
+}
+
 export interface AgentToolCallSummary {
   toolName: string;
   success: boolean;
@@ -57,16 +70,24 @@ export interface AgentOpenAiDiagnostics {
 export interface AgentChatMetadata {
   mode: "OPENAI_PLANNED_SYNTHESIS" | "OPENAI_SYNTHESIS" | "DETERMINISTIC_ROUTER";
   modelName?: string;
+  primaryModelName?: string;
+  fallbackModelName?: string;
+  modelUsedForPlanning?: string;
+  modelUsedForSynthesis?: string;
+  primaryFailureReason?: string;
   fallbackUsed: boolean;
   plannerUsed: boolean;
   plannerFallbackUsed: boolean;
   plannedToolCount: number;
   executedToolCount: number;
   droppedToolCount: number;
+  effectiveMaxToolCalls?: number;
   fallbackReason?: string;
   openAiProviderEnabled?: boolean;
   openAiKeyConfigured?: boolean;
-  plannerSkipReason?: "PROVIDER_DISABLED" | "API_KEY_MISSING";
+  plannerSkipReason?: "PROVIDER_DISABLED" | "API_KEY_MISSING" | "REQUEST_LIMIT_REACHED";
+  openAiRequestLimitsConfigured?: boolean;
+  openAiRequestLimitReason?: "DAILY_USER_LIMIT" | "MONTHLY_GLOBAL_LIMIT";
   receivedContextKeys?: Array<"source" | "userId" | "portfolioId" | "watchlistId" | "ticker" | "requestId">;
   receivedPortfolioIdConfigured?: boolean;
   receivedWatchlistIdConfigured?: boolean;
@@ -83,6 +104,18 @@ export interface AgentChatMetadata {
   canonicalPortfolioIdConfigured?: boolean;
   canonicalWatchlistIdConfigured?: boolean;
   canonicalTickerConfigured?: boolean;
+  authenticatedUserConfigured?: boolean;
+  authEnabled?: boolean;
+  blockedToolCount?: number;
+  blockedTools?: Array<{
+    toolName: string;
+    reason: string;
+  }>;
+  toolExecutionErrors?: Array<{
+    toolName: string;
+    code: string;
+    message: string;
+  }>;
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -94,6 +127,7 @@ export interface AgentChatResponse {
   intent: string;
   toolCalls: AgentToolCallSummary[];
   suggestedActions: AgentSuggestedAction[];
+  recommendationCards?: AgentRecommendationCard[];
   warnings: string[];
   missingContext: string[];
   confidence: AgentConfidence;
@@ -112,6 +146,7 @@ export interface AgentChatRequest {
   };
   confirmedToolExecutions?: AgentToolName[];
   confirmedToolInputs?: Partial<Record<AgentToolName, Record<string, unknown>>>;
+  maxToolCalls?: number;
   allowRefresh?: boolean;
   allowMutation?: boolean;
   dryRun?: boolean;

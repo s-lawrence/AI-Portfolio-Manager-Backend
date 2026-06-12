@@ -1,5 +1,6 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 
+import { isAuthEnabled, requireAuth } from "../../auth";
 import {
   getGeopoliticalSummary,
   getLatestGeopoliticalContext,
@@ -15,8 +16,17 @@ import {
   geopoliticalSummaryQuerySchema,
 } from "../schemas/geopolitical.schemas";
 
+async function enforceGeopoliticalRefreshAccess(request: FastifyRequest): Promise<void> {
+  if (!isAuthEnabled()) {
+    return;
+  }
+
+  await requireAuth(request);
+}
+
 export async function geopoliticalRoutes(app: FastifyInstance): Promise<void> {
   app.post("/ingestion/gdelt/query", async (request, reply) => {
+    await runService(() => enforceGeopoliticalRefreshAccess(request));
     const body = geopoliticalQueryBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );
@@ -33,6 +43,7 @@ export async function geopoliticalRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/ingestion/gdelt/default-risk-set", async (request, reply) => {
+    await runService(() => enforceGeopoliticalRefreshAccess(request));
     const body = geopoliticalDefaultRiskBodySchema.parse(
       typeof request.body === "object" && request.body != null ? request.body : {},
     );

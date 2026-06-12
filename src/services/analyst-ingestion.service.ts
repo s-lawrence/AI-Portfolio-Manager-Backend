@@ -19,6 +19,7 @@ import {
 } from "../repositories/analyst-action-events.repository";
 import { getWatchlistWithItems } from "../repositories/watchlists.repository";
 import {
+  AnalystWarningsSummary,
   IngestPortfolioAnalystDataResult,
   IngestTickerAnalystDataResult,
   IngestWatchlistAnalystDataResult,
@@ -48,6 +49,139 @@ function toErrorReason(error: unknown): string {
 
 function calculateDurationMs(startedAtDate: Date, finishedAtDate: Date): number {
   return Math.max(0, finishedAtDate.getTime() - startedAtDate.getTime());
+}
+
+type WarningKind = "ENTITLEMENT" | "NO_DATA" | "NO_RECORDS" | "OTHER";
+
+interface ParsedAnalystWarning {
+  ticker: string;
+  category: string;
+  kind: WarningKind;
+  message: string;
+}
+
+const ENTITLEMENT_UI_WARNING =
+  "Analyst data unavailable for some tickers under current FMP plan.";
+
+function parseAnalystWarning(ticker: string, message: string): ParsedAnalystWarning {
+  const normalizedMessage = message.trim();
+
+  const entitlementMatch = normalizedMessage.match(/^(.+?)\s+entitlement\/configuration issue:/i);
+  if (entitlementMatch) {
+    return {
+      ticker,
+      category: entitlementMatch[1]?.trim() ?? "Analyst endpoint",
+      kind: "ENTITLEMENT",
+      message: normalizedMessage,
+    };
+  }
+
+  const noDataMatch = normalizedMessage.match(/^(.+?)\s+returned no data\./i);
+  if (noDataMatch) {
+    return {
+      ticker,
+      category: noDataMatch[1]?.trim() ?? "Analyst endpoint",
+      kind: "NO_DATA",
+      message: normalizedMessage,
+    };
+  }
+
+  const noRecordsMatch = normalizedMessage.match(/^(.+?)\s+returned no records\./i);
+  if (noRecordsMatch) {
+    return {
+      ticker,
+      category: noRecordsMatch[1]?.trim() ?? "Analyst endpoint",
+      kind: "NO_RECORDS",
+      message: normalizedMessage,
+    };
+  }
+
+  return {
+    ticker,
+    category: "Analyst endpoint",
+    kind: "OTHER",
+    message: normalizedMessage,
+  };
+}
+
+function buildEmptyAnalystWarningsSummary(): AnalystWarningsSummary {
+  return {
+    entitlementIssuesCount: 0,
+    noDataCount: 0,
+    noRecordsCount: 0,
+    affectedTickers: [],
+    examples: [],
+  };
+}
+
+function aggregateAnalystWarnings(parsedWarnings: ParsedAnalystWarning[]): {
+  warnings: string[];
+  summary: AnalystWarningsSummary;
+} {
+  if (parsedWarnings.length === 0) {
+    return {
+      warnings: [],
+      summary: buildEmptyAnalystWarningsSummary(),
+    };
+  }
+
+  const entitlementKeys = new Set<string>();
+  const noDataKeys = new Set<string>();
+  const noRecordsKeys = new Set<string>();
+  const affectedTickerSet = new Set<string>();
+  const exampleSet = new Set<string>();
+
+  for (const warning of parsedWarnings) {
+    const compositeKey = `${warning.ticker}:${warning.category}`;
+
+    if (warning.kind === "ENTITLEMENT") {
+      entitlementKeys.add(compositeKey);
+      affectedTickerSet.add(warning.ticker);
+    } else if (warning.kind === "NO_DATA") {
+      noDataKeys.add(compositeKey);
+      affectedTickerSet.add(warning.ticker);
+    } else if (warning.kind === "NO_RECORDS") {
+      noRecordsKeys.add(compositeKey);
+      affectedTickerSet.add(warning.ticker);
+    }
+
+    exampleSet.add(`${warning.ticker}: ${warning.message}`);
+  }
+
+  const summary: AnalystWarningsSummary = {
+    entitlementIssuesCount: entitlementKeys.size,
+    noDataCount: noDataKeys.size,
+    noRecordsCount: noRecordsKeys.size,
+    affectedTickers: [...affectedTickerSet].sort((left, right) => left.localeCompare(right)),
+    examples: [...exampleSet].slice(0, 5),
+  };
+
+  const uiWarnings: string[] = [];
+  if (summary.entitlementIssuesCount > 0) {
+    uiWarnings.push(ENTITLEMENT_UI_WARNING);
+  }
+
+  if (summary.noDataCount > 0) {
+    uiWarnings.push(
+      `Analyst provider returned no data for ${summary.noDataCount} ticker/category combination(s).`,
+    );
+  }
+
+  if (summary.noRecordsCount > 0) {
+    uiWarnings.push(
+      `Analyst provider returned no records for ${summary.noRecordsCount} ticker/category combination(s).`,
+    );
+  }
+
+  const otherWarningCount = parsedWarnings.filter((warning) => warning.kind === "OTHER").length;
+  if (otherWarningCount > 0) {
+    uiWarnings.push(`Analyst ingestion produced ${otherWarningCount} additional warning(s).`);
+  }
+
+  return {
+    warnings: uiWarnings.slice(0, 5),
+    summary,
+  };
 }
 
 function pickFirstNumber(
@@ -530,19 +664,31 @@ export async function ingestPortfolioAnalystData(
 
   const results: IngestTickerAnalystDataResult[] = [];
   const failedTickers: IngestPortfolioAnalystDataResult["failedTickers"] = [];
-  const warnings: string[] = [];
+  const rawWarnings: string[] = [];
+  const parsedWarnings: ParsedAnalystWarning[] = [];
 
   for (const ticker of uniqueTickers) {
     try {
       const result = await ingestTickerAnalystData(ticker);
       results.push(result);
-      warnings.push(...result.warnings.map((warning) => `${ticker}: ${warning}`));
+
+      for (const warning of result.warnings) {
+        rawWarnings.push(`${ticker}: ${warning}`);
+        parsedWarnings.push(parseAnalystWarning(ticker, warning));
+      }
     } catch (error) {
       failedTickers.push({
         ticker,
         reason: toErrorReason(error),
       });
     }
+  }
+
+  const aggregatedWarnings = aggregateAnalystWarnings(parsedWarnings);
+  const warnings = [...aggregatedWarnings.warnings];
+
+  if (failedTickers.length > 0) {
+    warnings.push(`Analyst-data ingestion failed for ${failedTickers.length} ticker(s).`);
   }
 
   const finishedAtDate = new Date();
@@ -560,7 +706,9 @@ export async function ingestPortfolioAnalystData(
     actionsUpdated: results.reduce((sum, item) => sum + item.actionsUpdated, 0),
     results,
     failedTickers,
-    warnings,
+    analystWarningsSummary: aggregatedWarnings.summary,
+    rawWarnings,
+    warnings: warnings.slice(0, 5),
   };
 }
 
@@ -579,19 +727,31 @@ export async function ingestWatchlistAnalystData(
 
   const results: IngestTickerAnalystDataResult[] = [];
   const failedTickers: IngestWatchlistAnalystDataResult["failedTickers"] = [];
-  const warnings: string[] = [];
+  const rawWarnings: string[] = [];
+  const parsedWarnings: ParsedAnalystWarning[] = [];
 
   for (const ticker of uniqueTickers) {
     try {
       const result = await ingestTickerAnalystData(ticker);
       results.push(result);
-      warnings.push(...result.warnings.map((warning) => `${ticker}: ${warning}`));
+
+      for (const warning of result.warnings) {
+        rawWarnings.push(`${ticker}: ${warning}`);
+        parsedWarnings.push(parseAnalystWarning(ticker, warning));
+      }
     } catch (error) {
       failedTickers.push({
         ticker,
         reason: toErrorReason(error),
       });
     }
+  }
+
+  const aggregatedWarnings = aggregateAnalystWarnings(parsedWarnings);
+  const warnings = [...aggregatedWarnings.warnings];
+
+  if (failedTickers.length > 0) {
+    warnings.push(`Analyst-data ingestion failed for ${failedTickers.length} ticker(s).`);
   }
 
   const finishedAtDate = new Date();
@@ -609,7 +769,9 @@ export async function ingestWatchlistAnalystData(
     actionsUpdated: results.reduce((sum, item) => sum + item.actionsUpdated, 0),
     results,
     failedTickers,
-    warnings,
+    analystWarningsSummary: aggregatedWarnings.summary,
+    rawWarnings,
+    warnings: warnings.slice(0, 5),
   };
 }
 
