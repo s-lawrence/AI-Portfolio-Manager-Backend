@@ -1069,7 +1069,7 @@ describe("agent-chat.service planner flow", () => {
     env.OPENAI_API_KEY = undefined;
 
     const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
-      mockToolResult("scoreWatchlist", {
+      mockToolResult("rankWatchlist", {
         totalItems: 3,
         activeItemsCount: 3,
         scoredItemsCount: 1,
@@ -1088,7 +1088,7 @@ describe("agent-chat.service planner flow", () => {
 
     expect(result.intent).toBe("WATCHLIST_SCORE");
     expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
-      toolName: "scoreWatchlist",
+      toolName: "rankWatchlist",
       input: { watchlistId: "watchlist-1" },
     }));
   });
@@ -1594,38 +1594,61 @@ describe("agent-chat.service planner flow", () => {
     expect(result.metadata.executedToolCount).toBe(1);
   });
 
-  it("confirmed add uses resolved NVDA ticker and does not use ADD command word", async () => {
+  it("confirmed add executes original suggested input and proposes next actions", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = false;
     env.OPENAI_API_KEY = undefined;
 
     const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockResolvedValue(
-      mockToolResult("addTickerToWatchlist", { ticker: "NVDA" }) as never,
+      mockToolResult("addTickerToWatchlist", {
+        ticker: "NVDA",
+        watchlistId: "watchlist-1",
+      }) as never,
     );
 
-    await runAgentChat({
+    const result = await runAgentChat({
       message: "Confirm add NVDA to my watchlist",
       context: {
         source: "USER",
         watchlistId: "watchlist-1",
       },
       confirmedToolExecutions: ["addTickerToWatchlist"],
+      confirmedToolInputs: {
+        addTickerToWatchlist: {
+          watchlistId: "watchlist-1",
+          ticker: "NVDA",
+          status: "WATCHING",
+          priority: "HIGH",
+          source: "AGENT",
+          addedReason: "NVDA: growth fit with recommendation score 81.2.",
+        },
+      },
       allowMutation: true,
+      allowRefresh: true,
       dryRun: false,
     });
 
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
       toolName: "addTickerToWatchlist",
-      input: expect.objectContaining({
+      input: {
+        watchlistId: "watchlist-1",
         ticker: "NVDA",
-      }),
+        status: "WATCHING",
+        priority: "HIGH",
+        source: "AGENT",
+        addedReason: "NVDA: growth fit with recommendation score 81.2.",
+      },
       confirmed: true,
     }));
-    expect(executeSpy).not.toHaveBeenCalledWith(expect.objectContaining({
-      input: expect.objectContaining({
-        ticker: "ADD",
-      }),
-    }));
+
+    expect(result.suggestedActions.some((action) =>
+      action.toolName === "refreshWatchlistResearchData" &&
+      action.requiresConfirmation === true,
+    )).toBe(true);
+    expect(result.suggestedActions.some((action) =>
+      action.toolName === "generateTickerReport" &&
+      action.input?.ticker === "NVDA",
+    )).toBe(true);
   });
 
   it("drops FX pseudo-ticker analyst refresh and suggests USD/CAD FX refresh", async () => {
@@ -1987,99 +2010,58 @@ describe("agent-chat.service planner flow", () => {
     expect(executedToolNames.filter((toolName) => toolName === "getPortfolioOverview").length).toBeLessThan(executedToolNames.length);
   });
 
-  it("market candidate discovery intent executes ranking/risk/quality toolset deterministically", async () => {
+  it("market candidate discovery intent executes screening/risk/quality toolset deterministically", async () => {
     env.OPENAI_AGENT_PROVIDER_ENABLED = false;
     env.OPENAI_API_KEY = "test-key";
 
     const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
-      if (request.toolName === "rankDiscoveryCandidates") {
-        return mockToolResult("rankDiscoveryCandidates", {
-          category: "GAINERS",
-          totalCandidates: 8,
-          scoredCandidatesCount: 5,
-          skippedCandidatesCount: 3,
-          noQualifiedCandidates: false,
-          recommendationThreshold: {
-            minimumRecommendationScore: 60,
-          },
-          rankedCandidates: [
+      if (request.toolName === "screenMarketCandidates") {
+        return mockToolResult("screenMarketCandidates", {
+          screenedCount: 8,
+          qualifiedCount: 2,
+          candidates: [
             {
               rank: 1,
               ticker: "NVDA",
               companyName: "NVIDIA Corporation",
-              compositeScore: 82.4,
-              suggestedStance: "STRONG_CANDIDATE",
+              score: 82.4,
+              preferenceFitScore: 78,
+              portfolioFitScore: 66,
+              totalRecommendationScore: 81.2,
               actionLabel: "Strong review candidate",
-              qualifiesForRecommendation: true,
               why: ["Revenue growth is positive."],
               cautions: ["RSI is elevated and may signal short-term exhaustion."],
-              bullishFactors: ["Revenue growth is positive."],
-              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
-              diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
               missingData: [],
-              staleDataWarnings: [],
+              alreadyHeld: false,
               alreadyInWatchlist: false,
+              suggestedAction: "ADD_TO_WATCHLIST",
             },
             {
               rank: 2,
               ticker: "MSFT",
               companyName: "Microsoft Corporation",
-              compositeScore: 79.3,
-              suggestedStance: "CANDIDATE",
+              score: 79.3,
+              preferenceFitScore: 72,
+              portfolioFitScore: 62,
+              totalRecommendationScore: 76.8,
               actionLabel: "Review candidate",
-              qualifiesForRecommendation: true,
               why: ["Price is above SMA200."],
               cautions: ["Valuation ratios are mostly unavailable."],
-              bullishFactors: ["Price is above SMA200."],
-              bearishFactors: ["Valuation ratios are mostly unavailable."],
-              diversificationNotes: ["Sector differs from largest current sector (Technology), which may improve diversification."],
               missingData: [],
-              staleDataWarnings: [],
+              alreadyHeld: false,
               alreadyInWatchlist: true,
+              suggestedAction: "ADD_TO_WATCHLIST",
             },
           ],
-          recommendedCandidates: [
-            {
-              rank: 1,
-              ticker: "NVDA",
-              companyName: "NVIDIA Corporation",
-              compositeScore: 82.4,
-              suggestedStance: "STRONG_CANDIDATE",
-              actionLabel: "Strong review candidate",
-              qualifiesForRecommendation: true,
-              why: ["Revenue growth is positive."],
-              cautions: ["RSI is elevated and may signal short-term exhaustion."],
-              bullishFactors: ["Revenue growth is positive."],
-              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
-              diversificationNotes: ["Not currently held; can be evaluated as a potential diversification candidate."],
-              missingData: [],
-              staleDataWarnings: [],
-              alreadyInWatchlist: false,
-            },
-            {
-              rank: 2,
-              ticker: "MSFT",
-              companyName: "Microsoft Corporation",
-              compositeScore: 79.3,
-              suggestedStance: "CANDIDATE",
-              actionLabel: "Review candidate",
-              qualifiesForRecommendation: true,
-              why: ["Price is above SMA200."],
-              cautions: ["Valuation ratios are mostly unavailable."],
-              bullishFactors: ["Price is above SMA200."],
-              bearishFactors: ["Valuation ratios are mostly unavailable."],
-              diversificationNotes: ["Sector differs from largest current sector (Technology), which may improve diversification."],
-              missingData: [],
-              staleDataWarnings: [],
-              alreadyInWatchlist: true,
-            },
-          ],
-          monitorCandidates: [],
-          notRecommendedCandidates: [],
-          bestAvailableButBelowThreshold: [],
-          skippedCandidates: [],
-          warnings: [],
+          rejectedCandidates: [],
+          assumptions: ["Objective defaulted to GROWTH."],
+          clarifyingQuestion: null,
           suggestedRefreshActions: [],
+          preferencesApplied: {
+            objective: "GROWTH",
+            timeHorizon: "LONG",
+            riskTolerance: "MEDIUM",
+          },
         }) as never;
       }
 
@@ -2087,7 +2069,7 @@ describe("agent-chat.service planner flow", () => {
     });
 
     const result = await runAgentChat({
-      message: "Find candidate tickers for a new holding from discovery data",
+      message: "Find growth candidate tickers for a new holding from discovery data",
       context: {
         source: "USER",
         portfolioId: "portfolio-1",
@@ -2101,9 +2083,9 @@ describe("agent-chat.service planner flow", () => {
       "getPortfolioOverview",
       "getPortfolioRiskSnapshot",
       "getPortfolioDataQuality",
-      "rankDiscoveryCandidates",
+      "screenMarketCandidates",
     ]));
-    expect(result.answer).toContain("Qualified new-holding recommendations from persisted GAINERS discovery data");
+    expect(result.answer).toContain("Qualified candidate recommendations from persisted backend data");
     expect(result.answer).toContain("1. NVDA (NVIDIA Corporation)");
     expect(result.answer).toContain("Decision support only, not a buy/sell instruction.");
 
@@ -2112,9 +2094,11 @@ describe("agent-chat.service planner flow", () => {
     expect(addActions[0]?.input).toMatchObject({
       watchlistId: "watchlist-1",
       ticker: "NVDA",
-      status: "CANDIDATE",
+      status: "WATCHING",
+      priority: "HIGH",
       source: "AGENT",
     });
+    expect(typeof addActions[0]?.input?.addedReason).toBe("string");
     expect(addActions[0]?.requiresConfirmation).toBe(true);
   });
 
@@ -2123,60 +2107,37 @@ describe("agent-chat.service planner flow", () => {
     env.OPENAI_API_KEY = "test-key";
 
     vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
-      if (request.toolName === "rankDiscoveryCandidates") {
-        return mockToolResult("rankDiscoveryCandidates", {
-          category: "GAINERS",
-          totalCandidates: 2,
-          scoredCandidatesCount: 2,
-          skippedCandidatesCount: 0,
-          noQualifiedCandidates: false,
-          recommendationThreshold: {
-            minimumRecommendationScore: 60,
-          },
-          rankedCandidates: [
+      if (request.toolName === "screenMarketCandidates") {
+        return mockToolResult("screenMarketCandidates", {
+          screenedCount: 2,
+          qualifiedCount: 1,
+          candidates: [
             {
               rank: 1,
               ticker: "AAPL",
               companyName: "Apple Inc.",
-              compositeScore: 78.1,
-              suggestedStance: "CANDIDATE",
+              score: 78.1,
+              preferenceFitScore: 70,
+              portfolioFitScore: 60,
+              totalRecommendationScore: 74.8,
               actionLabel: "Review candidate",
-              qualifiesForRecommendation: true,
               why: ["Revenue growth is positive."],
               cautions: ["RSI is elevated and may signal short-term exhaustion."],
-              bullishFactors: ["Revenue growth is positive."],
-              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
-              diversificationNotes: ["Portfolio context was not provided; diversification fit could not be fully assessed."],
               missingData: [],
-              staleDataWarnings: [],
+              alreadyHeld: false,
               alreadyInWatchlist: false,
+              suggestedAction: "ADD_TO_WATCHLIST",
             },
           ],
-          recommendedCandidates: [
-            {
-              rank: 1,
-              ticker: "AAPL",
-              companyName: "Apple Inc.",
-              compositeScore: 78.1,
-              suggestedStance: "CANDIDATE",
-              actionLabel: "Review candidate",
-              qualifiesForRecommendation: true,
-              why: ["Revenue growth is positive."],
-              cautions: ["RSI is elevated and may signal short-term exhaustion."],
-              bullishFactors: ["Revenue growth is positive."],
-              bearishFactors: ["RSI is elevated and may signal short-term exhaustion."],
-              diversificationNotes: ["Portfolio context was not provided; diversification fit could not be fully assessed."],
-              missingData: [],
-              staleDataWarnings: [],
-              alreadyInWatchlist: false,
-            },
-          ],
-          monitorCandidates: [],
-          notRecommendedCandidates: [],
-          bestAvailableButBelowThreshold: [],
-          skippedCandidates: [],
-          warnings: [],
+          rejectedCandidates: [],
+          assumptions: [],
+          clarifyingQuestion: null,
           suggestedRefreshActions: [],
+          preferencesApplied: {
+            objective: "GROWTH",
+            timeHorizon: "LONG",
+            riskTolerance: "MEDIUM",
+          },
         }) as never;
       }
 
@@ -2184,7 +2145,7 @@ describe("agent-chat.service planner flow", () => {
     });
 
     const result = await runAgentChat({
-      message: "Suggest candidate stocks from discovery for a new holding",
+      message: "Suggest growth candidate stocks from discovery for a new holding",
       context: {
         source: "USER",
         portfolioId: "portfolio-1",
@@ -2200,70 +2161,30 @@ describe("agent-chat.service planner flow", () => {
     env.OPENAI_API_KEY = "test-key";
 
     vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
-      if (request.toolName === "rankDiscoveryCandidates") {
-        return mockToolResult("rankDiscoveryCandidates", {
-          category: "GAINERS",
-          totalCandidates: 3,
-          scoredCandidatesCount: 3,
-          skippedCandidatesCount: 0,
-          noQualifiedCandidates: true,
-          reasonNoQualifiedCandidates: "Top names are HOLD_OFF and below quality threshold.",
-          recommendationThreshold: {
-            minimumRecommendationScore: 60,
-          },
-          rankedCandidates: [
+      if (request.toolName === "screenMarketCandidates") {
+        return mockToolResult("screenMarketCandidates", {
+          screenedCount: 3,
+          qualifiedCount: 0,
+          candidates: [],
+          rejectedCandidates: [
             {
-              rank: 1,
               ticker: "XYZ",
-              companyName: "XYZ Corp",
-              compositeScore: 48.2,
-              suggestedStance: "HOLD_OFF",
-              actionLabel: "Not recommended from current snapshot",
-              qualifiesForRecommendation: false,
-              why: ["Short-term move detected."],
-              cautions: ["Insufficient quality and analyst context."],
+              reason: "Ticker did not pass qualification thresholds for a new recommendation.",
+              score: 48.2,
+              actionLabel: "Hold off / insufficient signal",
               missingData: ["analyst"],
-              staleDataWarnings: [],
+              alreadyHeld: false,
               alreadyInWatchlist: false,
             },
           ],
-          recommendedCandidates: [],
-          monitorCandidates: [],
-          notRecommendedCandidates: [
-            {
-              rank: 1,
-              ticker: "XYZ",
-              companyName: "XYZ Corp",
-              compositeScore: 48.2,
-              suggestedStance: "HOLD_OFF",
-              actionLabel: "Not recommended from current snapshot",
-              qualifiesForRecommendation: false,
-              why: ["Short-term move detected."],
-              cautions: ["Insufficient quality and analyst context."],
-              missingData: ["analyst"],
-              staleDataWarnings: [],
-              alreadyInWatchlist: false,
-            },
-          ],
-          bestAvailableButBelowThreshold: [
-            {
-              rank: 1,
-              ticker: "XYZ",
-              companyName: "XYZ Corp",
-              compositeScore: 48.2,
-              suggestedStance: "HOLD_OFF",
-              actionLabel: "Not recommended from current snapshot",
-              qualifiesForRecommendation: false,
-              why: ["Short-term move detected."],
-              cautions: ["Insufficient quality and analyst context."],
-              missingData: ["analyst"],
-              staleDataWarnings: [],
-              alreadyInWatchlist: false,
-            },
-          ],
-          skippedCandidates: [],
-          warnings: [],
+          assumptions: [],
+          clarifyingQuestion: null,
           suggestedRefreshActions: ["refreshDiscoveryCategory"],
+          preferencesApplied: {
+            objective: "GROWTH",
+            timeHorizon: "LONG",
+            riskTolerance: "MEDIUM",
+          },
         }) as never;
       }
 
@@ -2271,7 +2192,7 @@ describe("agent-chat.service planner flow", () => {
     });
 
     const result = await runAgentChat({
-      message: "Find candidate tickers for a new holding from discovery data",
+      message: "Find growth candidate tickers for a new holding from discovery data",
       context: {
         source: "USER",
         portfolioId: "portfolio-1",
@@ -2279,10 +2200,230 @@ describe("agent-chat.service planner flow", () => {
       },
     });
 
-    expect(result.answer).toContain("none met the minimum score/quality threshold");
-    expect(result.answer).toContain("Best available but below threshold");
+    expect(result.answer).toContain("none qualified for watchlist addition");
+    expect(result.answer).toContain("Closest but not qualified");
     expect(result.suggestedActions.some((action) => action.toolName === "addTickerToWatchlist")).toBe(false);
     expect(result.suggestedActions.some((action) => action.toolName === "refreshDiscoveryCategory")).toBe(true);
+  });
+
+  it("ambiguous recommendation prompt asks objective clarifying question", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName");
+
+    const result = await runAgentChat({
+      message: "Suggest candidate stocks for me",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(result.intent).toBe("MARKET_CANDIDATE_DISCOVERY");
+    expect(result.answer).toBe("What are you optimizing for: growth, dividends, lower risk, or diversification?");
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("clear recommendation prompt defaults objective and executes screenMarketCandidates", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "screenMarketCandidates") {
+        return mockToolResult("screenMarketCandidates", {
+          screenedCount: 3,
+          qualifiedCount: 1,
+          candidates: [
+            {
+              rank: 1,
+              ticker: "RY",
+              companyName: "Royal Bank of Canada",
+              score: 74,
+              preferenceFitScore: 71,
+              portfolioFitScore: 58,
+              totalRecommendationScore: 70.1,
+              actionLabel: "Review candidate",
+              why: ["Matches Canada preference."],
+              cautions: [],
+              missingData: [],
+              alreadyHeld: false,
+              alreadyInWatchlist: false,
+              suggestedAction: "ADD_TO_WATCHLIST",
+            },
+          ],
+          rejectedCandidates: [],
+          assumptions: [],
+          clarifyingQuestion: null,
+          suggestedRefreshActions: [],
+          preferencesApplied: {
+            objective: "GROWTH",
+            timeHorizon: "LONG",
+            riskTolerance: "MEDIUM",
+            wantsCanada: true,
+          },
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, {}) as never;
+    });
+
+    const result = await runAgentChat({
+      message: "Suggest Canadian candidate stocks from discovery data",
+      context: {
+        source: "USER",
+      },
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: "screenMarketCandidates",
+      input: expect.objectContaining({
+        preferences: expect.objectContaining({
+          objective: "GROWTH",
+          timeHorizon: "LONG",
+          riskTolerance: "MEDIUM",
+          wantsCanada: true,
+        }),
+      }),
+    }));
+    expect(result.answer).toContain("Qualified candidate recommendations from persisted backend data");
+  });
+
+  it.each([
+    {
+      name: "ambiguous generic prompt asks clarification",
+      message: "Suggest candidate stocks for me",
+      context: {},
+      expectClarifyingQuestion: true,
+    },
+    {
+      name: "growth objective extraction",
+      message: "Suggest growth candidate stocks from discovery",
+      context: {},
+      expectedPreferences: { objective: "GROWTH", timeHorizon: "LONG", riskTolerance: "MEDIUM" },
+    },
+    {
+      name: "dividend objective extraction",
+      message: "Find dividend income candidate stocks from discovery",
+      context: {},
+      expectedPreferences: { objective: "DIVIDEND", riskTolerance: "MEDIUM" },
+    },
+    {
+      name: "lower risk objective extraction",
+      message: "Recommend lower risk candidate stocks",
+      context: {},
+      expectedPreferences: { objective: "LOW_VOLATILITY", riskTolerance: "LOW" },
+    },
+    {
+      name: "diversification objective extraction",
+      message: "Suggest diversification candidate stocks for my portfolio",
+      context: {},
+      expectedPreferences: { objective: "DIVERSIFICATION", riskTolerance: "MEDIUM" },
+    },
+    {
+      name: "canada preference with default objective",
+      message: "Suggest Canadian candidate stocks from discovery",
+      context: {},
+      expectedPreferences: { objective: "GROWTH", wantsCanada: true },
+    },
+    {
+      name: "us momentum short-term extraction",
+      message: "Suggest high risk momentum US stocks for short term",
+      context: {},
+      expectedPreferences: { objective: "MOMENTUM", riskTolerance: "HIGH", timeHorizon: "SHORT", wantsUS: true },
+    },
+    {
+      name: "value long-term extraction",
+      message: "Find long term value candidate stocks",
+      context: {},
+      expectedPreferences: { objective: "VALUE", timeHorizon: "LONG" },
+    },
+    {
+      name: "portfolio-aware recommendation uses context",
+      message: "Recommend growth candidate stocks for a new position",
+      context: { portfolioId: "portfolio-1", watchlistId: "watchlist-1" },
+      expectedPreferences: { objective: "GROWTH" },
+      expectPortfolioAwareCalls: true,
+    },
+    {
+      name: "sector-constrained defaults",
+      message: "Suggest technology candidate stocks from discovery",
+      context: {},
+      expectedPreferences: { objective: "GROWTH" },
+    },
+  ])("recommendation matrix: $name", async (scenario) => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const executeSpy = vi.spyOn(agentToolExecutor, "executeByName").mockImplementation(async (request) => {
+      if (request.toolName === "screenMarketCandidates") {
+        return mockToolResult("screenMarketCandidates", {
+          screenedCount: 2,
+          qualifiedCount: 1,
+          candidates: [
+            {
+              rank: 1,
+              ticker: "NVDA",
+              companyName: "NVIDIA Corporation",
+              score: 80,
+              preferenceFitScore: 72,
+              portfolioFitScore: 65,
+              totalRecommendationScore: 77.2,
+              actionLabel: "Strong review candidate",
+              why: ["Persisted score and fit metrics are supportive."],
+              cautions: [],
+              missingData: [],
+              alreadyHeld: false,
+              alreadyInWatchlist: false,
+              suggestedAction: "ADD_TO_WATCHLIST",
+            },
+          ],
+          rejectedCandidates: [],
+          assumptions: [],
+          clarifyingQuestion: null,
+          suggestedRefreshActions: [],
+          preferencesApplied: {
+            objective: "GROWTH",
+            timeHorizon: "LONG",
+            riskTolerance: "MEDIUM",
+          },
+        }) as never;
+      }
+
+      return mockToolResult(request.toolName, {}) as never;
+    });
+
+    const result = await runAgentChat({
+      message: scenario.message,
+      context: {
+        source: "USER",
+        ...(scenario.context ?? {}),
+      },
+    });
+
+    const screenCall = executeSpy.mock.calls.find((call) => call[0]?.toolName === "screenMarketCandidates");
+
+    if (scenario.expectClarifyingQuestion) {
+      expect(result.answer).toBe("What are you optimizing for: growth, dividends, lower risk, or diversification?");
+      expect(screenCall).toBeUndefined();
+      return;
+    }
+
+    expect(screenCall).toBeDefined();
+    if (scenario.expectedPreferences) {
+      expect(screenCall?.[0]?.input).toMatchObject({
+        preferences: expect.objectContaining(scenario.expectedPreferences),
+      });
+    }
+
+    if (scenario.expectPortfolioAwareCalls) {
+      const executedToolNames = executeSpy.mock.calls.map((call) => call[0]?.toolName);
+      expect(executedToolNames).toEqual(expect.arrayContaining([
+        "getPortfolioOverview",
+        "getPortfolioRiskSnapshot",
+        "getPortfolioDataQuality",
+        "screenMarketCandidates",
+      ]));
+    }
   });
 
   it("confirmed refreshDiscoveryCategory defaults category to GAINERS when input missing", async () => {

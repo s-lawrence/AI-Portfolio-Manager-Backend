@@ -82,9 +82,63 @@ describe("API agent tools routes", () => {
       .spyOn(stocksService, "getStockResearchBundle")
       .mockResolvedValue({
         stock: {
+          id: "stock-1",
           ticker: "AAPL",
+          companyName: "Apple Inc.",
+          exchange: "NASDAQ",
+          currency: "USD",
+          country: "US",
+          sector: "Technology",
+          industry: "Consumer Electronics",
+          assetType: "EQUITY",
         },
+        recentNews: [],
+        recentAnalystActions: [],
+        latestPriceSnapshot: null,
+        latestTechnicalSnapshot: null,
+        latestFundamentalSnapshot: null,
+        latestAnalystSnapshot: null,
+        latestAnnualAnalystEstimate: null,
+        latestQuarterAnalystEstimate: null,
+        nextEarningsEvent: null,
+        latestAIReport: null,
       } as never);
+    vi.spyOn(researchScoringService, "getTickerDataQuality").mockResolvedValue({
+      ticker: "AAPL",
+      hasPrice: true,
+      hasTechnical: true,
+      hasFundamental: true,
+      hasAnalyst: true,
+      hasNews: true,
+      hasEarnings: true,
+      hasReport: true,
+      missingData: [],
+      staleDataWarnings: [],
+      suggestedRefreshActions: [],
+    });
+    vi.spyOn(researchScoringService, "scoreTickerResearch").mockResolvedValue({
+      ticker: "AAPL",
+      asOf: new Date().toISOString(),
+      componentScores: {
+        technicalScore: 60,
+        fundamentalScore: 62,
+        valuationScore: 55,
+        analystScore: 64,
+        newsScore: 58,
+        macroRiskScore: 52,
+        earningsRiskScore: 56,
+        dataQualityScore: 90,
+      },
+      compositeScore: 61,
+      suggestedStance: "CANDIDATE",
+      actionLabel: "Review candidate",
+      bullishFactors: [],
+      bearishFactors: [],
+      missingData: [],
+      staleDataWarnings: [],
+      confidence: "HIGH",
+      explanation: "deterministic",
+    });
 
     const app = buildApp();
     const response = await app.inject({
@@ -108,6 +162,7 @@ describe("API agent tools routes", () => {
     expect(body.data.success).toBe(true);
     expect(body.data.dataSummary).toMatchObject({
       ticker: "AAPL",
+      compositeScore: 61,
     });
     expect(bundleSpy).toHaveBeenCalledWith("AAPL");
 

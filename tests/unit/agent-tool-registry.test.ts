@@ -156,7 +156,43 @@ describe("agent tool registry and executor", () => {
   it("getTickerResearchBundle tool calls existing stocks service", async () => {
     const bundleSpy = vi
       .spyOn(stocksService, "getStockResearchBundle")
-      .mockResolvedValue({ stock: { ticker: "AAPL" } } as never);
+      .mockResolvedValue({ stock: { id: "stock-1", ticker: "AAPL" }, recentNews: [] } as never);
+    vi.spyOn(researchScoringService, "getTickerDataQuality").mockResolvedValue({
+      ticker: "AAPL",
+      hasPrice: true,
+      hasTechnical: true,
+      hasFundamental: true,
+      hasAnalyst: true,
+      hasNews: true,
+      hasEarnings: true,
+      hasReport: true,
+      missingData: [],
+      staleDataWarnings: [],
+      suggestedRefreshActions: [],
+    });
+    vi.spyOn(researchScoringService, "scoreTickerResearch").mockResolvedValue({
+      ticker: "AAPL",
+      asOf: new Date().toISOString(),
+      componentScores: {
+        technicalScore: 60,
+        fundamentalScore: 62,
+        valuationScore: 55,
+        analystScore: 64,
+        newsScore: 58,
+        macroRiskScore: 52,
+        earningsRiskScore: 56,
+        dataQualityScore: 90,
+      },
+      compositeScore: 61,
+      suggestedStance: "CANDIDATE",
+      actionLabel: "Review candidate",
+      bullishFactors: [],
+      bearishFactors: [],
+      missingData: [],
+      staleDataWarnings: [],
+      confidence: "HIGH",
+      explanation: "deterministic",
+    });
 
     const executor = new AgentToolExecutor(createAgentToolRegistry());
     const result = await executor.executeByName({
@@ -169,6 +205,9 @@ describe("agent tool registry and executor", () => {
     expect(result.success).toBe(true);
     expect(result.dataSummary).toMatchObject({
       ticker: "AAPL",
+      compositeScore: 61,
+      missingDataCount: 0,
+      staleDataWarningsCount: 0,
     });
   });
 
@@ -201,6 +240,101 @@ describe("agent tool registry and executor", () => {
     expect(result.dataSummary).toMatchObject({
       ticker: "AAPL",
       missingDataCount: 3,
+    });
+  });
+
+  it("resolveTickerOrCompany handles explicit ticker", async () => {
+    vi.spyOn(stocksService, "searchStockCandidates").mockResolvedValue([
+      {
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        exchange: "NASDAQ",
+        currency: "USD",
+        country: "US",
+        provider: "LOCAL_DB",
+        matchType: "LOCAL",
+        confidence: "HIGH",
+      },
+    ] as never);
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "resolveTickerOrCompany",
+      input: { query: "aapl" },
+      context: { source: "USER" },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      resolvedTicker: "AAPL",
+      isAmbiguous: false,
+    });
+  });
+
+  it("resolveTickerOrCompany handles company alias", async () => {
+    vi.spyOn(stocksService, "searchStockCandidates").mockResolvedValue([
+      {
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        exchange: "NASDAQ",
+        currency: "USD",
+        country: "US",
+        provider: "FMP",
+        matchType: "PROVIDER",
+        confidence: "HIGH",
+      },
+    ] as never);
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "resolveTickerOrCompany",
+      input: { query: "Apple" },
+      context: { source: "USER" },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      resolvedTicker: "AAPL",
+    });
+  });
+
+  it("resolveTickerOrCompany returns ambiguity for one-letter symbols", async () => {
+    vi.spyOn(stocksService, "searchStockCandidates").mockResolvedValue([
+      {
+        ticker: "E",
+        companyName: "ENI S.p.A.",
+        exchange: "NYSE",
+        currency: "USD",
+        country: "US",
+        provider: "FMP",
+        matchType: "PROVIDER",
+        confidence: "LOW",
+      },
+      {
+        ticker: "E.PA",
+        companyName: "ENI S.p.A.",
+        exchange: "EPA",
+        currency: "EUR",
+        country: "FR",
+        provider: "FMP",
+        matchType: "PROVIDER",
+        confidence: "LOW",
+      },
+    ] as never);
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "resolveTickerOrCompany",
+      input: { query: "E" },
+      context: { source: "USER" },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      isAmbiguous: true,
+    });
+    expect(result.dataSummary).toMatchObject({
+      isAmbiguous: true,
     });
   });
 
@@ -1185,10 +1319,12 @@ describe("agent tool registry and executor", () => {
       },
       compositeScore: 61,
       suggestedStance: "CANDIDATE",
+      actionLabel: "Review candidate",
       bullishFactors: [],
       bearishFactors: [],
       missingData: [],
       staleDataWarnings: [],
+      confidence: "HIGH",
       explanation: "deterministic",
     });
 
@@ -1201,6 +1337,101 @@ describe("agent tool registry and executor", () => {
 
     expect(scoreSpy).toHaveBeenCalledWith("AAPL");
     expect(result.success).toBe(true);
-    expect((result.data as { ticker: string }).ticker).toBe("AAPL");
+    expect(result.dataSummary).toMatchObject({
+      ticker: "AAPL",
+      compositeScore: 61,
+      suggestedStance: "CANDIDATE",
+      actionLabel: "Review candidate",
+      confidence: "HIGH",
+    });
+  });
+
+  it("rankWatchlist tool calls deterministic scoring service", async () => {
+    const scoreSpy = vi.spyOn(researchScoringService, "scoreWatchlist").mockResolvedValue({
+      watchlistId: "watchlist-1",
+      watchlistName: "Main",
+      asOf: new Date().toISOString(),
+      totalItems: 1,
+      activeItemsCount: 1,
+      scoredItemsCount: 1,
+      skippedItemsCount: 0,
+      skippedItems: [],
+      warnings: [],
+      itemCount: 1,
+      rankedItems: [
+        {
+          rank: 1,
+          itemId: "item-1",
+          ticker: "AAPL",
+          compositeScore: 75,
+          suggestedStance: "CANDIDATE",
+          score: {
+            ticker: "AAPL",
+            asOf: new Date().toISOString(),
+            componentScores: {
+              technicalScore: 60,
+              fundamentalScore: 62,
+              valuationScore: 55,
+              analystScore: 64,
+              newsScore: 58,
+              macroRiskScore: 52,
+              earningsRiskScore: 56,
+              dataQualityScore: 90,
+            },
+            compositeScore: 75,
+            suggestedStance: "CANDIDATE",
+            actionLabel: "Strong review candidate",
+            bullishFactors: [],
+            bearishFactors: [],
+            missingData: [],
+            staleDataWarnings: [],
+            confidence: "HIGH",
+            explanation: "deterministic",
+          },
+        },
+      ],
+    });
+
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+    const result = await executor.executeByName({
+      toolName: "rankWatchlist",
+      input: { watchlistId: "watchlist-1" },
+      context: { source: "USER" },
+    });
+
+    expect(scoreSpy).toHaveBeenCalledWith("watchlist-1");
+    expect(result.success).toBe(true);
+    expect(result.dataSummary).toMatchObject({
+      totalItems: 1,
+      scoredItemsCount: 1,
+    });
+  });
+
+  it("refreshTickerResearchData requires confirmation and supports dryRun", async () => {
+    const executor = new AgentToolExecutor(createAgentToolRegistry());
+
+    await expect(
+      executor.executeByName({
+        toolName: "refreshTickerResearchData",
+        input: { ticker: "AAPL" },
+        context: { source: "USER" },
+      }),
+    ).rejects.toMatchObject({
+      code: "AGENT_TOOL_CONFIRMATION_REQUIRED",
+      statusCode: 409,
+    });
+
+    const dryRun = await executor.executeByName({
+      toolName: "refreshTickerResearchData",
+      input: { ticker: "AAPL" },
+      context: { source: "USER", dryRun: true },
+      confirmed: true,
+    });
+
+    expect(dryRun.success).toBe(true);
+    expect(dryRun.dataSummary).toMatchObject({
+      plannedOrExecuted: "planned",
+      toolName: "refreshTickerResearchData",
+    });
   });
 });

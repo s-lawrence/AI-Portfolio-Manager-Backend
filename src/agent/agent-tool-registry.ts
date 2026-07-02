@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   WatchlistItemPriority,
+  Sentiment,
   WatchlistItemSource,
   WatchlistItemStatus,
 } from "@prisma/client";
@@ -23,6 +24,7 @@ import * as realDataIngestionService from "../services/real-data-ingestion.servi
 import * as researchScoringService from "../services/research-scoring.service";
 import * as macroIngestionService from "../services/macro-ingestion.service";
 import * as aiReportsService from "../services/ai-reports.service";
+import { normalizeTickerOrThrow } from "../types/common";
 
 const tickerSchema = z
   .string()
@@ -50,6 +52,51 @@ const optionalLimitSchema = z.coerce.number().int().positive().max(500).optional
 const watchlistStatusSchema = z.nativeEnum(WatchlistItemStatus).optional();
 const watchlistPrioritySchema = z.nativeEnum(WatchlistItemPriority).optional();
 const watchlistSourceSchema = z.nativeEnum(WatchlistItemSource).optional();
+const investmentObjectiveSchema = z.enum([
+  "GROWTH",
+  "VALUE",
+  "DIVIDEND",
+  "QUALITY",
+  "LOW_VOLATILITY",
+  "MOMENTUM",
+  "DIVERSIFICATION",
+]);
+const investmentTimeHorizonSchema = z.enum(["SHORT", "MEDIUM", "LONG"]);
+const investmentRiskToleranceSchema = z.enum(["LOW", "MEDIUM", "HIGH"]);
+const agentInvestmentPreferencesSchema = z
+  .object({
+    objective: investmentObjectiveSchema.optional(),
+    timeHorizon: investmentTimeHorizonSchema.optional(),
+    riskTolerance: investmentRiskToleranceSchema.optional(),
+    preferredSectors: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
+    excludedSectors: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
+    preferredCurrencies: z.array(z.string().trim().min(1).max(10)).max(10).optional(),
+    maxSinglePositionWeight: z.coerce.number().nonnegative().max(100).optional(),
+    wantsIncome: z.boolean().optional(),
+    wantsCanada: z.boolean().optional(),
+    wantsUS: z.boolean().optional(),
+  })
+  .optional();
+const SHORT_AMBIGUOUS_TICKERS = new Set(["E", "T", "F", "B"]);
+
+type TickerRefreshSectionResult =
+  | {
+    attempted: false;
+    success: true;
+    warnings: string[];
+  }
+  | {
+    attempted: true;
+    success: true;
+    warnings: string[];
+    summary: Record<string, unknown>;
+  }
+  | {
+    attempted: true;
+    success: false;
+    warnings: string[];
+    error: string;
+  };
 
 function resolveDefaultWatchlistSource(
   context: AgentToolContext,
@@ -60,6 +107,57 @@ function resolveDefaultWatchlistSource(
   }
 
   return context.source === "AGENT" ? WatchlistItemSource.AGENT : WatchlistItemSource.USER;
+}
+
+function toErrorReason(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+
+  return "Unexpected error.";
+}
+
+function calculateDurationMs(startedAtDate: Date, finishedAtDate: Date): number {
+  return Math.max(0, finishedAtDate.getTime() - startedAtDate.getTime());
+}
+
+function toRefreshSectionResult<T extends { warnings?: string[] }>(result: T): TickerRefreshSectionResult {
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const summary: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(result as Record<string, unknown>)) {
+    if (key === "warnings" || key === "ticker") {
+      continue;
+    }
+
+    summary[key] = value;
+  }
+
+  return {
+    attempted: true,
+    success: true,
+    warnings,
+    summary,
+  };
+}
+
+function toEmptyRefreshSectionResult(): TickerRefreshSectionResult {
+  return {
+    attempted: false,
+    success: true,
+    warnings: [],
+  };
+}
+
+function toFailedRefreshSectionResult(error: unknown): TickerRefreshSectionResult {
+  const reason = toErrorReason(error);
+
+  return {
+    attempted: true,
+    success: false,
+    warnings: [reason],
+    error: reason,
+  };
 }
 
 export class AgentToolRegistry {
@@ -151,6 +249,131 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       },
     },
     {
+      name: "resolveTickerOrCompany",
+      description:
+        "Resolves user ticker/company mentions into ticker candidates using local stock identity first and provider search when available.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        query: z.string().trim().min(1).max(200),
+        portfolioId: z.string().trim().min(1).optional(),
+        watchlistId: z.string().trim().min(1).optional(),
+        preferredCountry: z.string().trim().min(1).max(20).optional(),
+        preferredExchange: z.string().trim().min(1).max(20).optional(),
+      }),
+      notes: [
+        "Searches local stock records first, then provider-backed symbol search when configured.",
+        "Does not auto-pick low-confidence ambiguous symbols.",
+        "Does not create stock records during resolution.",
+      ],
+      execute: async (input: {
+        query: string;
+        portfolioId?: string;
+        watchlistId?: string;
+        preferredCountry?: string;
+        preferredExchange?: string;
+      }) => {
+        const query = input.query.trim();
+
+        let explicitTicker: string | undefined;
+        try {
+          explicitTicker = normalizeTickerOrThrow(query);
+        } catch {
+          explicitTicker = undefined;
+        }
+
+        const [candidates, portfolioOverview, watchlistDetail] = await Promise.all([
+          stocksService.searchStockCandidates(query, {
+            country: input.preferredCountry,
+            exchange: input.preferredExchange,
+            limit: 10,
+          }),
+          input.portfolioId
+            ? portfoliosService.getPortfolioOverview(input.portfolioId).catch(() => null)
+            : Promise.resolve(null),
+          input.watchlistId
+            ? watchlistsService.getWatchlistDetail(input.watchlistId).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
+        const heldTickers = new Set(
+          (portfolioOverview?.holdings ?? [])
+            .map((holding) => holding.ticker?.trim().toUpperCase())
+            .filter((ticker): ticker is string => Boolean(ticker)),
+        );
+        const watchlistTickers = new Set(
+          (watchlistDetail?.items ?? [])
+            .map((item) => item.stock.ticker?.trim().toUpperCase())
+            .filter((ticker): ticker is string => Boolean(ticker)),
+        );
+
+        const normalizedCandidates = candidates.map((candidate) => {
+          const ticker = candidate.ticker.trim().toUpperCase();
+          return {
+            ticker,
+            companyName: candidate.companyName,
+            exchange: candidate.exchange,
+            currency: candidate.currency,
+            country: candidate.country,
+            stockId: candidate.stockId,
+            confidence: candidate.confidence,
+            alreadyHeld: heldTickers.has(ticker),
+            alreadyInWatchlist: watchlistTickers.has(ticker),
+          };
+        });
+
+        const isShortAmbiguousQuery =
+          explicitTicker != null &&
+          (explicitTicker.length <= 1 || SHORT_AMBIGUOUS_TICKERS.has(explicitTicker));
+
+        const highConfidenceCandidates = normalizedCandidates.filter(
+          (candidate) => candidate.confidence === "HIGH",
+        );
+        const plausibleCandidates = normalizedCandidates.filter(
+          (candidate) => candidate.confidence !== "LOW",
+        );
+
+        let isAmbiguous = false;
+        let ambiguityReason: string | undefined;
+
+        if (isShortAmbiguousQuery) {
+          isAmbiguous = true;
+          ambiguityReason =
+            `Symbol '${explicitTicker}' is commonly ambiguous across exchanges. Please choose the intended listing.`;
+        } else if (plausibleCandidates.length > 1) {
+          isAmbiguous = true;
+          ambiguityReason =
+            "Multiple plausible ticker/company matches were found. Please pick one candidate.";
+        }
+
+        let resolvedTicker: string | undefined;
+        if (!isAmbiguous) {
+          if (highConfidenceCandidates.length === 1) {
+            resolvedTicker = highConfidenceCandidates[0].ticker;
+          } else if (plausibleCandidates.length === 1) {
+            resolvedTicker = plausibleCandidates[0].ticker;
+          }
+        }
+
+        const confidence = resolvedTicker
+          ? (normalizedCandidates.find((candidate) => candidate.ticker === resolvedTicker)?.confidence ?? "HIGH")
+          : isAmbiguous
+            ? "LOW"
+            : normalizedCandidates[0]?.confidence ?? "LOW";
+
+        return {
+          query,
+          normalizedQuery: explicitTicker ?? query.toUpperCase(),
+          explicitTicker,
+          resolvedTicker,
+          confidence,
+          isAmbiguous,
+          ambiguityReason,
+          candidates: normalizedCandidates,
+        };
+      },
+    },
+    {
       name: "getTickerResearchBundle",
       description:
         "Returns local persisted research context for a ticker, including price, technicals, fundamentals, analyst context, and news.",
@@ -158,18 +381,108 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
       inputSchema: z.object({
         ticker: tickerSchema,
+        portfolioId: z.string().trim().min(1).optional(),
+        watchlistId: z.string().trim().min(1).optional(),
       }),
       notes: [
         "Does not call external providers directly.",
         "Data freshness depends on prior ingestion runs.",
       ],
-      execute: async (input: { ticker: string }) => {
-        const result = await stocksService.getStockResearchBundle(input.ticker);
+      execute: async (input: {
+        ticker: string;
+        portfolioId?: string;
+        watchlistId?: string;
+      }) => {
+        const [result, dataQuality, deterministicScore, portfolioOverview, watchlistDetail] = await Promise.all([
+          stocksService.getStockResearchBundle(input.ticker),
+          researchScoringService.getTickerDataQuality(input.ticker).catch(() => null),
+          researchScoringService.scoreTickerResearch(input.ticker).catch(() => null),
+          input.portfolioId
+            ? portfoliosService.getPortfolioOverview(input.portfolioId).catch(() => null)
+            : Promise.resolve(null),
+          input.watchlistId
+            ? watchlistsService.getWatchlistDetail(input.watchlistId).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
         if (!result) {
           throw new AgentToolExecutionError(404, "NOT_FOUND", "Ticker research bundle not found.");
         }
 
-        return result;
+        const ticker = result.stock.ticker.toUpperCase();
+        const heldTickers = new Set(
+          (portfolioOverview?.holdings ?? [])
+            .map((holding) => holding.ticker?.trim().toUpperCase())
+            .filter((value): value is string => Boolean(value)),
+        );
+        const watchlistTickers = new Set(
+          (watchlistDetail?.items ?? [])
+            .map((item) => item.stock.ticker?.trim().toUpperCase())
+            .filter((value): value is string => Boolean(value)),
+        );
+
+        const newsArticles = result.recentNews.slice(0, 10);
+        const sentimentTotals = newsArticles.reduce(
+          (accumulator, article) => {
+            if (article.sentiment === Sentiment.BULLISH) {
+              accumulator.bullish += 1;
+            } else if (article.sentiment === Sentiment.BEARISH) {
+              accumulator.bearish += 1;
+            } else if (article.sentiment === Sentiment.MIXED) {
+              accumulator.mixed += 1;
+            } else {
+              accumulator.neutral += 1;
+            }
+
+            return accumulator;
+          },
+          {
+            bullish: 0,
+            bearish: 0,
+            neutral: 0,
+            mixed: 0,
+          },
+        );
+
+        return {
+          ...result,
+          ticker,
+          portfolioId: input.portfolioId,
+          watchlistId: input.watchlistId,
+          company: {
+            ticker,
+            stockId: result.stock.id,
+            companyName: result.stock.companyName,
+            exchange: result.stock.exchange,
+            currency: result.stock.currency,
+            country: result.stock.country,
+            sector: result.stock.sector,
+            industry: result.stock.industry,
+            assetType: result.stock.assetType,
+          },
+          latestPrice: result.latestPriceSnapshot,
+          technicalSnapshot: result.latestTechnicalSnapshot,
+          fundamentalSnapshot: result.latestFundamentalSnapshot,
+          analystSnapshot: result.latestAnalystSnapshot,
+          analystActions: result.recentAnalystActions,
+          analystEstimates: {
+            latestAnnual: result.latestAnnualAnalystEstimate ?? null,
+            latestQuarter: result.latestQuarterAnalystEstimate ?? null,
+          },
+          topHeadlines: newsArticles,
+          newsSentiment: {
+            totalArticles: newsArticles.length,
+            ...sentimentTotals,
+          },
+          earningsEvent: result.nextEarningsEvent,
+          latestReport: result.latestAIReport,
+          deterministicScore,
+          dataQuality,
+          missingData: dataQuality?.missingData ?? [],
+          staleDataWarnings: dataQuality?.staleDataWarnings ?? [],
+          alreadyHeld: heldTickers.has(ticker),
+          alreadyInWatchlist: watchlistTickers.has(ticker),
+        };
       },
     },
     {
@@ -265,6 +578,52 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
         }),
     },
     {
+      name: "screenMarketCandidates",
+      description:
+        "Screens persisted market candidates using objective/risk preferences and optional portfolio/watchlist context.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        portfolioId: z.string().trim().min(1).optional(),
+        watchlistId: z.string().trim().min(1).optional(),
+        preferences: agentInvestmentPreferencesSchema,
+        limit: z.coerce.number().int().positive().max(25).optional(),
+        excludeExistingHoldings: z.boolean().optional(),
+        excludeExistingWatchlistItems: z.boolean().optional(),
+      }),
+      notes: [
+        "Uses persisted backend data and deterministic scoring only.",
+        "Does not call external providers or use LLM scoring.",
+      ],
+      execute: async (input: {
+        portfolioId?: string;
+        watchlistId?: string;
+        preferences?: {
+          objective?: "GROWTH" | "VALUE" | "DIVIDEND" | "QUALITY" | "LOW_VOLATILITY" | "MOMENTUM" | "DIVERSIFICATION";
+          timeHorizon?: "SHORT" | "MEDIUM" | "LONG";
+          riskTolerance?: "LOW" | "MEDIUM" | "HIGH";
+          preferredSectors?: string[];
+          excludedSectors?: string[];
+          preferredCurrencies?: string[];
+          maxSinglePositionWeight?: number;
+          wantsIncome?: boolean;
+          wantsCanada?: boolean;
+          wantsUS?: boolean;
+        };
+        limit?: number;
+        excludeExistingHoldings?: boolean;
+        excludeExistingWatchlistItems?: boolean;
+      }) =>
+        discoveryService.screenMarketCandidates({
+          portfolioId: input.portfolioId,
+          watchlistId: input.watchlistId,
+          preferences: input.preferences,
+          limit: input.limit,
+          excludeExistingHoldings: input.excludeExistingHoldings,
+          excludeExistingWatchlistItems: input.excludeExistingWatchlistItems,
+        }),
+    },
+    {
       name: "getGeopoliticalSummary",
       description:
         "Returns a bounded geopolitical summary from stored events, including sentiment mix and top headlines.",
@@ -350,6 +709,31 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
       notes: [
         "Deterministic aid only; not investment advice.",
         "Uses scoreTickerResearch logic for each watchlist ticker.",
+      ],
+      execute: async (input: { watchlistId: string }) => {
+        try {
+          return await researchScoringService.scoreWatchlist(input.watchlistId);
+        } catch (error) {
+          if (error instanceof Error && /not found/i.test(error.message)) {
+            throw new AgentToolExecutionError(404, "NOT_FOUND", error.message);
+          }
+
+          throw error;
+        }
+      },
+    },
+    {
+      name: "rankWatchlist",
+      description:
+        "Ranks watchlist items deterministically and returns a score-based ordering with component breakdowns.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.READ_ONLY,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.AUTO_ALLOWED,
+      inputSchema: z.object({
+        watchlistId: z.string().trim().min(1),
+      }),
+      notes: [
+        "Canonical alias for scoreWatchlist.",
+        "Deterministic aid only; not investment advice.",
       ],
       execute: async (input: { watchlistId: string }) => {
         try {
@@ -552,6 +936,154 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
           includeGdelt: input.includeGdelt ?? false,
           runAnalysis: input.runAnalysis ?? true,
         }),
+    },
+    {
+      name: "refreshTickerResearchData",
+      description:
+        "Refreshes persisted ticker research sections (market, fundamentals, news, earnings, analyst) with optional report generation.",
+      riskLevel: AGENT_TOOL_RISK_LEVEL.REFRESH,
+      executionMode: AGENT_TOOL_EXECUTION_MODE.CONFIRMATION_REQUIRED,
+      inputSchema: z.object({
+        ticker: tickerSchema,
+        includeMarketData: z.boolean().optional().default(true),
+        includeHistorical: z.boolean().optional().default(true),
+        includeFundamentals: z.boolean().optional().default(true),
+        includeNews: z.boolean().optional().default(true),
+        includeEarnings: z.boolean().optional().default(true),
+        includeAnalyst: z.boolean().optional().default(true),
+        generateReport: z.boolean().optional().default(false),
+      }),
+      notes: [
+        "Refresh tool: confirmation required.",
+        "Per-section failures are captured as warnings and do not abort the entire refresh.",
+        "Dry-run returns planned sections only and performs no provider calls.",
+      ],
+      execute: async (input: {
+        ticker: string;
+        includeMarketData?: boolean;
+        includeHistorical?: boolean;
+        includeFundamentals?: boolean;
+        includeNews?: boolean;
+        includeEarnings?: boolean;
+        includeAnalyst?: boolean;
+        generateReport?: boolean;
+      }) => {
+        const startedAtDate = new Date();
+        const warnings: string[] = [];
+        const ticker = input.ticker.toUpperCase();
+
+        const sections: Record<
+          "marketData" | "fundamentals" | "news" | "earnings" | "analyst" | "report",
+          TickerRefreshSectionResult
+        > = {
+          marketData: toEmptyRefreshSectionResult(),
+          fundamentals: toEmptyRefreshSectionResult(),
+          news: toEmptyRefreshSectionResult(),
+          earnings: toEmptyRefreshSectionResult(),
+          analyst: toEmptyRefreshSectionResult(),
+          report: toEmptyRefreshSectionResult(),
+        };
+
+        if (input.includeMarketData ?? true) {
+          try {
+            const marketData = await realDataIngestionService.ingestTickerMarketData(ticker, {
+              historicalLimit: (input.includeHistorical ?? true) ? 250 : 1,
+            });
+            sections.marketData = toRefreshSectionResult(marketData);
+          } catch (error) {
+            sections.marketData = toFailedRefreshSectionResult(error);
+            warnings.push(`marketData: ${toErrorReason(error)}`);
+          }
+        }
+
+        if (input.includeFundamentals ?? true) {
+          try {
+            const fundamentals = await realDataIngestionService.ingestTickerFundamentals(ticker);
+            sections.fundamentals = toRefreshSectionResult(fundamentals);
+          } catch (error) {
+            sections.fundamentals = toFailedRefreshSectionResult(error);
+            warnings.push(`fundamentals: ${toErrorReason(error)}`);
+          }
+        }
+
+        if (input.includeNews ?? true) {
+          try {
+            const news = await realDataIngestionService.ingestTickerNews(ticker, { limit: 30 });
+            sections.news = toRefreshSectionResult(news);
+          } catch (error) {
+            sections.news = toFailedRefreshSectionResult(error);
+            warnings.push(`news: ${toErrorReason(error)}`);
+          }
+        }
+
+        if (input.includeEarnings ?? true) {
+          try {
+            const earnings = await realDataIngestionService.ingestTickerEarnings(ticker);
+            sections.earnings = toRefreshSectionResult(earnings);
+          } catch (error) {
+            sections.earnings = toFailedRefreshSectionResult(error);
+            warnings.push(`earnings: ${toErrorReason(error)}`);
+          }
+        }
+
+        if (input.includeAnalyst ?? true) {
+          try {
+            const analyst = await analystService.ingestTickerAnalystData(ticker);
+            sections.analyst = toRefreshSectionResult(analyst);
+          } catch (error) {
+            sections.analyst = toFailedRefreshSectionResult(error);
+            warnings.push(`analyst: ${toErrorReason(error)}`);
+          }
+        }
+
+        if (input.generateReport ?? false) {
+          try {
+            const report = await aiReportsService.generateTickerReport(ticker, {
+              useOpenAi: true,
+            });
+            sections.report = toRefreshSectionResult(report);
+          } catch (error) {
+            sections.report = toFailedRefreshSectionResult(error);
+            warnings.push(`report: ${toErrorReason(error)}`);
+          }
+        }
+
+        const finishedAtDate = new Date();
+
+        return {
+          ticker,
+          startedAt: startedAtDate.toISOString(),
+          finishedAt: finishedAtDate.toISOString(),
+          durationMs: calculateDurationMs(startedAtDate, finishedAtDate),
+          sections,
+          warnings,
+        };
+      },
+      dryRunPlan: async (input: {
+        ticker: string;
+        includeMarketData?: boolean;
+        includeHistorical?: boolean;
+        includeFundamentals?: boolean;
+        includeNews?: boolean;
+        includeEarnings?: boolean;
+        includeAnalyst?: boolean;
+        generateReport?: boolean;
+      }) => ({
+        plannedAction: true,
+        toolName: "refreshTickerResearchData",
+        ticker: input.ticker.toUpperCase(),
+        plannedSections: {
+          marketData: input.includeMarketData ?? true,
+          historical: input.includeHistorical ?? true,
+          fundamentals: input.includeFundamentals ?? true,
+          news: input.includeNews ?? true,
+          earnings: input.includeEarnings ?? true,
+          analyst: input.includeAnalyst ?? true,
+          report: input.generateReport ?? false,
+        },
+        message:
+          "Dry-run planned ticker research refresh. No provider call or data write was performed.",
+      }),
     },
     {
       name: "refreshTickerAnalystData",
@@ -838,6 +1370,26 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
             includeScore: input.includeScore ?? true,
             createPredictions: input.createPredictions ?? true,
           },
+          plannedSections: {
+            marketSnapshot: true,
+            technicalSnapshot: true,
+            fundamentalSnapshot: true,
+            analystContext: input.includeAnalyst ?? true,
+            recentAnalystActions: input.includeAnalyst ?? true,
+            analystEstimates: input.includeAnalyst ?? true,
+            fmpFinancialRating: input.includeAnalyst ?? true,
+            newsContext: input.includeNews ?? true,
+            earningsContext: true,
+            macroContext: input.includeMacro ?? true,
+            geopoliticalContext: input.includeGeopolitical ?? true,
+            deterministicScore: input.includeScore ?? true,
+            portfolioContext: Boolean(input.portfolioId),
+            watchlistContext: Boolean(input.watchlistId),
+          },
+          dataGaps: [
+            ...context.dataQuality.missingData,
+            ...context.dataQuality.staleDataWarnings,
+          ].slice(0, 20),
           contextPreview: {
             ticker: context.ticker,
             asOf: context.asOf,
@@ -873,6 +1425,7 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
         targetExitPrice: z.coerce.number().positive().optional(),
         targetAllocation: z.coerce.number().nonnegative().optional(),
         tags: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
+        addedReason: z.string().trim().min(1).max(4000).optional(),
         source: watchlistSourceSchema,
       }),
       notes: [
@@ -891,6 +1444,7 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
           targetExitPrice?: number;
           targetAllocation?: number;
           tags?: string[];
+          addedReason?: string;
           source?: WatchlistItemSource;
         },
         context,
@@ -904,6 +1458,7 @@ function buildReadOnlyTools(): AnyAgentToolDefinition[] {
           targetExitPrice: input.targetExitPrice,
           targetAllocation: input.targetAllocation,
           tags: input.tags,
+          addedReason: input.addedReason,
           source: resolveDefaultWatchlistSource(context, input.source),
         }),
     },

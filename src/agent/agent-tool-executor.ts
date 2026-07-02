@@ -92,6 +92,27 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
     };
   }
 
+  if (toolName === "resolveTickerOrCompany") {
+    const candidates = asArray(payload.candidates)
+      .map((value) => asRecord(value))
+      .filter((value): value is Record<string, unknown> => value != null);
+
+    return {
+      query: asString(payload.query),
+      resolvedTicker: asString(payload.resolvedTicker),
+      confidence: asString(payload.confidence),
+      isAmbiguous: payload.isAmbiguous === true,
+      candidateCount: candidates.length,
+      topCandidates: candidates
+        .slice(0, 5)
+        .map((candidate) => {
+          const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+          const confidence = asString(candidate.confidence);
+          return confidence ? `${ticker} (${confidence})` : ticker;
+        }),
+    };
+  }
+
   if (toolName === "getPortfolioRiskSnapshot") {
     const fxRate = asRecord(payload.fxRateUsed);
     return {
@@ -111,37 +132,27 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
 
   if (toolName === "getTickerResearchBundle") {
     const stock = asRecord(payload.stock);
-    const report = asRecord(payload.latestAIReport);
-    const analyst = asRecord(payload.latestAnalystSnapshot);
-    const fundamentals = asRecord(payload.latestFundamentalSnapshot);
-    const missingCategories: string[] = [];
-
-    if (!asRecord(payload.latestPriceSnapshot)) {
-      missingCategories.push("price");
-    }
-    if (!asRecord(payload.latestTechnicalSnapshot)) {
-      missingCategories.push("technical");
-    }
-    if (!asRecord(payload.latestFundamentalSnapshot)) {
-      missingCategories.push("fundamentals");
-    }
-    if (!asRecord(payload.latestAnalystSnapshot) && asArray(payload.recentAnalystActions).length === 0) {
-      missingCategories.push("analyst");
-    }
-    if (asArray(payload.recentNews).length === 0) {
-      missingCategories.push("news");
-    }
-    if (!asRecord(payload.nextEarningsEvent)) {
-      missingCategories.push("earnings");
-    }
+    const report = asRecord(payload.latestReport) ?? asRecord(payload.latestAIReport);
+    const analyst = asRecord(payload.analystSnapshot) ?? asRecord(payload.latestAnalystSnapshot);
+    const fundamentals = asRecord(payload.fundamentalSnapshot) ?? asRecord(payload.latestFundamentalSnapshot);
+    const latestPrice = asRecord(payload.latestPrice) ?? asRecord(payload.latestPriceSnapshot);
+    const deterministicScore = asRecord(payload.deterministicScore);
+    const missingData = asArray(payload.missingData);
+    const staleDataWarnings = asArray(payload.staleDataWarnings);
 
     return {
-      ticker: asString(stock?.ticker),
-      latestPrice: asNumber(asRecord(payload.latestPriceSnapshot)?.price),
+      ticker: asString(payload.ticker) ?? asString(stock?.ticker),
+      price: asNumber(latestPrice?.price),
+      marketCap:
+        asNumber(latestPrice?.marketCap) ??
+        asNumber(fundamentals?.marketCap),
       recommendation: asString(report?.recommendation),
+      reportId: asString(report?.id),
+      compositeScore: asNumber(deterministicScore?.compositeScore),
       analystConsensus:
         asString(analyst?.ratingConsensus) ?? asString(fundamentals?.analystConsensus),
-      missingDataCategories: missingCategories,
+      missingDataCount: missingData.length,
+      staleDataWarningsCount: staleDataWarnings.length,
     };
   }
 
@@ -150,6 +161,8 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
       ticker: asString(payload.ticker),
       compositeScore: asNumber(payload.compositeScore),
       suggestedStance: asString(payload.suggestedStance),
+      actionLabel: asString(payload.actionLabel),
+      confidence: asString(payload.confidence),
       topBullishFactors: toBoundedStringList(asArray(payload.bullishFactors), 3),
       topBearishFactors: toBoundedStringList(asArray(payload.bearishFactors), 3),
       missingDataCount: asArray(payload.missingData).length,
@@ -181,7 +194,7 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
     };
   }
 
-  if (toolName === "scoreWatchlist") {
+  if (toolName === "scoreWatchlist" || toolName === "rankWatchlist") {
     const rankedItems = asArray(payload.rankedItems);
     return {
       totalItems: asNumber(payload.totalItems) ?? asNumber(payload.itemCount),
@@ -317,6 +330,28 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
     };
   }
 
+  if (toolName === "screenMarketCandidates") {
+    const candidates = asArray(payload.candidates);
+    const rejectedCandidates = asArray(payload.rejectedCandidates);
+    return {
+      screenedCount: asNumber(payload.screenedCount),
+      qualifiedCount: asNumber(payload.qualifiedCount) ?? candidates.length,
+      rejectedCount: rejectedCandidates.length,
+      topCandidates: candidates
+        .map((value) => asRecord(value))
+        .filter((value): value is Record<string, unknown> => value != null)
+        .slice(0, 5)
+        .map((candidate) => {
+          const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+          const totalScore = asNumber(candidate.totalRecommendationScore);
+          return totalScore == null ? ticker : `${ticker} (${totalScore.toFixed(1)})`;
+        }),
+      assumptions: toBoundedStringList(asArray(payload.assumptions), 5),
+      clarifyingQuestion: asString(payload.clarifyingQuestion),
+      suggestedRefreshActions: toBoundedStringList(asArray(payload.suggestedRefreshActions), 5),
+    };
+  }
+
   if (toolName === "getGeopoliticalSummary") {
     const sentiment = asRecord(payload.sentimentMix);
     return {
@@ -352,6 +387,24 @@ function buildToolDataSummary(toolName: string, data: unknown): Record<string, u
       portfolioId: asString(payload.portfolioId),
       tickersProcessed: asNumber(payload.tickersProcessed),
       tickersFailed: asNumber(payload.tickersFailed),
+      warningCount: asArray(payload.warnings).length,
+    };
+  }
+
+  if (toolName === "refreshTickerResearchData") {
+    const sections = asRecord(payload.sections) ?? {};
+    const sectionEntries = Object.values(sections)
+      .map((value) => asRecord(value))
+      .filter((value): value is Record<string, unknown> => value != null);
+
+    const attemptedSections = sectionEntries.filter((section) => section.attempted === true).length;
+    const failedSections = sectionEntries.filter((section) => section.success === false).length;
+
+    return {
+      plannedOrExecuted: "executed",
+      ticker: asString(payload.ticker),
+      attemptedSections,
+      failedSections,
       warningCount: asArray(payload.warnings).length,
     };
   }
@@ -462,6 +515,7 @@ function buildDryRunSummary(toolName: string, plannedData: unknown): Record<stri
   const payload = asRecord(plannedData) ?? {};
   const plannedTickers = asArray(payload.plannedTickers);
   const queryProfiles = asArray(payload.queryProfiles);
+  const plannedSections = asRecord(payload.plannedSections);
   return {
     plannedOrExecuted: "planned",
     toolName,
@@ -472,6 +526,7 @@ function buildDryRunSummary(toolName: string, plannedData: unknown): Record<stri
     tickersProcessed: asNumber(payload.tickersProcessed),
     tickersSkipped: asNumber(payload.tickersSkipped),
     queryProfilesCount: queryProfiles.length,
+    plannedSections,
     message: asString(payload.message),
   };
 }

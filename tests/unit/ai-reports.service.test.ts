@@ -4,8 +4,13 @@ import {
   Sentiment,
   TrendDirection,
 } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  OpenAiAgentClientError,
+} from "../../src/agent/openai-agent-client";
+import * as openAiClient from "../../src/agent/openai-agent-client";
+import { env } from "../../src/config/env";
 import {
   buildTickerReportContext,
   createTickerReportFromInput,
@@ -230,7 +235,55 @@ async function seedAnalystContextData(ticker: string): Promise<void> {
   });
 }
 
+function buildOpenAiStructuredReport(
+  ticker: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ticker,
+    asOf: new Date().toISOString(),
+    executiveSummary: `${ticker} decision-support summary from backend snapshots.`,
+    recommendation: "WATCH",
+    conviction: "MEDIUM",
+    timeHorizon: "MEDIUM",
+    scoreSummary: {
+      compositeScore: 62,
+      technicalScore: 61,
+      fundamentalScore: 63,
+      valuationScore: 58,
+      analystScore: 60,
+      newsScore: 57,
+      dataQualityScore: 66,
+    },
+    bullCase: ["Momentum and quality factors remain constructive."],
+    bearCase: ["Macro and valuation uncertainty remain elevated."],
+    keyCatalysts: ["Upcoming earnings execution."],
+    keyRisks: ["Macro slowdown could compress multiples."],
+    valuationNotes: ["Valuation appears mixed against growth."],
+    technicalNotes: ["Trend remains constructive but not extreme."],
+    analystNotes: ["Consensus remains moderately positive."],
+    newsSentimentNotes: ["Recent sentiment is balanced to mildly positive."],
+    earningsNotes: ["Upcoming earnings could shift near-term narrative."],
+    macroGeopoliticalNotes: ["Rates and geopolitical backdrop remain key uncertainties."],
+    portfolioFit: ["Position sizing should reflect concentration limits."],
+    dataGaps: ["Certain datasets are delayed or incomplete."],
+    watchItems: ["Watch next earnings release and guidance tone."],
+    suggestedNextActions: ["Refresh core snapshots before major decisions."],
+    disclaimer: "Decision support only, not a buy/sell instruction.",
+    ...overrides,
+  };
+}
+
 describe("ai-reports.service", () => {
+  const originalOpenAiProviderEnabled = env.OPENAI_AGENT_PROVIDER_ENABLED;
+  const originalOpenAiApiKey = env.OPENAI_API_KEY;
+
+  afterEach(() => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = originalOpenAiProviderEnabled;
+    env.OPENAI_API_KEY = originalOpenAiApiKey;
+    vi.restoreAllMocks();
+  });
+
   it("creates an AI report and three predictions for day/week/month horizons", async () => {
     const ticker = nextTicker();
     await seedBullishData(ticker);
@@ -283,6 +336,193 @@ describe("ai-reports.service", () => {
     expect(context.newsContext).toBeNull();
     expect(context.analystContext).toBeNull();
     expect(context.deterministicScore).toBeNull();
+  });
+
+  it("report context includes available snapshots and explicit data gaps", async () => {
+    const ticker = nextTicker();
+
+    await recordPriceSnapshot(ticker, {
+      price: 101,
+      previousClose: 100,
+      changePercent: 1,
+      capturedAt: new Date("2026-05-06T00:00:00.000Z"),
+    });
+
+    const context = await buildTickerReportContext(ticker, {
+      includeMacro: true,
+      includeGeopolitical: true,
+      includeNews: true,
+      includeAnalyst: true,
+      includeScore: true,
+    });
+
+    expect(context.marketSnapshot?.capturedAt).toBeTruthy();
+    expect(context.asOf).toBeTruthy();
+    expect(Array.isArray(context.dataQuality.missingData)).toBe(true);
+    expect(Array.isArray(context.dataQuality.staleDataWarnings)).toBe(true);
+    expect(context.dataQuality.missingData.length).toBeGreaterThan(0);
+  });
+
+  it("bounds context arrays for analyst actions and headlines", async () => {
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+    await seedAnalystContextData(ticker);
+
+    const stock = await getStockProfile(ticker);
+    expect(stock).not.toBeNull();
+
+    for (let index = 0; index < 8; index += 1) {
+      await upsertAnalystActionEvent({
+        stockId: stock!.id,
+        source: "FMP",
+        actionType: index % 2 === 0 ? "UPGRADE" : "DOWNGRADE",
+        firm: `Firm ${index}`,
+        eventDate: new Date(Date.now() - index * 60 * 60 * 1000),
+        newPriceTarget: 160 + index,
+        raw: { source: "test-bounded-analyst-actions" },
+      });
+    }
+
+    const context = await buildTickerReportContext(ticker, {
+      includeNews: true,
+      includeAnalyst: true,
+    });
+
+    expect(context.recentAnalystActions.length).toBeLessThanOrEqual(5);
+    expect(context.newsContext?.topHeadlines.length ?? 0).toBeLessThanOrEqual(5);
+  });
+
+  it("OpenAI valid structured report persists with OPENAI_STRUCTURED mode", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    vi.spyOn(openAiClient, "generateTickerReport").mockResolvedValue({
+      report: buildOpenAiStructuredReport(ticker) as never,
+      modelName: "gpt-test-report-model",
+      usedFallbackModel: false,
+    });
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: true,
+      createPredictions: false,
+    });
+
+    expect(result.reportMode).toBe("OPENAI_STRUCTURED");
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.modelName).toBe("gpt-test-report-model");
+    expect(result.report.modelName).toBe("gpt-test-report-model");
+    expect(result.report.rawModelOutput).toBeTruthy();
+  });
+
+  it("OpenAI invalid JSON failure falls back to deterministic report", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    vi.spyOn(openAiClient, "generateTickerReport").mockRejectedValue(
+      new OpenAiAgentClientError(
+        {
+          stage: "PARSE_FAILED",
+          modelName: env.OPENAI_REPORT_MODEL,
+        },
+        "Invalid structured JSON.",
+      ),
+    );
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: true,
+      createPredictions: false,
+    });
+
+    expect(result.reportMode).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("PARSE_FAILED"))).toBe(true);
+    expect(result.report.bullishFactors.length).toBeLessThanOrEqual(5);
+    expect(result.report.bearishFactors.length).toBeLessThanOrEqual(5);
+  });
+
+  it("OpenAI disabled falls back deterministically with warning", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = false;
+    env.OPENAI_API_KEY = "test-key";
+
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: true,
+      createPredictions: false,
+    });
+
+    expect(result.reportMode).toBe("DETERMINISTIC_FALLBACK");
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("provider is disabled"))).toBe(true);
+  });
+
+  it("low data quality forces low conviction normalization or warning in OpenAI path", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    const ticker = nextTicker();
+    await recordPriceSnapshot(ticker, {
+      price: 110,
+      previousClose: 100,
+      changePercent: 10,
+      capturedAt: new Date("2026-05-11T00:00:00.000Z"),
+    });
+
+    vi.spyOn(openAiClient, "generateTickerReport").mockResolvedValue({
+      report: buildOpenAiStructuredReport(ticker, {
+        recommendation: "BUY",
+        conviction: "HIGH",
+      }) as never,
+      modelName: "gpt-test-report-model",
+      usedFallbackModel: false,
+    });
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: true,
+      createPredictions: false,
+    });
+
+    expect(result.warnings.some((warning) => warning.includes("normalized to LOW"))).toBe(true);
+    expect(result.report.confidenceScore).toBeLessThanOrEqual(0.5);
+  });
+
+  it("OpenAI report sanitizes analyst-target language when analyst targets are missing", async () => {
+    env.OPENAI_AGENT_PROVIDER_ENABLED = true;
+    env.OPENAI_API_KEY = "test-key";
+
+    const ticker = nextTicker();
+    await seedBullishData(ticker);
+
+    vi.spyOn(openAiClient, "generateTickerReport").mockResolvedValue({
+      report: buildOpenAiStructuredReport(ticker, {
+        analystNotes: ["Analyst price target implies 25% upside."],
+        valuationNotes: ["Price target supports upside case."],
+      }) as never,
+      modelName: "gpt-test-report-model",
+      usedFallbackModel: false,
+    });
+
+    const result = await generateTickerReport(ticker, {
+      useOpenAi: true,
+      includeAnalyst: true,
+      createPredictions: false,
+    });
+
+    const rawModelOutput = result.report.rawModelOutput as {
+      openAiOutput?: { analystNotes?: string[] };
+    } | null;
+
+    expect(result.warnings.some((warning) => warning.includes("price-target language was removed"))).toBe(true);
+    expect(rawModelOutput?.openAiOutput?.analystNotes).toEqual([
+      "Analyst price-target data is unavailable in current backend snapshots.",
+    ]);
   });
 
   it("treats sparse data as lower-conviction and watch-oriented", async () => {

@@ -8,6 +8,7 @@ import { env } from "../../src/config/env";
 import {
   createTestHolding,
   createTestPortfolio,
+  createTestPriceSnapshot,
   createTestStock,
   createTestUser,
 } from "../../src/test/factories";
@@ -430,6 +431,82 @@ describe("API auth routes and user scoping", () => {
       url: `/api/watchlists/${watchlistB.id}`,
       headers: {
         cookie: userACookie,
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("FORBIDDEN");
+
+    await app.close();
+  });
+
+  it("authenticated user can generate report with own portfolio context", async () => {
+    env.AUTH_ENABLED = true;
+
+    const user = await createTestUser();
+    const portfolio = await createTestPortfolio(user.id);
+    const ticker = `AUTHS${Date.now().toString().slice(-6)}`;
+    const stock = await createTestStock(ticker);
+    await createTestHolding(portfolio.id, stock.id);
+    await createTestPriceSnapshot(stock.id, {
+      price: 190,
+      previousClose: 188,
+    });
+
+    const app = buildApp();
+    const sessionCookie = await loginViaDevRoute(app, user.email);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/reports/${ticker}/generate`,
+      headers: {
+        cookie: sessionCookie,
+      },
+      payload: {
+        portfolioId: portfolio.id,
+        useOpenAi: false,
+        createPredictions: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().success).toBe(true);
+    expect(response.json().data.report.id).toBeDefined();
+
+    await app.close();
+  });
+
+  it("authenticated user cannot generate report with another user's portfolio context", async () => {
+    env.AUTH_ENABLED = true;
+
+    const userA = await createTestUser();
+    const userB = await createTestUser();
+
+    const portfolioA = await createTestPortfolio(userA.id);
+    const portfolioB = await createTestPortfolio(userB.id);
+
+    const ticker = `AUTHF${Date.now().toString().slice(-6)}`;
+    const stock = await createTestStock(ticker);
+    await createTestHolding(portfolioA.id, stock.id);
+    await createTestHolding(portfolioB.id, stock.id);
+    await createTestPriceSnapshot(stock.id, {
+      price: 420,
+      previousClose: 415,
+    });
+
+    const app = buildApp();
+    const userACookie = await loginViaDevRoute(app, userA.email);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/reports/${ticker}/generate`,
+      headers: {
+        cookie: userACookie,
+      },
+      payload: {
+        portfolioId: portfolioB.id,
+        useOpenAi: false,
+        createPredictions: false,
       },
     });
 

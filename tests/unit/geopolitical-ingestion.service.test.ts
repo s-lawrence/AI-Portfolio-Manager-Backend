@@ -87,6 +87,8 @@ describe("geopolitical-ingestion.service", () => {
   it("returns latest context and bounded summary", async () => {
     env.GDELT_QUERY_DELAY_MS = 0;
 
+    const now = Date.now();
+
     vi.spyOn(gdeltProvider, "searchDocArticles").mockResolvedValue([
       {
         provider: "GDELT",
@@ -94,7 +96,7 @@ describe("geopolitical-ingestion.service", () => {
         url: "https://example.com/energy-risk",
         domain: "example.com",
         sourceCountry: "CA",
-        publishedAt: new Date("2026-06-08T13:00:00.000Z"),
+        publishedAt: new Date(now - 2 * 60 * 60 * 1000),
         query: "energy crisis",
         category: "ENERGY",
         theme: "ENERGY_SUPPLY",
@@ -107,7 +109,7 @@ describe("geopolitical-ingestion.service", () => {
         url: "https://example.com/cyber-incident",
         domain: "example.com",
         sourceCountry: "US",
-        publishedAt: new Date("2026-06-08T14:00:00.000Z"),
+        publishedAt: new Date(now - 60 * 60 * 1000),
         query: "cyber attack",
         category: "CYBER",
         theme: "CYBER_RISK",

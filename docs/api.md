@@ -184,6 +184,7 @@ Current data-quality and scoring tools include:
 - `getWatchlistDataQuality`
 - `getPortfolioDataQuality`
 - `rankDiscoveryCandidates` (ranks persisted discovery candidates for potential new holdings)
+- `screenMarketCandidates` (screens persisted candidates with objective/risk preferences plus optional portfolio/watchlist context)
 
 Refresh tools that require confirmation include:
 
@@ -200,7 +201,10 @@ Agent suggested-action behavior includes:
 - Suggest `refreshWatchlistResearchData` when watchlist score/data-quality coverage is weak.
 - Suggest `refreshTickerAnalystData` when ticker data-quality indicates analyst/data gaps.
 - Prefer `refreshUsdCadFxRate` when portfolio outputs show missing FX coverage.
-- For new-holding discovery flows with ranked candidates and a provided `watchlistId`, suggest confirmation-gated `addTickerToWatchlist` actions for top non-tracked names.
+- For new-holding discovery flows with qualified screened candidates and a provided `watchlistId`, suggest confirmation-gated `addTickerToWatchlist` actions for top non-tracked names.
+- Ambiguous recommendation prompts ask: `What are you optimizing for: growth, dividends, lower risk, or diversification?`
+- Clear recommendation prompts apply safe defaults (`objective=GROWTH`, `timeHorizon=LONG`, `riskTolerance=MEDIUM`) and include assumptions in tool output.
+- Confirmed add-to-watchlist actions execute from original `confirmedToolInputs` payload and then suggest next-step actions (for example `refreshWatchlistResearchData` or `generateTickerReport`).
 
 `POST /api/agent/chat` behavior:
 
@@ -209,7 +213,7 @@ Agent suggested-action behavior includes:
 - Executes approved backend tools only through the agent tool registry/executor.
 - Requires confirmation gates for refresh/mutation/high-impact tools.
 - Uses OpenAI synthesis on tool results after validated execution.
-- For new-holding candidate prompts, plans `rankDiscoveryCandidates` plus portfolio risk/quality context when portfolio scope is available.
+- For new-holding candidate prompts, plans `screenMarketCandidates` with extracted/defaulted investment preferences and optional portfolio risk/quality context.
 - Uses persisted backend discovery/scoring data as the source of named candidates (no OpenAI-generated ticker invention).
 - Tool execution remains backend-controlled and confirmation policy is unchanged.
 - No background autonomous OpenAI loops are used; OpenAI calls only happen inline during the request.

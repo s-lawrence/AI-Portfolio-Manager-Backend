@@ -61,6 +61,40 @@ const WATCHLIST_REFRESH_DEFAULT_INPUT = {
   runReports: false,
 } as const;
 
+const RECOMMENDATION_OBJECTIVE_CLARIFYING_QUESTION =
+  "What are you optimizing for: growth, dividends, lower risk, or diversification?";
+
+type AgentInvestmentObjective =
+  | "GROWTH"
+  | "VALUE"
+  | "DIVIDEND"
+  | "QUALITY"
+  | "LOW_VOLATILITY"
+  | "MOMENTUM"
+  | "DIVERSIFICATION";
+
+type AgentInvestmentTimeHorizon = "SHORT" | "MEDIUM" | "LONG";
+
+type AgentInvestmentRiskTolerance = "LOW" | "MEDIUM" | "HIGH";
+
+type AgentInvestmentPreferences = {
+  objective?: AgentInvestmentObjective;
+  timeHorizon?: AgentInvestmentTimeHorizon;
+  riskTolerance?: AgentInvestmentRiskTolerance;
+  preferredSectors?: string[];
+  preferredCurrencies?: string[];
+  wantsIncome?: boolean;
+  wantsCanada?: boolean;
+  wantsUS?: boolean;
+};
+
+type ExtractedInvestmentPreferences = {
+  preferences: AgentInvestmentPreferences;
+  mentionedObjectives: AgentInvestmentObjective[];
+  ambiguousObjective: boolean;
+  isRecommendationPrompt: boolean;
+};
+
 type PlannedToolExecution = {
   toolName: AgentToolName;
   input: Record<string, unknown>;
@@ -106,6 +140,11 @@ const PORTFOLIO_SCOPED_TOOL_NAMES: AgentToolName[] = [
   "getPortfolioDataQuality",
   "rankPortfolioHoldings",
   "runPortfolioFullRefresh",
+];
+
+const OPTIONAL_PORTFOLIO_CONTEXT_TOOL_NAMES: AgentToolName[] = [
+  "rankDiscoveryCandidates",
+  "screenMarketCandidates",
 ];
 
 const SAFE_WARNING_PORTFOLIO_CONTEXT_MISSING = "Portfolio context was missing.";
@@ -607,6 +646,107 @@ function buildDiscoveryCandidatesPresentation(toolResults: AgentToolResult[]): D
     byToolName.set(result.toolName, result);
   }
 
+  const screeningPayload = asRecord(byToolName.get("screenMarketCandidates")?.data);
+  if (screeningPayload) {
+    const candidates = asRecordList(screeningPayload.candidates);
+    const rejectedCandidates = asRecordList(screeningPayload.rejectedCandidates);
+    const assumptions = asStringList(screeningPayload.assumptions);
+    const clarifyingQuestion = asString(screeningPayload.clarifyingQuestion);
+    const suggestedRefreshActions = asStringList(screeningPayload.suggestedRefreshActions);
+    const screenedCount = asNumber(screeningPayload.screenedCount) ?? candidates.length + rejectedCandidates.length;
+    const qualifiedCount = asNumber(screeningPayload.qualifiedCount) ?? candidates.length;
+
+    if (clarifyingQuestion && candidates.length === 0) {
+      return {
+        answer: clarifyingQuestion,
+        topTickers: [],
+      };
+    }
+
+    if (candidates.length === 0) {
+      const lines: string[] = [];
+      lines.push(
+        `I screened ${screenedCount} persisted candidates and none qualified for watchlist addition right now.`,
+      );
+
+      const topRejected = rejectedCandidates.slice(0, 5);
+      if (topRejected.length > 0) {
+        lines.push("");
+        lines.push("Closest but not qualified:");
+        for (const candidate of topRejected) {
+          const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+          const score = asNumber(candidate.score);
+          const reason = asString(candidate.reason) ?? "Did not pass qualification thresholds.";
+          const actionLabel = asString(candidate.actionLabel);
+          const scoreText = score == null ? "n/a" : score.toFixed(1);
+          lines.push(`- ${ticker} | Score ${scoreText}${actionLabel ? ` | ${actionLabel}` : ""}`);
+          lines.push(`  Reason: ${reason}`);
+        }
+      }
+
+      if (assumptions.length > 0) {
+        lines.push("");
+        lines.push(`Assumptions: ${assumptions.slice(0, 2).join(" ")}`);
+      }
+
+      if (suggestedRefreshActions.length > 0) {
+        lines.push(`Suggested refresh actions: ${suggestedRefreshActions.join(", ")}.`);
+      }
+
+      lines.push("Decision support only, not a buy/sell instruction.");
+
+      return {
+        answer: lines.join("\n").trim(),
+        topTickers: [],
+      };
+    }
+
+    const lines: string[] = [];
+    lines.push(`Qualified candidate recommendations from persisted backend data (${qualifiedCount} qualified):`);
+    lines.push("");
+
+    for (const candidate of candidates.slice(0, 5)) {
+      const rank = asNumber(candidate.rank) ?? 0;
+      const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+      const companyName = asString(candidate.companyName);
+      const totalScore = asNumber(candidate.totalRecommendationScore);
+      const actionLabel = asString(candidate.actionLabel) ?? "Review candidate";
+      const why = asStringList(candidate.why);
+      const cautions = asStringList(candidate.cautions);
+      const scoreText = totalScore == null ? "n/a" : totalScore.toFixed(1);
+      const companyText = companyName ? ` (${companyName})` : "";
+
+      lines.push(`${rank}. ${ticker}${companyText} | Score ${scoreText} | ${actionLabel}`);
+      if (why.length > 0) {
+        lines.push(`Why: ${why.slice(0, 2).join(" ")}`);
+      }
+      if (cautions.length > 0) {
+        lines.push(`Caution: ${cautions[0]}`);
+      }
+      lines.push("");
+    }
+
+    if (assumptions.length > 0) {
+      lines.push(`Assumptions: ${assumptions.slice(0, 2).join(" ")}`);
+    }
+
+    if (suggestedRefreshActions.length > 0) {
+      lines.push(`Suggested refresh actions: ${suggestedRefreshActions.join(", ")}.`);
+    }
+
+    lines.push("Decision support only, not a buy/sell instruction.");
+
+    const topTickers = candidates
+      .slice(0, 5)
+      .map((candidate) => asString(candidate.ticker))
+      .filter((ticker): ticker is string => ticker != null);
+
+    return {
+      answer: lines.join("\n").trim(),
+      topTickers,
+    };
+  }
+
   const rankingPayload = asRecord(byToolName.get("rankDiscoveryCandidates")?.data);
   if (!rankingPayload) {
     return null;
@@ -816,6 +956,214 @@ function inferCanadianTickerPreference(request: AgentChatRequest): boolean | und
   return undefined;
 }
 
+function messageIncludesAny(message: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => message.includes(phrase));
+}
+
+function extractInvestmentPreferencesFromMessage(message: string): ExtractedInvestmentPreferences {
+  const normalized = message.toLowerCase();
+  const objectives: AgentInvestmentObjective[] = [];
+
+  if (messageIncludesAny(normalized, ["growth", "grow", "high growth", "upside"])) {
+    objectives.push("GROWTH");
+  }
+
+  if (messageIncludesAny(normalized, ["value", "undervalued", "cheap valuation"])) {
+    objectives.push("VALUE");
+  }
+
+  if (messageIncludesAny(normalized, ["dividend", "income", "yield"])) {
+    objectives.push("DIVIDEND");
+  }
+
+  if (messageIncludesAny(normalized, ["quality", "durable", "high quality"])) {
+    objectives.push("QUALITY");
+  }
+
+  if (messageIncludesAny(normalized, ["low risk", "lower risk", "conservative", "low volatility", "defensive"])) {
+    objectives.push("LOW_VOLATILITY");
+  }
+
+  if (messageIncludesAny(normalized, ["momentum", "breakout", "trend"])) {
+    objectives.push("MOMENTUM");
+  }
+
+  if (messageIncludesAny(normalized, ["diversification", "diversify", "uncorrelated", "reduce concentration"])) {
+    objectives.push("DIVERSIFICATION");
+  }
+
+  const dedupedObjectives = [...new Set(objectives)];
+  const objective = dedupedObjectives.length === 1 ? dedupedObjectives[0] : undefined;
+
+  let riskTolerance: AgentInvestmentRiskTolerance | undefined;
+  if (messageIncludesAny(normalized, ["low risk", "lower risk", "conservative", "defensive"])) {
+    riskTolerance = "LOW";
+  } else if (messageIncludesAny(normalized, ["high risk", "aggressive", "speculative"])) {
+    riskTolerance = "HIGH";
+  }
+
+  let timeHorizon: AgentInvestmentTimeHorizon | undefined;
+  if (messageIncludesAny(normalized, ["short term", "this week", "this month", "near term"])) {
+    timeHorizon = "SHORT";
+  } else if (messageIncludesAny(normalized, ["long term", "multi-year", "3-5 years", "5 years"])) {
+    timeHorizon = "LONG";
+  }
+
+  const preferredSectors: string[] = [];
+  const sectorHints: Array<{ sector: string; keywords: string[] }> = [
+    { sector: "Technology", keywords: ["tech", "technology", "software", "semiconductor"] },
+    { sector: "Healthcare", keywords: ["healthcare", "biotech", "pharma"] },
+    { sector: "Financial Services", keywords: ["financial", "bank", "insurance"] },
+    { sector: "Energy", keywords: ["energy", "oil", "gas"] },
+    { sector: "Industrials", keywords: ["industrial", "manufacturing", "infrastructure"] },
+    { sector: "Consumer Defensive", keywords: ["consumer defensive", "staples"] },
+    { sector: "Consumer Cyclical", keywords: ["consumer cyclical", "discretionary"] },
+    { sector: "Utilities", keywords: ["utilities", "utility"] },
+  ];
+
+  for (const hint of sectorHints) {
+    if (messageIncludesAny(normalized, hint.keywords)) {
+      preferredSectors.push(hint.sector);
+    }
+  }
+
+  const preferredCurrencies: string[] = [];
+  if (messageIncludesAny(normalized, ["cad", "canadian dollar"])) {
+    preferredCurrencies.push("CAD");
+  }
+  if (messageIncludesAny(normalized, ["usd", "us dollar"])) {
+    preferredCurrencies.push("USD");
+  }
+
+  const wantsCanada = messageIncludesAny(normalized, ["canada", "canadian", "tsx", ".to"])
+    ? true
+    : undefined;
+  const wantsUS = messageIncludesAny(normalized, ["us ", "u.s.", "united states", "nyse", "nasdaq"])
+    ? true
+    : undefined;
+
+  const wantsIncome = messageIncludesAny(normalized, ["income", "yield", "dividend"])
+    ? true
+    : undefined;
+
+  const isRecommendationPrompt =
+    messageIncludesAny(normalized, ["recommend", "suggest", "find", "screen", "candidate"]) &&
+    messageIncludesAny(normalized, ["stock", "ticker", "holding", "position", "equity"]);
+
+  return {
+    preferences: {
+      objective,
+      timeHorizon,
+      riskTolerance,
+      preferredSectors: preferredSectors.length > 0 ? [...new Set(preferredSectors)] : undefined,
+      preferredCurrencies: preferredCurrencies.length > 0 ? [...new Set(preferredCurrencies)] : undefined,
+      wantsIncome,
+      wantsCanada,
+      wantsUS,
+    },
+    mentionedObjectives: dedupedObjectives,
+    ambiguousObjective: dedupedObjectives.length > 1,
+    isRecommendationPrompt,
+  };
+}
+
+function shouldAskRecommendationObjectiveClarification(input: {
+  message: string;
+  extracted: ExtractedInvestmentPreferences;
+  intent: string;
+}): boolean {
+  if (input.intent !== "MARKET_CANDIDATE_DISCOVERY") {
+    return false;
+  }
+
+  if (input.extracted.ambiguousObjective) {
+    return true;
+  }
+
+  if (input.extracted.preferences.objective) {
+    return false;
+  }
+
+  const hasConcretePreferenceSignals =
+    (input.extracted.preferences.preferredSectors?.length ?? 0) > 0 ||
+    (input.extracted.preferences.preferredCurrencies?.length ?? 0) > 0 ||
+    input.extracted.preferences.wantsCanada === true ||
+    input.extracted.preferences.wantsUS === true ||
+    input.extracted.preferences.wantsIncome === true ||
+    input.extracted.preferences.riskTolerance != null ||
+    input.extracted.preferences.timeHorizon != null;
+
+  if (hasConcretePreferenceSignals) {
+    return false;
+  }
+
+  const normalized = input.message.toLowerCase();
+  const genericDiscoveryPrompt =
+    messageIncludesAny(normalized, ["recommend", "suggest", "find", "screen"]) &&
+    messageIncludesAny(normalized, ["stocks", "tickers", "new holding", "new position"]) &&
+    !messageIncludesAny(normalized, [
+      "dividend",
+      "income",
+      "growth",
+      "value",
+      "quality",
+      "risk",
+      "divers",
+      "momentum",
+      "canada",
+      "canadian",
+      "us",
+      "american",
+      "sector",
+    ]);
+
+  return genericDiscoveryPrompt;
+}
+
+function applyDefaultInvestmentPreferences(
+  preferences: AgentInvestmentPreferences,
+): AgentInvestmentPreferences {
+  const objective = preferences.objective ?? "GROWTH";
+  const timeHorizon = preferences.timeHorizon ?? (objective === "GROWTH" ? "LONG" : "MEDIUM");
+  const riskTolerance = preferences.riskTolerance ?? "MEDIUM";
+
+  return {
+    ...preferences,
+    objective,
+    timeHorizon,
+    riskTolerance,
+  };
+}
+
+function isHoldOffActionLabel(actionLabel: string | null | undefined): boolean {
+  return (actionLabel ?? "").trim().toLowerCase().includes("hold off");
+}
+
+function toWatchlistPriorityFromScore(score: number | null | undefined): "LOW" | "MEDIUM" | "HIGH" {
+  if (typeof score !== "number" || !Number.isFinite(score)) {
+    return "MEDIUM";
+  }
+
+  if (score >= 75) {
+    return "HIGH";
+  }
+
+  if (score >= 60) {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function toWatchlistAddedReason(candidate: Record<string, unknown>): string {
+  const ticker = asString(candidate.ticker) ?? "UNKNOWN";
+  const totalRecommendationScore = asNumber(candidate.totalRecommendationScore);
+  const objectiveHint = asString(candidate.objectiveHint) ?? "current objective";
+  const topWhy = asStringList(candidate.why)[0] ?? "Persisted score and fit metrics are supportive.";
+  const scoreText = typeof totalRecommendationScore === "number" ? totalRecommendationScore.toFixed(1) : "n/a";
+  return `${ticker}: ${objectiveHint} fit with recommendation score ${scoreText}. ${topWhy}`;
+}
+
 function buildTickerClarifyingQuestion(resolution: AgentTickerResolutionResult): string | null {
   if (resolution.source !== "AMBIGUOUS") {
     return null;
@@ -974,7 +1322,7 @@ function hasLowWatchlistCoverageSignals(result: AgentToolResult): boolean {
 
   const payload = result.data as Record<string, unknown>;
 
-  if (result.toolName === "scoreWatchlist") {
+  if (result.toolName === "scoreWatchlist" || result.toolName === "rankWatchlist") {
     const activeItemsCount = typeof payload.activeItemsCount === "number"
       ? payload.activeItemsCount
       : null;
@@ -1054,7 +1402,11 @@ function normalizeCoverageFieldName(value: string): string | null {
 }
 
 function collectWatchlistCoverageWarnings(toolResults: AgentToolResult[]): string[] {
-  const scoreWatchlistResult = toolResults.find((result) => result.success && result.toolName === "scoreWatchlist");
+  const scoreWatchlistResult = toolResults.find(
+    (result) =>
+      result.success &&
+      (result.toolName === "scoreWatchlist" || result.toolName === "rankWatchlist"),
+  );
   if (!scoreWatchlistResult) {
     return [];
   }
@@ -1216,6 +1568,22 @@ function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): 
 
   if (tickerRefreshTarget) {
     suggestedActions.push({
+      label: `Refresh ticker research data for ${tickerRefreshTarget}`,
+      toolName: "refreshTickerResearchData",
+      input: {
+        ticker: tickerRefreshTarget,
+        includeMarketData: true,
+        includeHistorical: true,
+        includeFundamentals: true,
+        includeNews: true,
+        includeEarnings: true,
+        includeAnalyst: true,
+        generateReport: false,
+      },
+      requiresConfirmation: true,
+    });
+
+    suggestedActions.push({
       label: `Refresh analyst data for ${tickerRefreshTarget}`,
       toolName: "refreshTickerAnalystData",
       input: { ticker: tickerRefreshTarget },
@@ -1235,6 +1603,55 @@ function deriveSuggestedActionsFromToolResults(toolResults: AgentToolResult[]): 
   const discoveryRankingResult = toolResults.find(
     (result) => result.success && result.toolName === "rankDiscoveryCandidates" && result.data,
   );
+
+  const screeningResult = toolResults.find(
+    (result) => result.success && result.toolName === "screenMarketCandidates" && result.data,
+  );
+
+  if (screeningResult?.data && typeof screeningResult.data === "object") {
+    const payload = screeningResult.data as Record<string, unknown>;
+    const refreshActions = asStringList(payload.suggestedRefreshActions);
+    const candidates = asRecordList(payload.candidates);
+
+    if (refreshActions.includes("refreshDiscoveryCategory")) {
+      suggestedActions.push({
+        label: "Refresh discovery candidates",
+        toolName: "refreshDiscoveryCategory",
+        input: { category: "GAINERS" },
+        requiresConfirmation: true,
+      });
+    }
+
+    if (refreshActions.includes("refreshTickerAnalystData")) {
+      const targetTicker = candidates
+        .map((candidate) => asString(candidate.ticker))
+        .find((ticker): ticker is string => Boolean(ticker));
+
+      if (targetTicker) {
+        suggestedActions.push({
+          label: `Refresh analyst data for ${targetTicker}`,
+          toolName: "refreshTickerAnalystData",
+          input: { ticker: targetTicker },
+          requiresConfirmation: true,
+        });
+      }
+    }
+
+    if (refreshActions.includes("refreshWatchlistResearchData")) {
+      const watchlistId = toolResults
+        .map((result) => asString(asRecord(result.data)?.watchlistId))
+        .find((value): value is string => Boolean(value));
+
+      if (watchlistId) {
+        suggestedActions.push({
+          label: "Refresh watchlist research data",
+          toolName: "refreshWatchlistResearchData",
+          input: { watchlistId },
+          requiresConfirmation: true,
+        });
+      }
+    }
+  }
 
   if (discoveryRankingResult?.data && typeof discoveryRankingResult.data === "object") {
     const payload = discoveryRankingResult.data as Record<string, unknown>;
@@ -1342,12 +1759,41 @@ function determineIntent(message: string, tickers: string[]): string {
   }
 
   const newHoldingSignals =
-    (normalized.includes("new holding") || normalized.includes("new position") || normalized.includes("candidate ticker") || normalized.includes("candidate stock")) &&
-    (normalized.includes("find") || normalized.includes("suggest") || normalized.includes("recommend") || normalized.includes("rank"));
+    (
+      normalized.includes("new holding") ||
+      normalized.includes("new position") ||
+      normalized.includes("candidate ticker") ||
+      normalized.includes("candidate stock") ||
+      normalized.includes("recommend") ||
+      normalized.includes("suggest") ||
+      normalized.includes("screen") ||
+      normalized.includes("find")
+    ) &&
+    (
+      normalized.includes("stock") ||
+      normalized.includes("ticker") ||
+      normalized.includes("holding") ||
+      normalized.includes("position") ||
+      normalized.includes("equity") ||
+      normalized.includes("market")
+    );
 
   const discoverySignals =
-    (normalized.includes("discovery") || normalized.includes("gainers") || normalized.includes("losers") || normalized.includes("analyst upgrades") || normalized.includes("market movers")) &&
-    (normalized.includes("candidate") || normalized.includes("holding") || normalized.includes("rank") || normalized.includes("best"));
+    (
+      normalized.includes("discovery") ||
+      normalized.includes("gainers") ||
+      normalized.includes("losers") ||
+      normalized.includes("analyst upgrades") ||
+      normalized.includes("market movers")
+    ) &&
+    (
+      normalized.includes("candidate") ||
+      normalized.includes("holding") ||
+      normalized.includes("rank") ||
+      normalized.includes("best") ||
+      normalized.includes("recommend") ||
+      normalized.includes("suggest")
+    );
 
   if (newHoldingSignals || discoverySignals) {
     return "MARKET_CANDIDATE_DISCOVERY";
@@ -1392,7 +1838,10 @@ function determineIntent(message: string, tickers: string[]): string {
   if (
     normalized.includes("research") ||
     normalized.includes("analy") ||
+    normalized.includes("score") ||
     normalized.includes("report") ||
+    normalized.includes("buy") ||
+    normalized.includes("what do you think") ||
     normalized.includes("take a look") ||
     normalized.includes("look at")
   ) {
@@ -1404,6 +1853,24 @@ function determineIntent(message: string, tickers: string[]): string {
   }
 
   return "GENERAL_QA";
+}
+
+function isExplicitReportGenerationMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("generate a report") ||
+    normalized.includes("generate report") ||
+    normalized.includes("write a report") ||
+    normalized.includes("write report") ||
+    normalized.includes("create a report") ||
+    normalized.includes("create report") ||
+    normalized.includes("produce a report") ||
+    normalized.includes("produce report") ||
+    normalized.includes("research report") ||
+    normalized.includes("full analysis") ||
+    normalized.includes("what is your report") ||
+    normalized.includes("report on this ticker")
+  );
 }
 
 function summarizeToolOutput(toolName: string, data: unknown): string {
@@ -1419,7 +1886,27 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
       ? payload.compositeScore.toFixed(2)
       : "n/a";
     const suggestedStance = String(payload.suggestedStance ?? "UNKNOWN");
-    return `${ticker} scored ${compositeScore} with stance ${suggestedStance}.`;
+    const actionLabel = typeof payload.actionLabel === "string"
+      ? payload.actionLabel
+      : "n/a";
+    return `${ticker} scored ${compositeScore} with stance ${suggestedStance} (${actionLabel}).`;
+  }
+
+  if (toolName === "resolveTickerOrCompany") {
+    const query = typeof payload.query === "string" ? payload.query : "query";
+    const resolvedTicker = typeof payload.resolvedTicker === "string" ? payload.resolvedTicker : null;
+    const candidateCount = Array.isArray(payload.candidates) ? payload.candidates.length : 0;
+    const ambiguous = payload.isAmbiguous === true;
+
+    if (resolvedTicker) {
+      return `Resolved '${query}' to ${resolvedTicker}.`;
+    }
+
+    if (ambiguous) {
+      return `Ticker resolution for '${query}' is ambiguous across ${candidateCount} candidate(s).`;
+    }
+
+    return `Ticker resolution for '${query}' returned ${candidateCount} candidate(s).`;
   }
 
   if (toolName === "compareTickers") {
@@ -1432,7 +1919,7 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
     return `Compared ${scores} ticker scorecards out of ${requested} requested tickers.`;
   }
 
-  if (toolName === "scoreWatchlist") {
+  if (toolName === "scoreWatchlist" || toolName === "rankWatchlist") {
     const totalItems = typeof payload.totalItems === "number"
       ? payload.totalItems
       : typeof payload.itemCount === "number"
@@ -1521,6 +2008,25 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
     return `Discovery ranking scored=${scoredCount}, qualified=${qualifiedCount}, skipped=${skippedCount}. Top recommendations: ${top.join("; ")}`.trim();
   }
 
+  if (toolName === "screenMarketCandidates") {
+    const candidates = asRecordList(payload.candidates);
+    const screenedCount = asNumber(payload.screenedCount) ?? candidates.length;
+    const qualifiedCount = asNumber(payload.qualifiedCount) ?? candidates.length;
+    const top = candidates.slice(0, 3).map((item) => {
+      const ticker = asString(item.ticker) ?? "?";
+      const score = asNumber(item.totalRecommendationScore);
+      const actionLabel = asString(item.actionLabel) ?? "Review candidate";
+      const scoreText = score == null ? "n/a" : score.toFixed(1);
+      return `${ticker} (${scoreText}) ${actionLabel}`;
+    });
+
+    if (qualifiedCount === 0) {
+      return `Candidate screening reviewed ${screenedCount} tickers and found no qualified additions.`;
+    }
+
+    return `Candidate screening reviewed ${screenedCount} tickers and qualified ${qualifiedCount}. Top: ${top.join("; ")}`.trim();
+  }
+
   if (toolName === "getPortfolioOverview") {
     const holdings = Array.isArray(payload.holdings)
       ? (payload.holdings as unknown[]).length
@@ -1540,6 +2046,28 @@ function summarizeToolOutput(toolName: string, data: unknown): string {
     const failed = typeof payload.tickersFailed === "number" ? payload.tickersFailed : 0;
     const skipped = typeof payload.tickersSkipped === "number" ? payload.tickersSkipped : 0;
     return `Watchlist refresh processed ${processed} ticker(s), failed ${failed}, skipped ${skipped}.`;
+  }
+
+  if (toolName === "refreshTickerResearchData") {
+    const sections = typeof payload.sections === "object" && payload.sections !== null
+      ? Object.values(payload.sections as Record<string, unknown>)
+      : [];
+    const attempted = sections.filter((section) => {
+      if (typeof section !== "object" || section === null) {
+        return false;
+      }
+
+      return (section as Record<string, unknown>).attempted === true;
+    }).length;
+    const failed = sections.filter((section) => {
+      if (typeof section !== "object" || section === null) {
+        return false;
+      }
+
+      return (section as Record<string, unknown>).success === false;
+    }).length;
+    const ticker = typeof payload.ticker === "string" ? payload.ticker : "ticker";
+    return `Ticker refresh for ${ticker} attempted ${attempted} section(s), failed ${failed}.`;
   }
 
   if (toolName === "runPortfolioFullRefresh") {
@@ -2050,6 +2578,24 @@ function resolveConfirmedToolInput(
     return { ticker };
   }
 
+  if (toolName === "refreshTickerResearchData") {
+    const ticker = request.context.ticker?.toUpperCase() ?? tickers[0];
+    if (!ticker) {
+      return undefined;
+    }
+
+    return {
+      ticker,
+      includeMarketData: true,
+      includeHistorical: true,
+      includeFundamentals: true,
+      includeNews: true,
+      includeEarnings: true,
+      includeAnalyst: true,
+      generateReport: false,
+    };
+  }
+
   if (toolName === "refreshWatchlistAnalystData") {
     if (!request.context.watchlistId) {
       return undefined;
@@ -2084,12 +2630,13 @@ function validateAndPrepareToolCalls(input: {
 }): PlanValidationResult {
   const cappedToolCalls = input.toolCalls.slice(0, input.maxToolCalls);
   const missingContext = dedupe(input.missingContext);
-  const executableCalls: PlannedToolExecution[] = [];
+  let executableCalls: PlannedToolExecution[] = [];
   const warnings: string[] = [];
   const suggestedActions: AgentSuggestedAction[] = [];
   const blockedTools: Array<{ toolName: string; reason: string }> = [];
   let blockedToolCount = 0;
   let droppedToolCount = Math.max(0, input.toolCalls.length - cappedToolCalls.length);
+  let clarifyingQuestion = input.clarifyingQuestion;
 
   for (const planned of cappedToolCalls) {
     if (!AGENT_TOOL_NAMES.includes(planned.toolName as AgentToolName)) {
@@ -2177,6 +2724,76 @@ function validateAndPrepareToolCalls(input: {
       };
     }
 
+    const canonicalWatchlistId = asOptionalConfiguredString(input.request.context.watchlistId);
+    const plannedWatchlistId = asOptionalConfiguredString(normalizedInput.watchlistId);
+    if (plannedWatchlistId) {
+      if (!canonicalWatchlistId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Watchlist access was denied because planned watchlistId was not in canonical context.",
+        });
+        warnings.push(`Blocked tool '${toolName}' because planned watchlistId was not in canonical context.`);
+        continue;
+      }
+
+      if (plannedWatchlistId !== canonicalWatchlistId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Watchlist access was denied because planned watchlistId did not match canonical context.",
+        });
+        warnings.push(`Blocked tool '${toolName}' because planned watchlistId did not match canonical context.`);
+        continue;
+      }
+
+      normalizedInput = {
+        ...normalizedInput,
+        watchlistId: canonicalWatchlistId,
+      };
+    }
+
+    const canonicalPortfolioId = asOptionalConfiguredString(input.request.context.portfolioId);
+    const plannedPortfolioId = asOptionalConfiguredString(normalizedInput.portfolioId);
+
+    if (plannedPortfolioId && !isPortfolioScopedTool(toolName)) {
+      if (!canonicalPortfolioId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Portfolio access was denied because planned portfolioId was not in canonical context.",
+        });
+        warnings.push(`Blocked tool '${toolName}' because planned portfolioId was not in canonical context.`);
+        continue;
+      }
+
+      if (plannedPortfolioId !== canonicalPortfolioId) {
+        blockedToolCount += 1;
+        blockedTools.push({
+          toolName,
+          reason: "Portfolio access was denied because planned portfolioId did not match canonical context.",
+        });
+        warnings.push(`Blocked tool '${toolName}' because planned portfolioId did not match canonical context.`);
+        continue;
+      }
+
+      normalizedInput = {
+        ...normalizedInput,
+        portfolioId: canonicalPortfolioId,
+      };
+    }
+
+    if (
+      canonicalPortfolioId &&
+      !plannedPortfolioId &&
+      OPTIONAL_PORTFOLIO_CONTEXT_TOOL_NAMES.includes(toolName)
+    ) {
+      normalizedInput = {
+        ...normalizedInput,
+        portfolioId: canonicalPortfolioId,
+      };
+    }
+
     if (toolName === "refreshGdeltRiskContext" && !isGeopoliticalContextMessage(input.request.message)) {
       droppedToolCount += 1;
       warnings.push("Dropped non-geopolitical GDELT refresh request.");
@@ -2200,6 +2817,20 @@ function validateAndPrepareToolCalls(input: {
     }
 
     if (requiresConfirmation(toolName)) {
+      const allowExplicitReportExecution =
+        toolName === "generateTickerReport" &&
+        isExplicitReportGenerationMessage(input.request.message);
+
+      if (allowExplicitReportExecution) {
+        executableCalls.push({
+          toolName,
+          input: normalizedInput,
+          purpose: planned.purpose,
+          confirmed: true,
+        });
+        continue;
+      }
+
       if (canExecuteConfirmedTool(toolName, input.request)) {
         executableCalls.push({
           toolName,
@@ -2285,42 +2916,56 @@ function validateAndPrepareToolCalls(input: {
     const canonicalPortfolioId = asOptionalConfiguredString(input.request.context.portfolioId);
     const canonicalWatchlistId = asOptionalConfiguredString(input.request.context.watchlistId);
 
-    if (!canonicalPortfolioId) {
-      missingContext.push("portfolioId");
-      warnings.push("Market candidate discovery request requires portfolio context.");
+    const extracted = extractInvestmentPreferencesFromMessage(input.request.message);
+    const shouldClarifyObjective = shouldAskRecommendationObjectiveClarification({
+      message: input.request.message,
+      extracted,
+      intent: input.intent,
+    });
+
+    if (shouldClarifyObjective) {
+      clarifyingQuestion = RECOMMENDATION_OBJECTIVE_CLARIFYING_QUESTION;
     } else {
+      const preferences = applyDefaultInvestmentPreferences(extracted.preferences);
+
       const requiredToolCalls: PlannedToolExecution[] = [
         {
-          toolName: "getPortfolioOverview",
-          input: { portfolioId: canonicalPortfolioId },
-          purpose: "Provide portfolio context for candidate-fit analysis",
-          confirmed: false,
-        },
-        {
-          toolName: "getPortfolioRiskSnapshot",
-          input: { portfolioId: canonicalPortfolioId },
-          purpose: "Provide portfolio risk caveats for candidate selection",
-          confirmed: false,
-        },
-        {
-          toolName: "getPortfolioDataQuality",
-          input: { portfolioId: canonicalPortfolioId },
-          purpose: "Provide data quality caveats for candidate confidence",
-          confirmed: false,
-        },
-        {
-          toolName: "rankDiscoveryCandidates",
+          toolName: "screenMarketCandidates",
           input: {
             portfolioId: canonicalPortfolioId,
             watchlistId: canonicalWatchlistId,
+            preferences,
             limit: 5,
             excludeExistingHoldings: true,
             excludeExistingWatchlistItems: true,
           },
-          purpose: "Rank new-holding discovery candidates using persisted data",
+          purpose: "Screen persisted candidates using preference and portfolio fit",
           confirmed: false,
         },
       ];
+
+      if (canonicalPortfolioId) {
+        requiredToolCalls.unshift(
+          {
+            toolName: "getPortfolioDataQuality",
+            input: { portfolioId: canonicalPortfolioId },
+            purpose: "Provide portfolio data quality caveats for candidate confidence",
+            confirmed: false,
+          },
+          {
+            toolName: "getPortfolioRiskSnapshot",
+            input: { portfolioId: canonicalPortfolioId },
+            purpose: "Provide portfolio risk caveats for candidate selection",
+            confirmed: false,
+          },
+          {
+            toolName: "getPortfolioOverview",
+            input: { portfolioId: canonicalPortfolioId },
+            purpose: "Provide portfolio context for candidate-fit analysis",
+            confirmed: false,
+          },
+        );
+      }
 
       for (const requiredCall of requiredToolCalls) {
         const alreadyPlanned = executableCalls.some((call) => call.toolName === requiredCall.toolName);
@@ -2334,8 +2979,23 @@ function validateAndPrepareToolCalls(input: {
     }
   }
 
+  if (input.intent === "MARKET_CANDIDATE_DISCOVERY" && clarifyingQuestion) {
+    const retainedCalls = executableCalls.filter((call) =>
+      call.toolName === "getPortfolioOverview" ||
+      call.toolName === "getPortfolioRiskSnapshot" ||
+      call.toolName === "getPortfolioDataQuality",
+    );
+
+    if (retainedCalls.length !== executableCalls.length) {
+      droppedToolCount += executableCalls.length - retainedCalls.length;
+      warnings.push("Deferred candidate screening until investment objective is clarified.");
+    }
+
+    executableCalls = retainedCalls;
+  }
+
   const normalizedMissingContext = dedupe(missingContext);
-  const hasOpenQuestions = normalizedMissingContext.length > 0 || Boolean(input.clarifyingQuestion);
+  const hasOpenQuestions = normalizedMissingContext.length > 0 || Boolean(clarifyingQuestion);
 
   if (hasOpenQuestions) {
     const contextFreeCalls = executableCalls.filter((call) => isContextFreeReadOnly(call.toolName));
@@ -2349,7 +3009,7 @@ function validateAndPrepareToolCalls(input: {
     return {
       intent: input.intent,
       missingContext: normalizedMissingContext,
-      clarifyingQuestion: input.clarifyingQuestion,
+      clarifyingQuestion,
       plannedToolCount: cappedToolCalls.length,
       droppedToolCount,
       blockedToolCount,
@@ -2363,7 +3023,7 @@ function validateAndPrepareToolCalls(input: {
   return {
     intent: input.intent,
     missingContext: normalizedMissingContext,
-    clarifyingQuestion: input.clarifyingQuestion,
+    clarifyingQuestion,
     plannedToolCount: cappedToolCalls.length,
     droppedToolCount,
     blockedToolCount,
@@ -2527,7 +3187,7 @@ function buildDeterministicPlan(
       missingContext.push("watchlistId");
     } else {
       toolCalls.push({
-        toolName: "scoreWatchlist",
+        toolName: "rankWatchlist",
         input: { watchlistId: request.context.watchlistId },
         purpose: "Score watchlist holdings",
       });
@@ -2572,52 +3232,109 @@ function buildDeterministicPlan(
   }
 
   if (intent === "MARKET_CANDIDATE_DISCOVERY") {
-    if (!request.context.portfolioId) {
-      missingContext.push("portfolioId");
+    const extracted = extractInvestmentPreferencesFromMessage(request.message);
+    if (shouldAskRecommendationObjectiveClarification({
+      message: request.message,
+      extracted,
+      intent,
+    })) {
+      clarifyingQuestion = RECOMMENDATION_OBJECTIVE_CLARIFYING_QUESTION;
     } else {
+      const preferences = applyDefaultInvestmentPreferences(extracted.preferences);
+
+      if (request.context.portfolioId) {
+        toolCalls.push(
+          {
+            toolName: "getPortfolioOverview",
+            input: { portfolioId: request.context.portfolioId },
+            purpose: "Load portfolio context for candidate fit",
+          },
+          {
+            toolName: "getPortfolioRiskSnapshot",
+            input: { portfolioId: request.context.portfolioId },
+            purpose: "Load concentration/risk caveats for new holdings",
+          },
+          {
+            toolName: "getPortfolioDataQuality",
+            input: { portfolioId: request.context.portfolioId },
+            purpose: "Load portfolio data quality caveats",
+          },
+        );
+      }
+
       toolCalls.push(
         {
-          toolName: "getPortfolioOverview",
-          input: { portfolioId: request.context.portfolioId },
-          purpose: "Load portfolio context for candidate fit",
-        },
-        {
-          toolName: "getPortfolioRiskSnapshot",
-          input: { portfolioId: request.context.portfolioId },
-          purpose: "Load concentration/risk caveats for new holdings",
-        },
-        {
-          toolName: "getPortfolioDataQuality",
-          input: { portfolioId: request.context.portfolioId },
-          purpose: "Load portfolio data quality caveats",
-        },
-        {
-          toolName: "rankDiscoveryCandidates",
+          toolName: "screenMarketCandidates",
           input: {
             portfolioId: request.context.portfolioId,
             watchlistId: request.context.watchlistId,
+            preferences,
             limit: 5,
             excludeExistingHoldings: true,
             excludeExistingWatchlistItems: true,
           },
-          purpose: "Rank persisted discovery candidates for potential new holdings",
+          purpose: "Screen persisted candidates for recommendation-ready watchlist ideas",
         },
       );
     }
   }
 
   if (intent === "RESEARCH_TICKER") {
-    const ticker = request.context.ticker?.toUpperCase() ?? tickers[0];
+    const contextTicker = request.context.ticker?.toUpperCase();
+    const resolvedTicker = tickerResolution.confidence !== "LOW"
+      ? tickerResolution.ticker
+      : undefined;
+    const ticker = contextTicker ?? resolvedTicker ?? tickers[0];
+
+    const lowerMessage = request.message.toLowerCase();
+    const wantsReport =
+      lowerMessage.includes("report") ||
+      lowerMessage.includes("write a report") ||
+      lowerMessage.includes("full analysis") ||
+      lowerMessage.includes("research report") ||
+      lowerMessage.includes("what is your report");
+    const wantsWatchlistAdd =
+      lowerMessage.includes("watchlist") &&
+      (lowerMessage.includes("add") || lowerMessage.includes("should i add"));
 
     if (!ticker) {
+      toolCalls.push({
+        toolName: "resolveTickerOrCompany",
+        input: {
+          query: request.message,
+          portfolioId: request.context.portfolioId,
+          watchlistId: request.context.watchlistId,
+        },
+        purpose: "Resolve ticker/company mention to a canonical ticker",
+      });
+
       missingContext.push("ticker");
       clarifyingQuestion = clarifyingQuestion ?? buildTickerClarifyingQuestion(tickerResolution);
     } else {
+      toolCalls.push({
+        toolName: "resolveTickerOrCompany",
+        input: {
+          query: ticker,
+          portfolioId: request.context.portfolioId,
+          watchlistId: request.context.watchlistId,
+        },
+        purpose: "Validate ticker resolution before analysis",
+      });
+
       toolCalls.push(
         {
           toolName: "getTickerResearchBundle",
+          input: {
+            ticker,
+            portfolioId: request.context.portfolioId,
+            watchlistId: request.context.watchlistId,
+          },
+          purpose: "Load full persisted ticker research context",
+        },
+        {
+          toolName: "getTickerDataQuality",
           input: { ticker },
-          purpose: "Load full ticker research context",
+          purpose: "Check missing/stale data caveats",
         },
         {
           toolName: "scoreTickerResearch",
@@ -2625,6 +3342,34 @@ function buildDeterministicPlan(
           purpose: "Score ticker deterministically",
         },
       );
+
+      if (wantsReport) {
+        toolCalls.push({
+          toolName: "generateTickerReport",
+          input: {
+            ticker,
+            useOpenAi: true,
+            includeScore: true,
+            includeAnalyst: true,
+            includeNews: true,
+            includeMacro: true,
+            includeGeopolitical: true,
+          },
+          purpose: "Generate structured ticker report",
+        });
+      }
+
+      if (wantsWatchlistAdd && request.context.watchlistId) {
+        toolCalls.push({
+          toolName: "addTickerToWatchlist",
+          input: {
+            watchlistId: request.context.watchlistId,
+            ticker,
+            status: "WATCHING",
+          },
+          purpose: "Add resolved ticker to watchlist",
+        });
+      }
     }
   }
 
@@ -3021,26 +3766,34 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
   if (planningIntent === "MARKET_CANDIDATE_DISCOVERY" && discoveryPresentation) {
     const watchlistId = asOptionalConfiguredString(effectiveRequest.context.watchlistId);
     if (watchlistId) {
-      const rankPayload = asRecord(
-        toolResults.find((result) => result.success && result.toolName === "rankDiscoveryCandidates")?.data,
+      const screeningPayload = asRecord(
+        toolResults.find((result) => result.success && result.toolName === "screenMarketCandidates")?.data,
       );
 
-      const rankedCandidates = asRecordList(rankPayload?.rankedCandidates);
-      const recommendedCandidates = asRecordList(rankPayload?.recommendedCandidates);
-      const actionableCandidates =
-        recommendedCandidates.length > 0
-          ? recommendedCandidates
-          : rankedCandidates.filter((candidate) => asBoolean(candidate.qualifiesForRecommendation) === true);
+      const actionableCandidates = asRecordList(screeningPayload?.candidates)
+        .filter((candidate) => {
+          const totalScore = asNumber(candidate.totalRecommendationScore) ?? 0;
+          const alreadyHeld = asBoolean(candidate.alreadyHeld) === true;
+          const alreadyInWatchlist = asBoolean(candidate.alreadyInWatchlist) === true;
+          const actionLabel = asString(candidate.actionLabel);
 
-      const candidatesToSuggest = actionableCandidates
-        .filter((candidate) => candidate.alreadyInWatchlist !== true)
+          return (
+            !alreadyHeld &&
+            !alreadyInWatchlist &&
+            totalScore >= 60 &&
+            !isHoldOffActionLabel(actionLabel)
+          );
+        })
         .slice(0, 3);
 
-      for (const candidate of candidatesToSuggest) {
+      for (const candidate of actionableCandidates) {
         const ticker = asString(candidate.ticker);
         if (!ticker) {
           continue;
         }
+
+        const recommendationScore = asNumber(candidate.totalRecommendationScore);
+        const priority = toWatchlistPriorityFromScore(recommendationScore);
 
         const actionExists = suggestedActions.some((action) =>
           action.toolName === "addTickerToWatchlist" &&
@@ -3057,8 +3810,66 @@ export async function runAgentChat(request: AgentChatRequest): Promise<AgentChat
           input: {
             watchlistId,
             ticker,
-            status: "CANDIDATE",
+            status: "WATCHING",
+            priority,
             source: "AGENT",
+            addedReason: toWatchlistAddedReason(candidate),
+          },
+          requiresConfirmation: true,
+        });
+      }
+    }
+  }
+
+  if (planningIntent === "CONFIRM_TOOL_EXECUTION") {
+    const confirmedAddResult = toolResults.find(
+      (result) => result.success && result.toolName === "addTickerToWatchlist" && result.data,
+    );
+
+    const confirmedAddPayload = asRecord(confirmedAddResult?.data);
+    const confirmedTicker =
+      asString(confirmedAddPayload?.ticker)
+      ?? asString(asRecord(confirmedAddPayload?.stock)?.ticker)
+      ?? asString(effectiveRequest.context.ticker)?.toUpperCase();
+    const confirmedWatchlistId =
+      asString(confirmedAddPayload?.watchlistId)
+      ?? asString(effectiveRequest.context.watchlistId);
+
+    if (confirmedWatchlistId) {
+      const hasRefreshSuggestion = suggestedActions.some((action) =>
+        action.toolName === "refreshWatchlistResearchData" &&
+        asString(action.input?.watchlistId) === confirmedWatchlistId,
+      );
+
+      if (!hasRefreshSuggestion) {
+        suggestedActions.push({
+          label: "Refresh watchlist research data",
+          toolName: "refreshWatchlistResearchData",
+          input: buildWatchlistRefreshInput(confirmedWatchlistId),
+          requiresConfirmation: true,
+        });
+      }
+    }
+
+    if (confirmedTicker) {
+      const hasReportSuggestion = suggestedActions.some((action) =>
+        action.toolName === "generateTickerReport" &&
+        asString(action.input?.ticker)?.toUpperCase() === confirmedTicker.toUpperCase(),
+      );
+
+      if (!hasReportSuggestion) {
+        suggestedActions.push({
+          label: `Generate report for ${confirmedTicker}`,
+          toolName: "generateTickerReport",
+          input: {
+            ticker: confirmedTicker,
+            watchlistId: confirmedWatchlistId,
+            useOpenAi: true,
+            includeScore: true,
+            includeAnalyst: true,
+            includeNews: true,
+            includeMacro: true,
+            includeGeopolitical: true,
           },
           requiresConfirmation: true,
         });

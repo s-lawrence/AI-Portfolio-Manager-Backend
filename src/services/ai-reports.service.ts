@@ -83,6 +83,9 @@ function clamp(value: number, min: number, max: number): number {
 const OPENAI_REPORT_PROMPT_VERSION = "openai-ticker-report-v1";
 const OPENAI_AVOID_DB_MAPPING: Recommendation = Recommendation.SELL;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const REPORT_CONTEXT_ARRAY_LIMIT = 5;
+const REPORT_DATA_GAP_LIMIT = 20;
+const DETERMINISTIC_FALLBACK_PROMPT_VERSION = "deterministic-fallback-v1";
 
 function toIsoOrNull(value: Date | string | null | undefined): string | null {
   if (!value) {
@@ -184,6 +187,109 @@ function summarizeOpenAiFailure(error: OpenAiAgentClientError): string {
   const stage = error.failure.stage;
   const code = error.failure.errorCode ? ` (${error.failure.errorCode})` : "";
   return `OpenAI report generation failed at ${stage}${code}; deterministic fallback used.`;
+}
+
+function recommendationFromDeterministicStance(
+  stance: string | null | undefined,
+): Recommendation {
+  if (!stance) {
+    return Recommendation.WATCH;
+  }
+
+  if (stance === "STRONG_CANDIDATE" || stance === "CANDIDATE") {
+    return Recommendation.BUY;
+  }
+
+  if (stance === "HOLD_OFF" || stance === "AVOID" || stance === "REDUCE") {
+    return Recommendation.SELL;
+  }
+
+  if (stance === "HOLD") {
+    return Recommendation.HOLD;
+  }
+
+  return Recommendation.WATCH;
+}
+
+function hasAnalystTargetData(context: TickerReportContext): boolean {
+  const analyst = context.analystContext;
+  if (!analyst) {
+    return false;
+  }
+
+  return (
+    analyst.priceTargetAverage != null ||
+    analyst.priceTargetConsensus != null ||
+    analyst.priceTargetHigh != null ||
+    analyst.priceTargetLow != null ||
+    analyst.targetMedian != null
+  );
+}
+
+function normalizeOpenAiReportForPolicy(args: {
+  report: OpenAiTickerReportOutput;
+  context: TickerReportContext;
+}): { report: OpenAiTickerReportOutput; warnings: string[] } {
+  const warnings: string[] = [];
+  const hasLowDataQuality = args.context.dataQuality.confidence === "LOW";
+
+  const normalizeNotes = (values: string[]): string[] => normalizeTextList(values, REPORT_CONTEXT_ARRAY_LIMIT);
+
+  let normalized: OpenAiTickerReportOutput = {
+    ...args.report,
+    ticker: args.context.ticker,
+    asOf: args.context.asOf,
+    bullCase: normalizeNotes(args.report.bullCase),
+    bearCase: normalizeNotes(args.report.bearCase),
+    keyCatalysts: normalizeNotes(args.report.keyCatalysts),
+    keyRisks: normalizeNotes(args.report.keyRisks),
+    valuationNotes: normalizeNotes(args.report.valuationNotes),
+    technicalNotes: normalizeNotes(args.report.technicalNotes),
+    analystNotes: normalizeNotes(args.report.analystNotes),
+    newsSentimentNotes: normalizeNotes(args.report.newsSentimentNotes),
+    earningsNotes: normalizeNotes(args.report.earningsNotes),
+    macroGeopoliticalNotes: normalizeNotes(args.report.macroGeopoliticalNotes),
+    portfolioFit: normalizeNotes(args.report.portfolioFit),
+    dataGaps: normalizeNotes(args.report.dataGaps),
+    watchItems: normalizeNotes(args.report.watchItems),
+    suggestedNextActions: normalizeNotes(args.report.suggestedNextActions),
+  };
+
+  if (hasLowDataQuality && normalized.conviction !== "LOW") {
+    normalized = {
+      ...normalized,
+      conviction: "LOW",
+    };
+    warnings.push("OpenAI conviction was normalized to LOW because data quality is poor.");
+  }
+
+  const evidenceMixed = normalized.bullCase.length > 0 && normalized.bearCase.length > 0;
+  if (evidenceMixed && (normalized.recommendation === "BUY" || normalized.recommendation === "SELL")) {
+    normalized = {
+      ...normalized,
+      recommendation: "WATCH",
+    };
+    warnings.push("OpenAI recommendation was normalized to WATCH because evidence is mixed.");
+  }
+
+  if (!hasAnalystTargetData(args.context)) {
+    const mentionsTarget = [...normalized.analystNotes, ...normalized.valuationNotes].some((value) =>
+      /price\s*target|\btargets?\b/i.test(value),
+    );
+
+    if (mentionsTarget) {
+      normalized = {
+        ...normalized,
+        analystNotes: ["Analyst price-target data is unavailable in current backend snapshots."],
+      };
+      warnings.push("Analyst price-target language was removed because no analyst target data exists in context.");
+    }
+  }
+
+  return {
+    report: normalized,
+    warnings,
+  };
 }
 
 function mapOpenAiRecommendation(
@@ -1090,7 +1196,9 @@ function buildPortfolioContext(args: {
     baseCurrency: "CAD",
     holdingCount: overview.holdingCount,
     matchingHoldingsCount: matching.length,
-    matchingHoldingIds: matching.map((holding) => holding.id),
+    matchingHoldingIds: matching
+      .map((holding) => holding.id)
+      .slice(0, REPORT_CONTEXT_ARRAY_LIMIT),
     matchingMarketValueCad,
     matchingWeightPercent,
   };
@@ -1114,10 +1222,41 @@ function buildWatchlistContext(args: {
     watchlistName: watchlist.name,
     itemCount: watchlist.items.length,
     matchingItemsCount: matchingItems.length,
-    matchingStatuses: normalizeTextList(matchingItems.map((item) => item.status), 10),
-    matchingPriorities: normalizeTextList(matchingItems.map((item) => item.priority), 10),
-    thesisSamples: normalizeTextList(matchingItems.map((item) => item.thesis), 3),
+    matchingStatuses: normalizeTextList(
+      matchingItems.map((item) => item.status),
+      REPORT_CONTEXT_ARRAY_LIMIT,
+    ),
+    matchingPriorities: normalizeTextList(
+      matchingItems.map((item) => item.priority),
+      REPORT_CONTEXT_ARRAY_LIMIT,
+    ),
+    thesisSamples: normalizeTextList(
+      matchingItems.map((item) => item.thesis),
+      REPORT_CONTEXT_ARRAY_LIMIT,
+    ),
   };
+}
+
+function resolveContextAsOf(bundle: NonNullable<Awaited<ReturnType<typeof getStockResearchBundle>>>): string {
+  const candidateTimestamps = [
+    bundle.latestPriceSnapshot?.capturedAt,
+    bundle.latestTechnicalSnapshot?.capturedAt,
+    bundle.latestFundamentalSnapshot?.capturedAt,
+    bundle.latestAnalystSnapshot?.capturedAt,
+    bundle.nextEarningsEvent?.earningsDate,
+    bundle.latestAIReport?.reportDate,
+    ...bundle.recentAnalystActions.map((action) => action.eventDate),
+    ...bundle.recentNews.map((article) => article.publishedAt),
+  ]
+    .map((value) => (value instanceof Date ? value : value ? new Date(value) : null))
+    .filter((value): value is Date => value != null && !Number.isNaN(value.getTime()));
+
+  if (candidateTimestamps.length === 0) {
+    return new Date().toISOString();
+  }
+
+  candidateTimestamps.sort((left, right) => right.getTime() - left.getTime());
+  return candidateTimestamps[0].toISOString();
 }
 
 function buildDataGaps(args: {
@@ -1144,7 +1283,7 @@ function buildDataGaps(args: {
     gaps.push("No price snapshot is available for this ticker.");
   }
 
-  return normalizeTextList(gaps, 20);
+  return normalizeTextList(gaps, REPORT_DATA_GAP_LIMIT);
 }
 
 export async function buildTickerReportContext(
@@ -1182,7 +1321,7 @@ export async function buildTickerReportContext(
 
   const topHeadlines = includeOptionEnabled(options.includeNews)
     ? bundle.recentNews
-      .slice(0, 5)
+      .slice(0, REPORT_CONTEXT_ARRAY_LIMIT)
       .map((article) => ({
         headline: article.headline,
         publishedAt: article.publishedAt.toISOString(),
@@ -1210,7 +1349,7 @@ export async function buildTickerReportContext(
     companyName: stock.companyName ?? null,
     exchange: stock.exchange ?? null,
     currency: stock.currency ?? null,
-    asOf: new Date().toISOString(),
+    asOf: resolveContextAsOf(bundle),
     dataQuality: {
       missingData: dataQuality.missingData,
       staleDataWarnings: dataQuality.staleDataWarnings,
@@ -1293,7 +1432,7 @@ export async function buildTickerReportContext(
       : null,
     recentAnalystActions: includeOptionEnabled(options.includeAnalyst)
       ? bundle.recentAnalystActions
-        .slice(0, 10)
+        .slice(0, REPORT_CONTEXT_ARRAY_LIMIT)
         .map((action) => ({
           actionType: action.actionType,
           firm: action.firm ?? null,
@@ -1382,6 +1521,14 @@ function mapOpenAiReportToPersistence(args: {
   });
 
   const scoreSummary = args.modelReport.scoreSummary;
+  const llmGeneratedAt = new Date().toISOString();
+  const dataQualitySummary = {
+    confidence: args.context.dataQuality.confidence,
+    missingDataCount: args.context.dataQuality.missingData.length,
+    staleDataWarningCount: args.context.dataQuality.staleDataWarnings.length,
+    missingData: args.context.dataQuality.missingData,
+    staleDataWarnings: args.context.dataQuality.staleDataWarnings,
+  };
   const shortTermOutlook = joinNotesOrNull([
     ...args.modelReport.watchItems,
     ...args.modelReport.keyCatalysts,
@@ -1432,9 +1579,12 @@ function mapOpenAiReportToPersistence(args: {
     sourceReferences: {
       reportMode: "OPENAI_STRUCTURED",
       fallbackUsed: args.fallbackUsed,
+      generatedBy: "OPENAI_REPORT_MODEL",
       dataQualityConfidence: args.context.dataQuality.confidence,
       dataQualityMissingData: args.context.dataQuality.missingData,
       dataQualityStaleDataWarnings: args.context.dataQuality.staleDataWarnings,
+      dataQualitySummary,
+      llmGeneratedAt,
       disclaimer: args.modelReport.disclaimer,
       generatedAsOf: args.modelReport.asOf,
     },
@@ -1443,6 +1593,9 @@ function mapOpenAiReportToPersistence(args: {
     rawModelOutput: {
       reportMode: "OPENAI_STRUCTURED",
       mappedRecommendation: recommendation,
+      generatedBy: "OPENAI_REPORT_MODEL",
+      dataQualitySummary,
+      llmGeneratedAt,
       openAiOutput: args.modelReport,
       scoreSummary: {
         compositeScore: scoreSummary.compositeScore,
@@ -1467,22 +1620,39 @@ async function attemptOpenAiReport(args: {
   context: TickerReportContext;
   stockId: string;
   holdingId: string | null;
-}): Promise<{
-  report: AIReport;
-  reportMode: TickerReportMode;
-  fallbackUsed: boolean;
-  warnings: string[];
-  dataGaps: string[];
-  modelName?: string;
-} | null> {
+}): Promise<
+  | {
+    success: true;
+    report: AIReport;
+    reportMode: TickerReportMode;
+    fallbackUsed: boolean;
+    warnings: string[];
+    dataGaps: string[];
+    modelName: string;
+  }
+  | {
+    success: false;
+    reportMode: TickerReportMode;
+    fallbackUsed: true;
+    warnings: string[];
+    dataGaps: string[];
+    attemptedModelName?: string;
+  }
+> {
   try {
     const generated = await generateOpenAiTickerReport({
       context: args.context,
     });
 
     const warnings: string[] = [];
+    const normalized = normalizeOpenAiReportForPolicy({
+      report: generated.report,
+      context: args.context,
+    });
+    warnings.push(...normalized.warnings);
+
     const payload = mapOpenAiReportToPersistence({
-      modelReport: generated.report,
+      modelReport: normalized.report,
       context: args.context,
       stockId: args.stockId,
       holdingId: args.holdingId,
@@ -1493,39 +1663,198 @@ async function attemptOpenAiReport(args: {
 
     const report = await createOrUpdateDailyReport(payload);
     return {
+      success: true,
       report,
       reportMode: "OPENAI_STRUCTURED",
       fallbackUsed: generated.usedFallbackModel,
       warnings,
       dataGaps: normalizeTextList(
-        [...args.context.dataQuality.missingData, ...generated.report.dataGaps],
-        20,
+        [...args.context.dataQuality.missingData, ...normalized.report.dataGaps],
+        REPORT_DATA_GAP_LIMIT,
       ),
       modelName: generated.modelName,
     };
   } catch (error) {
     if (error instanceof OpenAiAgentClientError) {
       return {
-        report: null as never,
+        success: false,
         reportMode: "DETERMINISTIC_FALLBACK",
         fallbackUsed: true,
         warnings: [summarizeOpenAiFailure(error)],
-        dataGaps: normalizeTextList(args.context.dataQuality.missingData, 20),
-        modelName: undefined,
+        dataGaps: normalizeTextList(args.context.dataQuality.missingData, REPORT_DATA_GAP_LIMIT),
+        attemptedModelName: error.failure.modelName,
       };
     }
 
     return {
-      report: null as never,
+      success: false,
       reportMode: "DETERMINISTIC_FALLBACK",
       fallbackUsed: true,
       warnings: [
         `OpenAI report generation failed unexpectedly: ${toWarningMessage(error)}. Deterministic fallback used.`,
       ],
-      dataGaps: normalizeTextList(args.context.dataQuality.missingData, 20),
-      modelName: undefined,
+      dataGaps: normalizeTextList(args.context.dataQuality.missingData, REPORT_DATA_GAP_LIMIT),
+      attemptedModelName: env.OPENAI_REPORT_MODEL,
     };
   }
+}
+
+function buildDeterministicFallbackReportInput(args: {
+  context: TickerReportContext;
+  stockId: string;
+  holdingId: string | null;
+  fallbackUsed: boolean;
+  attemptedModelName?: string;
+  warnings: string[];
+}): Parameters<typeof createOrUpdateDailyReport>[0] {
+  const score = args.context.deterministicScore;
+  const dataGaps = normalizeTextList(
+    [...args.context.dataQuality.missingData, ...args.context.dataQuality.staleDataWarnings],
+    REPORT_DATA_GAP_LIMIT,
+  );
+  const recommendation = recommendationFromDeterministicStance(score?.suggestedStance);
+  const conviction = args.context.dataQuality.confidence;
+  const convictionLabel = conviction === "HIGH" ? "HIGH" : conviction === "MEDIUM" ? "MEDIUM" : "LOW";
+
+  const confidenceScore = clamp(
+    conviction === "HIGH" ? 0.72 : conviction === "MEDIUM" ? 0.58 : 0.42,
+    0.1,
+    0.95,
+  );
+
+  const riskScore = mapOpenAiRiskScore({
+    recommendation,
+    conviction: convictionLabel,
+    dataQualityConfidence: args.context.dataQuality.confidence,
+    dailyChangePercent: args.context.marketSnapshot?.changePercent ?? null,
+  });
+
+  const bullishFactors = normalizeTextList(score?.bullishFactors ?? [], REPORT_CONTEXT_ARRAY_LIMIT);
+  const bearishFactors = normalizeTextList(
+    [...(score?.bearishFactors ?? []), ...args.context.dataQuality.staleDataWarnings],
+    REPORT_CONTEXT_ARRAY_LIMIT,
+  );
+
+  const technicalSummary = score
+    ? `Technical score ${score.componentScores.technicalScore.toFixed(1)}; valuation score ${score.componentScores.valuationScore.toFixed(1)}.`
+    : "Deterministic technical score unavailable due limited persisted snapshots.";
+  const fundamentalSummary = score
+    ? `Fundamental score ${score.componentScores.fundamentalScore.toFixed(1)}; analyst score ${score.componentScores.analystScore.toFixed(1)}.`
+    : "Deterministic fundamental score unavailable due limited persisted snapshots.";
+  const newsSummary = args.context.newsContext
+    ? `News sentiment from ${args.context.newsContext.totalArticles} persisted article(s): bullish ${args.context.newsContext.bullishCount}, bearish ${args.context.newsContext.bearishCount}.`
+    : "News sentiment context unavailable in persisted snapshots.";
+  const earningsSummary = args.context.earningsContext?.nextEarningsDate
+    ? `Next earnings event: ${args.context.earningsContext.nextEarningsDate}.`
+    : "No upcoming earnings event in persisted snapshots.";
+  const macroGeopoliticalSummary = normalizeTextList(
+    [
+      args.context.macroContext?.summary ?? null,
+      args.context.geopoliticalContext?.message ?? null,
+    ],
+    2,
+  ).join(" ") || "Macro/geopolitical context unavailable.";
+
+  const reportDisclaimer =
+    "Decision-support label only, not a buy/sell instruction. Validate against live brokerage and issuer filings.";
+  const dataQualitySummary = {
+    confidence: args.context.dataQuality.confidence,
+    missingDataCount: args.context.dataQuality.missingData.length,
+    staleDataWarningCount: args.context.dataQuality.staleDataWarnings.length,
+    missingData: args.context.dataQuality.missingData,
+    staleDataWarnings: args.context.dataQuality.staleDataWarnings,
+  };
+
+  const generatedBy = "DETERMINISTIC_REPORT_FALLBACK";
+  const llmGeneratedAt = args.attemptedModelName ? new Date().toISOString() : null;
+  const sentiment = recommendation === Recommendation.BUY
+    ? Sentiment.BULLISH
+    : recommendation === Recommendation.SELL
+      ? Sentiment.BEARISH
+      : bullishFactors.length > 0 && bearishFactors.length > 0
+        ? Sentiment.MIXED
+        : Sentiment.NEUTRAL;
+
+  return {
+    stockId: args.stockId,
+    holdingId: args.holdingId,
+    reportDate: new Date(),
+    recommendation,
+    sentiment,
+    confidenceScore,
+    riskScore,
+    riskLevel: riskLevelFromScore(riskScore),
+    currentPrice: args.context.marketSnapshot?.price ?? null,
+    dailyChangePercent: args.context.marketSnapshot?.changePercent ?? null,
+    shortTermOutlook: score
+      ? `Composite score ${score.compositeScore.toFixed(1)} (${score.actionLabel}).`
+      : "Composite score unavailable due missing persisted data.",
+    mediumTermOutlook: joinNotesOrNull([
+      ...bullishFactors,
+      ...bearishFactors,
+    ]),
+    longTermOutlook: joinNotesOrNull([
+      args.context.macroContext?.summary,
+      args.context.geopoliticalContext?.message,
+    ]),
+    keyTakeaway: score
+      ? `${args.context.ticker} is currently labeled '${score.actionLabel}' with ${convictionLabel} confidence from persisted backend snapshots only.`
+      : `${args.context.ticker} currently has insufficient persisted signal for a high-conviction label.`,
+    bullishFactors,
+    bearishFactors,
+    technicalSummary,
+    fundamentalSummary,
+    newsSummary,
+    earningsSummary,
+    macroGeopoliticalSummary,
+    whatChanged: joinNotesOrNull([
+      score?.explanation,
+      ...args.warnings,
+    ]),
+    whatWouldChangeRecommendation: joinNotesOrNull([
+      ...dataGaps.map((value) => `Resolve: ${value}`),
+      reportDisclaimer,
+    ]),
+    sourceReferences: {
+      reportMode: "DETERMINISTIC_FALLBACK",
+      fallbackUsed: args.fallbackUsed,
+      generatedBy,
+      dataQualitySummary,
+      llmGeneratedAt,
+      disclaimer: reportDisclaimer,
+      attemptedModelName: args.attemptedModelName ?? null,
+      generatedAsOf: args.context.asOf,
+    },
+    modelName: args.attemptedModelName ?? "deterministic-fallback-service",
+    promptVersion: DETERMINISTIC_FALLBACK_PROMPT_VERSION,
+    rawModelOutput: {
+      reportMode: "DETERMINISTIC_FALLBACK",
+      generatedBy,
+      fallbackUsed: args.fallbackUsed,
+      dataQualitySummary,
+      llmGeneratedAt,
+      attemptedModelName: args.attemptedModelName ?? null,
+      scoreSummary: score
+        ? {
+            compositeScore: score.compositeScore,
+            technicalScore: score.componentScores.technicalScore,
+            fundamentalScore: score.componentScores.fundamentalScore,
+            valuationScore: score.componentScores.valuationScore,
+            analystScore: score.componentScores.analystScore,
+            newsScore: score.componentScores.newsScore,
+            dataQualityScore: score.componentScores.dataQualityScore,
+          }
+        : null,
+      bullishFactors,
+      bearishFactors,
+      keyRisks: normalizeTextList(
+        [...bearishFactors, ...args.context.dataQuality.staleDataWarnings],
+        REPORT_CONTEXT_ARRAY_LIMIT,
+      ),
+      dataGaps,
+      disclaimer: reportDisclaimer,
+    },
+  };
 }
 
 export async function generateTickerReport(
@@ -1558,27 +1887,34 @@ export async function generateTickerReport(
     includeScore: options.includeScore,
   });
 
-  const useOpenAi = options.useOpenAi === true && Boolean(env.OPENAI_API_KEY);
+  const requestedUseOpenAi = options.useOpenAi !== false;
+  const openAiConfigured = env.OPENAI_AGENT_PROVIDER_ENABLED === true && Boolean(env.OPENAI_API_KEY);
   const warnings = [...refreshWarnings];
 
   let reportMode: TickerReportMode = "DETERMINISTIC_FALLBACK";
   let fallbackUsed = false;
   let modelName: string | undefined;
   let report: AIReport | null = null;
+  let attemptedModelName: string | undefined;
 
-  if (options.useOpenAi === true && !env.OPENAI_API_KEY) {
+  if (requestedUseOpenAi && env.OPENAI_AGENT_PROVIDER_ENABLED !== true) {
+    warnings.push("OpenAI requested but provider is disabled; deterministic fallback used.");
+    fallbackUsed = true;
+  }
+
+  if (requestedUseOpenAi && env.OPENAI_AGENT_PROVIDER_ENABLED === true && !env.OPENAI_API_KEY) {
     warnings.push("OpenAI requested but OPENAI_API_KEY is not configured; deterministic fallback used.");
     fallbackUsed = true;
   }
 
-  if (useOpenAi) {
+  if (requestedUseOpenAi && openAiConfigured) {
     const openAiResult = await attemptOpenAiReport({
       context,
       stockId: stock.id,
       holdingId: holding?.id ?? null,
     });
 
-    if (openAiResult?.report) {
+    if (openAiResult.success) {
       report = openAiResult.report;
       reportMode = openAiResult.reportMode;
       fallbackUsed = openAiResult.fallbackUsed;
@@ -1586,15 +1922,24 @@ export async function generateTickerReport(
       warnings.push(...openAiResult.warnings);
     } else {
       fallbackUsed = true;
-      warnings.push(...(openAiResult?.warnings ?? []));
+      attemptedModelName = openAiResult.attemptedModelName ?? env.OPENAI_REPORT_MODEL;
+      warnings.push(...openAiResult.warnings);
     }
   }
 
   if (!report) {
-    const fallbackResult = await generateMockTickerReport(normalizedTicker, holding?.id);
-    report = fallbackResult.report;
+    const fallbackPayload = buildDeterministicFallbackReportInput({
+      context,
+      stockId: stock.id,
+      holdingId: holding?.id ?? null,
+      fallbackUsed: fallbackUsed || requestedUseOpenAi,
+      attemptedModelName,
+      warnings,
+    });
+
+    report = await createOrUpdateDailyReport(fallbackPayload);
     reportMode = "DETERMINISTIC_FALLBACK";
-    modelName = report.modelName ?? "deterministic-mock-service";
+    modelName = report.modelName ?? attemptedModelName ?? "deterministic-fallback-service";
   }
 
   let predictions: Prediction[] = [];
@@ -1618,10 +1963,10 @@ export async function generateTickerReport(
     predictions,
     reportMode,
     fallbackUsed,
-    warnings: normalizeTextList(warnings, 20),
+    warnings: normalizeTextList(warnings, REPORT_DATA_GAP_LIMIT),
     dataGaps: normalizeTextList(
       [...context.dataQuality.missingData, ...context.dataQuality.staleDataWarnings],
-      20,
+      REPORT_DATA_GAP_LIMIT,
     ),
     modelName,
   };

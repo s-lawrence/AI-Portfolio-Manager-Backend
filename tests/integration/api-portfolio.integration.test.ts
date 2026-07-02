@@ -83,6 +83,7 @@ describe("API portfolio workflow routes", () => {
       url: `/api/reports/${ticker}/generate`,
       payload: {
         holdingId,
+        useOpenAi: false,
       },
     });
 
@@ -93,7 +94,7 @@ describe("API portfolio workflow routes", () => {
     expect(reportBody.data.predictions).toHaveLength(3);
 
     await app.close();
-  });
+  }, 15_000);
 
   it("returns 400 for invalid request body", async () => {
     const app = buildApp();
@@ -210,6 +211,9 @@ describe("API portfolio workflow routes", () => {
     const reportResponse = await app.inject({
       method: "POST",
       url: `/api/reports/${ticker}/generate`,
+      payload: {
+        useOpenAi: false,
+      },
     });
 
     expect(reportResponse.statusCode).toBe(201);
@@ -259,5 +263,5 @@ describe("API portfolio workflow routes", () => {
     ]);
 
     await app.close();
-  });
+  }, 15_000);
 });

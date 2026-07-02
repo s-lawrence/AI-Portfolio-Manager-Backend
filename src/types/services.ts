@@ -271,6 +271,14 @@ export type SuggestedResearchStance =
   | "HOLD_OFF"
   | "AVOID";
 
+export type ResearchActionLabel =
+  | "Strong review candidate"
+  | "Review candidate"
+  | "Monitor"
+  | "Hold off / insufficient signal";
+
+export type ResearchScoreConfidence = "HIGH" | "MEDIUM" | "LOW";
+
 export interface TickerResearchComponentScores {
   technicalScore: number;
   fundamentalScore: number;
@@ -288,11 +296,37 @@ export interface TickerResearchScoreResult {
   componentScores: TickerResearchComponentScores;
   compositeScore: number;
   suggestedStance: SuggestedResearchStance;
+  actionLabel: ResearchActionLabel;
   bullishFactors: string[];
   bearishFactors: string[];
   missingData: string[];
   staleDataWarnings: string[];
+  confidence: ResearchScoreConfidence;
   explanation: string;
+}
+
+export interface ResolveTickerOrCompanyCandidate {
+  ticker: string;
+  companyName?: string;
+  exchange?: string;
+  currency?: string;
+  country?: string;
+  stockId?: string;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  ambiguityReason?: string;
+  alreadyHeld?: boolean;
+  alreadyInWatchlist?: boolean;
+}
+
+export interface ResolveTickerOrCompanyResult {
+  query: string;
+  normalizedQuery: string;
+  explicitTicker?: string;
+  resolvedTicker?: string;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  isAmbiguous: boolean;
+  ambiguityReason?: string;
+  candidates: ResolveTickerOrCompanyCandidate[];
 }
 
 export interface WatchlistScoredItem {
@@ -407,6 +441,40 @@ export interface RefreshWatchlistResearchDataResult {
   tickersSkipped: number;
   plannedTickers?: string[];
   perTickerResults: WatchlistRefreshPerTickerResult[];
+  warnings: string[];
+}
+
+export interface RefreshTickerResearchDataOptions {
+  includeMarketData?: boolean;
+  includeHistorical?: boolean;
+  includeFundamentals?: boolean;
+  includeNews?: boolean;
+  includeEarnings?: boolean;
+  includeAnalyst?: boolean;
+  generateReport?: boolean;
+}
+
+export interface RefreshTickerResearchDataSectionResult {
+  attempted: boolean;
+  success: boolean;
+  warnings: string[];
+  error?: string;
+  summary?: Record<string, unknown>;
+}
+
+export interface RefreshTickerResearchDataResult {
+  ticker: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  sections: {
+    marketData: RefreshTickerResearchDataSectionResult;
+    fundamentals: RefreshTickerResearchDataSectionResult;
+    news: RefreshTickerResearchDataSectionResult;
+    earnings: RefreshTickerResearchDataSectionResult;
+    analyst: RefreshTickerResearchDataSectionResult;
+    report: RefreshTickerResearchDataSectionResult;
+  };
   warnings: string[];
 }
 
@@ -1205,6 +1273,81 @@ export interface DiscoveryCandidatesResult {
   capturedAt?: string;
   warnings: string[];
   items: MarketDiscoverySnapshot[];
+}
+
+export type AgentInvestmentObjective =
+  | "GROWTH"
+  | "VALUE"
+  | "DIVIDEND"
+  | "QUALITY"
+  | "LOW_VOLATILITY"
+  | "MOMENTUM"
+  | "DIVERSIFICATION";
+
+export type AgentInvestmentTimeHorizon = "SHORT" | "MEDIUM" | "LONG";
+
+export type AgentInvestmentRiskTolerance = "LOW" | "MEDIUM" | "HIGH";
+
+export interface AgentInvestmentPreferences {
+  objective?: AgentInvestmentObjective;
+  timeHorizon?: AgentInvestmentTimeHorizon;
+  riskTolerance?: AgentInvestmentRiskTolerance;
+  preferredSectors?: string[];
+  excludedSectors?: string[];
+  preferredCurrencies?: string[];
+  maxSinglePositionWeight?: number;
+  wantsIncome?: boolean;
+  wantsCanada?: boolean;
+  wantsUS?: boolean;
+}
+
+export interface ScreenMarketCandidatesOptions {
+  portfolioId?: string;
+  watchlistId?: string;
+  preferences?: AgentInvestmentPreferences;
+  limit?: number;
+  excludeExistingHoldings?: boolean;
+  excludeExistingWatchlistItems?: boolean;
+}
+
+export interface ScreenMarketCandidate {
+  rank: number;
+  ticker: string;
+  companyName: string | null;
+  score: number;
+  preferenceFitScore: number;
+  portfolioFitScore: number;
+  totalRecommendationScore: number;
+  actionLabel: string;
+  why: string[];
+  cautions: string[];
+  missingData: string[];
+  alreadyHeld: boolean;
+  alreadyInWatchlist: boolean;
+  suggestedAction: "ADD_TO_WATCHLIST" | "NO_ACTION";
+}
+
+export interface RejectedScreenMarketCandidate {
+  ticker: string;
+  reason: string;
+  score?: number;
+  actionLabel?: string;
+  missingData: string[];
+  alreadyHeld: boolean;
+  alreadyInWatchlist: boolean;
+}
+
+export interface ScreenMarketCandidatesResult {
+  screenedCount: number;
+  qualifiedCount: number;
+  candidates: ScreenMarketCandidate[];
+  rejectedCandidates: RejectedScreenMarketCandidate[];
+  assumptions: string[];
+  clarifyingQuestion?: string;
+  suggestedRefreshActions: string[];
+  preferencesApplied: Required<
+    Pick<AgentInvestmentPreferences, "objective" | "timeHorizon" | "riskTolerance">
+  > & Omit<AgentInvestmentPreferences, "objective" | "timeHorizon" | "riskTolerance">;
 }
 
 export interface RankDiscoveryCandidatesOptions {

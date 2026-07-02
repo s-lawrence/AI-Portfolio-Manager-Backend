@@ -12,6 +12,8 @@ import {
   type PortfolioOverviewHoldingSummary,
   type PortfolioRankedHolding,
   type PortfolioRankedSkippedHolding,
+  type ResearchActionLabel,
+  type ResearchScoreConfidence,
   type SuggestedResearchStance,
   type TickerResearchComponentScores,
   type TickerDataQualityResult,
@@ -122,6 +124,71 @@ function stanceFromComposite(compositeScore: number): SuggestedResearchStance {
   }
 
   return "AVOID";
+}
+
+function actionLabelFromComposite(compositeScore: number): ResearchActionLabel {
+  if (compositeScore >= 70) {
+    return "Strong review candidate";
+  }
+
+  if (compositeScore >= 60) {
+    return "Review candidate";
+  }
+
+  if (compositeScore >= 50) {
+    return "Monitor";
+  }
+
+  return "Hold off / insufficient signal";
+}
+
+function confidenceFromDataQuality(input: {
+  dataQualityScore: number;
+  missingDataCount: number;
+  staleDataWarningCount: number;
+  essentiallyNoUsableData: boolean;
+}): ResearchScoreConfidence {
+  if (input.essentiallyNoUsableData) {
+    return "LOW";
+  }
+
+  if (
+    input.dataQualityScore >= 75 &&
+    input.missingDataCount <= 1 &&
+    input.staleDataWarningCount <= 1
+  ) {
+    return "HIGH";
+  }
+
+  if (input.dataQualityScore >= 55) {
+    return "MEDIUM";
+  }
+
+  return "LOW";
+}
+
+function hasEssentiallyNoUsableTickerData(bundle: StockResearchBundle): boolean {
+  const hasPrice = bundle.latestPriceSnapshot != null;
+  const hasTechnical = bundle.latestTechnicalSnapshot != null;
+  const hasFundamental = bundle.latestFundamentalSnapshot != null;
+  const hasAnalyst =
+    bundle.latestAnalystSnapshot != null ||
+    bundle.recentAnalystActions.length > 0;
+  const hasNews = bundle.recentNews.length > 0;
+  const hasEarnings = bundle.nextEarningsEvent != null;
+  const hasReport = bundle.latestAIReport != null;
+
+  const availableSignals = [
+    hasPrice,
+    hasTechnical,
+    hasFundamental,
+    hasAnalyst,
+    hasNews,
+    hasEarnings,
+    hasReport,
+  ].filter(Boolean).length;
+
+  return availableSignals <= 1;
 }
 
 interface MacroRiskContext {
@@ -777,8 +844,21 @@ export async function scoreTickerResearch(ticker: string): Promise<TickerResearc
     dataQualityScore,
   };
 
-  const compositeScore = weightedComposite(componentScores);
-  const suggestedStance = stanceFromComposite(compositeScore);
+  const essentiallyNoUsableData = hasEssentiallyNoUsableTickerData(bundle);
+  const rawCompositeScore = weightedComposite(componentScores);
+  const compositeScore = essentiallyNoUsableData
+    ? Math.min(rawCompositeScore, 45)
+    : rawCompositeScore;
+  const suggestedStance = essentiallyNoUsableData
+    ? "HOLD_OFF"
+    : stanceFromComposite(compositeScore);
+  const actionLabel = actionLabelFromComposite(compositeScore);
+  const confidence = confidenceFromDataQuality({
+    dataQualityScore,
+    missingDataCount: missingData.length,
+    staleDataWarningCount: staleDataWarnings.length,
+    essentiallyNoUsableData,
+  });
 
   const bullishFactors = dedupe([
     ...technical.bullish,
@@ -802,8 +882,13 @@ export async function scoreTickerResearch(ticker: string): Promise<TickerResearc
     "Deterministic weighted score from local backend data only (no LLM calls).",
     "Component weights: technical 16%, fundamental 18%, valuation 14%, analyst 14%, news 12%, macro risk 10%, earnings risk 8%, data quality 8%.",
     "Valuation signals are conservative and are not sector-relative fair-value estimates.",
+    essentiallyNoUsableData
+      ? "Coverage is extremely limited; action label defaults to hold-off until more persisted data is available."
+      : "",
     "Output is decision support, not investment advice.",
-  ].join(" ");
+  ]
+    .filter((part) => part.trim().length > 0)
+    .join(" ");
 
   return {
     ticker: normalizedTicker,
@@ -811,10 +896,12 @@ export async function scoreTickerResearch(ticker: string): Promise<TickerResearc
     componentScores,
     compositeScore,
     suggestedStance,
+    actionLabel,
     bullishFactors,
     bearishFactors,
     missingData,
     staleDataWarnings,
+    confidence,
     explanation,
   };
 }

@@ -62,20 +62,24 @@ Global policy:
 | toolName | category | riskLevel | executionMode | required input fields | dryRun behavior | output summary fields (`dataSummary`) | known limitations |
 |---|---|---|---|---|---|---|---|
 | `getPortfolioOverview` | Portfolio Read | `READ_ONLY` | `AUTO_ALLOWED` | `portfolioId` | Executes normally | `portfolioId`, `totalMarketValueCad`, `holdingsCount`, `missingFxOrCurrencyIssuesCount` | Depends on existing persisted holdings/prices/FX coverage |
-| `getTickerResearchBundle` | Ticker Read | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | `ticker`, `latestPrice`, `recommendation`, `analystConsensus`, `missingDataCategories` | Freshness depends on prior ingestion |
+| `resolveTickerOrCompany` | Ticker Resolution | `READ_ONLY` | `AUTO_ALLOWED` | `query` | Executes normally | `query`, `resolvedTicker`, `confidence`, `isAmbiguous`, `candidateCount`, `topCandidates` | Ambiguous short symbols are intentionally not auto-selected |
+| `getTickerResearchBundle` | Ticker Read | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | `ticker`, `price`, `marketCap`, `recommendation`, `reportId`, `compositeScore`, `analystConsensus`, `missingDataCount`, `staleDataWarningsCount` | Freshness depends on prior ingestion |
 | `getWatchlistResearchBundle` | Watchlist Read | `READ_ONLY` | `AUTO_ALLOWED` | `watchlistId` | Executes normally | `watchlistId`, `itemCount`, `tickersWithUsefulResearch`, `tickersMissingData` | Uses persisted research only |
 | `getDiscoveryCandidates` | Discovery Read | `READ_ONLY` | `AUTO_ALLOWED` | `category` | Executes normally | `category`, `candidateCount`, `topTickers`, `capturedAt`, `warningCount` | Snapshot quality/freshness depends on prior discovery refresh |
 | `rankDiscoveryCandidates` | Discovery Ranking | `READ_ONLY` | `AUTO_ALLOWED` | none (`category`, `portfolioId`, `watchlistId` optional) | Executes normally | `category`, `totalCandidates`, `scoredCandidatesCount`, `skippedCandidatesCount`, `topRankedTickers`, `warningCount`, `suggestedRefreshActions` | Deterministic scoring from persisted data only; excludes existing holdings/watchlist items by options |
+| `screenMarketCandidates` | Discovery Screening | `READ_ONLY` | `AUTO_ALLOWED` | none (`portfolioId`, `watchlistId`, `preferences`, `limit` optional) | Executes normally | `screenedCount`, `qualifiedCount`, `rejectedCount`, `topCandidates`, `assumptions`, `clarifyingQuestion`, `suggestedRefreshActions` | Uses persisted backend snapshots + deterministic scoring only; never invents tickers |
 | `getGeopoliticalSummary` | Geopolitical Read | `READ_ONLY` | `AUTO_ALLOWED` | none | Executes normally | `totalEvents`, `sentimentMix`, `topHeadlines`, `topRisks`, optional `message`, optional `suggestedActions` | Reads persisted local GDELT context only; empty local data should suggest refresh |
 | `getLatestAnalystContext` | Analyst Read | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | fallback summary (`toolName`, `hasData`) | Detailed payload remains in `data`; summary is intentionally minimal |
-| `scoreTickerResearch` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | `ticker`, `compositeScore`, `suggestedStance`, `topBullishFactors`, `topBearishFactors`, `missingDataCount` | Heuristic aid only; not investment advice |
-| `scoreWatchlist` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `watchlistId` | Executes normally | `totalItems`, `activeItemsCount`, `scoredItemsCount`, `skippedItemsCount`, `topRankedTickers` | Quality constrained by per-ticker coverage |
+| `scoreTickerResearch` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | `ticker`, `compositeScore`, `suggestedStance`, `actionLabel`, `confidence`, `topBullishFactors`, `topBearishFactors`, `missingDataCount` | Heuristic aid only; not investment advice |
+| `rankWatchlist` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `watchlistId` | Executes normally | `totalItems`, `activeItemsCount`, `scoredItemsCount`, `skippedItemsCount`, `topRankedTickers` | Canonical alias for `scoreWatchlist` |
+| `scoreWatchlist` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `watchlistId` | Executes normally | `totalItems`, `activeItemsCount`, `scoredItemsCount`, `skippedItemsCount`, `topRankedTickers` | Backward-compat alias; same behavior as `rankWatchlist` |
 | `getTickerDataQuality` | Data Quality Read | `READ_ONLY` | `AUTO_ALLOWED` | `ticker` | Executes normally | `ticker`, `missingDataCount`, `staleDataWarningCount`, `suggestedRefreshActions` | Diagnostic-only; no provider calls |
 | `getWatchlistDataQuality` | Data Quality Read | `READ_ONLY` | `AUTO_ALLOWED` | `watchlistId` | Executes normally | `watchlistId`, `itemCount`, `completeItemsCount`, `partialItemsCount`, `emptyItemsCount`, `perTickerQualityCount`, `suggestedRefreshActions` | Diagnostic-only; quality reflects persisted snapshots |
 | `getPortfolioDataQuality` | Data Quality Read | `READ_ONLY` | `AUTO_ALLOWED` | `portfolioId` | Executes normally | `portfolioId`, `holdingCount`, `missingFxIssuesCount`, `missingCurrencyIssuesCount`, `missingPriceIssuesCount`, `staleDataWarningCount`, `suggestedRefreshActions` | Diagnostic-only; complements risk snapshot |
 | `compareTickers` | Deterministic Scoring | `READ_ONLY` | `AUTO_ALLOWED` | `tickers` | Executes normally | `requestedTickers`, `comparedCount`, `highestScoreTicker`, `highestScore`, `warnings` | Comparison quality constrained by data completeness |
 | `getPortfolioRiskSnapshot` | Portfolio Risk Read | `READ_ONLY` | `AUTO_ALLOWED` | `portfolioId` | Executes normally | `concentrationRisksCount`, `holdingsMissingFxCount`, `holdingsUnsupportedCurrencyCount`, `topRisks`, `fxRateUsed` | Deterministic snapshot only; not advisory output |
 | `runPortfolioFullRefresh` | Portfolio Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | `portfolioId` | Planned action only, no writes/provider calls | `plannedOrExecuted`, `portfolioId`, `tickersProcessed`, `tickersFailed`, `warningCount` | Potentially expensive; execution breadth depends on options |
+| `refreshTickerResearchData` | Ticker Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | `ticker` | Uses `dryRunPlan`; returns planned sections without provider calls | `plannedOrExecuted`, `ticker`, `attemptedSections`, `failedSections`, `warningCount` | Per-section provider calls are non-blocking; warnings may be partial failures |
 | `refreshTickerAnalystData` | Analyst Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | `ticker` | Planned action only, no writes/provider calls | `plannedOrExecuted`, `ticker`, `snapshotsCreated`, `snapshotsUpdated`, `warningCount` | Provider availability/rate limits can affect result |
 | `refreshUsdCadFxRate` | FX Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | none | Planned action only, no writes/provider calls | `plannedOrExecuted`, `recordsCreated`, `recordsUpdated`, `recordsSkipped`, `warningCount` | Targets Bank of Canada USD/CAD series only |
 | `refreshWatchlistAnalystData` | Analyst Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | `watchlistId` | Planned action only, no writes/provider calls | `plannedOrExecuted`, `watchlistId`, `tickersProcessed`, `tickersFailed`, `tickersSkipped`, `warningCount` | Per-ticker partial failures are possible |
@@ -83,7 +87,7 @@ Global policy:
 | `refreshDiscoveryCategory` | Discovery Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | `category` | Planned action only, no writes/provider calls | `plannedOrExecuted`, `category`, `recordsCreated`, `warningCount` | Discovery source quality and throughput vary |
 | `refreshGdeltRiskContext` | Geopolitical Refresh | `REFRESH` | `CONFIRMATION_REQUIRED` | none | Dry-run returns planned query profiles only; no writes/provider calls | `plannedOrExecuted`, `queriesProcessed`, `queriesFailed`, `eventsCreated`, `warningCount`, bounded `failedQueries` | Query throttling/partial failures may occur; failure codes are preserved |
 | `generateTickerReport` | Report Mutation | `MUTATION` | `CONFIRMATION_REQUIRED` | `ticker` | Uses `dryRunPlan`; returns context preview and selected options without writes | `plannedOrExecuted`, `reportId`, `recommendation`, `reportMode`, `fallbackUsed`, `predictionCount`, `warningCount`, `dataGapCount`, `modelName` | OpenAI path may fallback deterministically; writes report/prediction rows when not dry-run |
-| `addTickerToWatchlist` | Watchlist Mutation | `MUTATION` | `CONFIRMATION_REQUIRED` | `watchlistId`, `ticker` | Planned write only, no DB mutation | `plannedOrExecuted`, `itemId`, `watchlistId`, `ticker` | Defaults source/status/priority when omitted |
+| `addTickerToWatchlist` | Watchlist Mutation | `MUTATION` | `CONFIRMATION_REQUIRED` | `watchlistId`, `ticker` | Planned write only, no DB mutation | `plannedOrExecuted`, `itemId`, `watchlistId`, `ticker` | Defaults source/status/priority when omitted; accepts optional `addedReason` |
 | `updateWatchlistItem` | Watchlist Mutation | `MUTATION` | `CONFIRMATION_REQUIRED` | `itemId` + at least one update field | Planned write only, no DB mutation | `plannedOrExecuted`, `itemId`, `watchlistId`, `ticker` | Requires at least one mutable field |
 | `removeWatchlistItem` | Watchlist Mutation | `MUTATION` | `CONFIRMATION_REQUIRED` | `itemId` | Planned delete only, no DB mutation | `plannedOrExecuted`, `itemId`, `watchlistId`, `ticker` | Hard removal outcome depends on item existence |
 | `rebalancePaperPortfolio` | High-Impact Placeholder | `HIGH_IMPACT` | `DISABLED` | `portfolioId` | Not executable | no execution summary (blocked by policy) | Intentionally disabled in this phase |
@@ -124,3 +128,31 @@ If a tool is `DISABLED`, execution fails with:
 - `GET /api/agent/tools`
 - `POST /api/agent/tools/:toolName/execute`
 - `POST /api/agent/chat`
+
+## Canonical Ticker Intelligence Toolset
+
+The canonical ticker-intelligence tool list for backend agent planning/execution is:
+
+- `resolveTickerOrCompany`
+- `getTickerResearchBundle`
+- `getTickerDataQuality`
+- `scoreTickerResearch`
+- `generateTickerReport`
+- `compareTickers`
+- `rankPortfolioHoldings`
+- `rankWatchlist`
+- `rankDiscoveryCandidates`
+- `screenMarketCandidates`
+- `addTickerToWatchlist`
+- `refreshTickerResearchData`
+- `refreshTickerAnalystData`
+
+Auth and ownership behavior:
+
+- Tools that include `portfolioId` or `watchlistId` are ownership-scoped by route guards under `AUTH_ENABLED=true`.
+- Tools without ownership IDs remain read-only and cannot mutate ownership state.
+
+Dry-run behavior:
+
+- `READ_ONLY` tools execute normally.
+- `REFRESH`/`MUTATION` tools return planned actions in dry-run mode without provider calls or database writes.
